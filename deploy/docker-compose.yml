@@ -1,0 +1,103 @@
+# kotoji production-shaped Compose stack: postgres + backend (RUN_MODE=all) +
+# frontend. Build contexts are the sibling backend/ and frontend/ dirs (this file
+# lives in deploy/). Copy deploy/.env.example to deploy/.env first.
+#
+# Dev overlay: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+name: kotoji
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kotoji}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kotoji}
+      POSTGRES_DB: ${POSTGRES_DB:-kotoji}
+    volumes:
+      # postgres:18+ stores data in a major-version subdir under /var/lib/postgresql;
+      # mount the volume at that parent (NOT .../data, which 18+ rejects as the old layout).
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # Gate `backend` start on a ready DB so boot-time migrations don't race.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kotoji} -d ${POSTGRES_DB:-kotoji}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: ../deploy/backend.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KOTOJI_ENV: ${KOTOJI_ENV:-production}
+      KOTOJI_RUN_MODE: all
+      KOTOJI_CONTROL_ADDR: ":8080"
+      KOTOJI_SERVE_ADDR: ":8081"
+      KOTOJI_BASE_DOMAIN: ${KOTOJI_BASE_DOMAIN}
+      KOTOJI_CONTROL_BASE_URL: ${KOTOJI_CONTROL_BASE_URL}
+      # Default DSN points at the postgres service; override via .env for real creds.
+      KOTOJI_DATABASE_URL: ${KOTOJI_DATABASE_URL:-postgres://kotoji:kotoji@postgres:5432/kotoji?sslmode=disable}
+      KOTOJI_DB_MAX_CONNS: ${KOTOJI_DB_MAX_CONNS:-10}
+      KOTOJI_DATA_DIR: /data
+      KOTOJI_GIT_BIN: git
+      KOTOJI_AUTH_MODE: ${KOTOJI_AUTH_MODE:-oidc}
+      KOTOJI_AUTH_OIDC_ISSUER: ${KOTOJI_AUTH_OIDC_ISSUER:-https://accounts.google.com}
+      KOTOJI_AUTH_OIDC_CLIENT_ID: ${KOTOJI_AUTH_OIDC_CLIENT_ID:-}
+      KOTOJI_AUTH_OIDC_CLIENT_SECRET: ${KOTOJI_AUTH_OIDC_CLIENT_SECRET:-}
+      KOTOJI_AUTH_OIDC_REDIRECT_URL: ${KOTOJI_AUTH_OIDC_REDIRECT_URL:-}
+      KOTOJI_AUTH_GOOGLE_HD: ${KOTOJI_AUTH_GOOGLE_HD:-}
+      KOTOJI_AUTH_ALLOWED_EMAILS: ${KOTOJI_AUTH_ALLOWED_EMAILS:-}
+      KOTOJI_AUTH_ADMIN_PASSWORD: ${KOTOJI_AUTH_ADMIN_PASSWORD:-}
+      KOTOJI_AUTH_ADMIN_EMAIL: ${KOTOJI_AUTH_ADMIN_EMAIL:-admin@kotoji.local}
+      KOTOJI_SESSION_COOKIE_DOMAIN: ${KOTOJI_SESSION_COOKIE_DOMAIN:-}
+      KOTOJI_COOKIE_SECURE: ${KOTOJI_COOKIE_SECURE:-true}
+      KOTOJI_MCP_ENABLED: ${KOTOJI_MCP_ENABLED:-true}
+      KOTOJI_GITHUB_MIRROR_ENABLED: ${KOTOJI_GITHUB_MIRROR_ENABLED:-false}
+      KOTOJI_GITHUB_APP_TOKEN: ${KOTOJI_GITHUB_APP_TOKEN:-}
+      KOTOJI_GITHUB_PAT: ${KOTOJI_GITHUB_PAT:-}
+      KOTOJI_GITHUB_ORG: ${KOTOJI_GITHUB_ORG:-}
+      KOTOJI_GITHUB_WEBHOOK_SECRET: ${KOTOJI_GITHUB_WEBHOOK_SECRET:-}
+      KOTOJI_PUBLISHED_PUBLIC: ${KOTOJI_PUBLISHED_PUBLIC:-true}
+      KOTOJI_TRUST_PROXY_HEADERS: ${KOTOJI_TRUST_PROXY_HEADERS:-true}
+      KOTOJI_LOG_LEVEL: ${KOTOJI_LOG_LEVEL:-info}
+      KOTOJI_LOG_FORMAT: ${KOTOJI_LOG_FORMAT:-json}
+    volumes:
+      # SiteService writes; the data plane reads. Mounted at the configured DATA_DIR.
+      - kotojidata:/data
+    ports:
+      - "8080:8080" # control plane (API/auth/MCP)
+      - "8081:8081" # data plane (static hosting)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../deploy/frontend.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      # Same-origin via the proxy by default; the browser calls /api directly.
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-kotoji}
+      NEXT_PUBLIC_AUTH_MODE: ${NEXT_PUBLIC_AUTH_MODE:-oidc}
+      NEXT_PUBLIC_DEFAULT_THEME: ${NEXT_PUBLIC_DEFAULT_THEME:-system}
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
+  kotojidata:

@@ -1,0 +1,36 @@
+# Development overlay. Apply on top of the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# It adds adminer (a lightweight DB UI) and relaxes the backend to dev-friendly
+# settings: development environment, no-auth mode, and insecure cookies (http).
+
+name: kotoji
+
+services:
+  backend:
+    environment:
+      KOTOJI_ENV: development
+      # No-auth mode for local development (rejected when KOTOJI_ENV=production).
+      KOTOJI_AUTH_MODE: ${KOTOJI_AUTH_MODE:-none}
+      # Cookies over plain http during dev.
+      KOTOJI_COOKIE_SECURE: "false"
+      KOTOJI_LOG_LEVEL: ${KOTOJI_LOG_LEVEL:-debug}
+      KOTOJI_LOG_FORMAT: ${KOTOJI_LOG_FORMAT:-text}
+      KOTOJI_BASE_DOMAIN: ${KOTOJI_BASE_DOMAIN:-hosting.localhost}
+      KOTOJI_CONTROL_BASE_URL: ${KOTOJI_CONTROL_BASE_URL:-http://hosting.localhost:8080}
+
+  frontend:
+    environment:
+      NODE_ENV: development
+      NEXT_PUBLIC_AUTH_MODE: ${NEXT_PUBLIC_AUTH_MODE:-none}
+
+  adminer:
+    image: adminer:5
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "8090:8080"
