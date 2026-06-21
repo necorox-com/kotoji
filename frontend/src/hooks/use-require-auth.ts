@@ -4,10 +4,12 @@
  * useRequireAuth — client-side auth gate (design.md §4.3 AuthGate).
  *
  * Reads the session via useMe() (GET /api/me). While resolving, callers show a
- * spinner. On 401 (isUnauthenticated) we redirect to /auth/login with a `next`
- * param so the backend can bounce the user back after OIDC. Optionally requires
- * instance-admin (users.isAdmin) for the Admin routes; non-admins are sent to
- * /dashboard (design.md §3.5 Admin: admin-guarded).
+ * spinner. On 401 (isUnauthenticated) we redirect to the /login PAGE with a
+ * `next` param. /login reads /api/config and renders the entry for the active
+ * auth mode (password form, "Continue with Google", or dev) — it must NOT be the
+ * backend /auth/login endpoint, which 4xxs in password/none mode. Optionally
+ * requires instance-admin (users.isAdmin) for the Admin routes; non-admins are
+ * sent to /dashboard (design.md §3.5 Admin: admin-guarded).
  *
  * NOTE: this complements (does not replace) the server-side guard the (app)
  * layout performs; it covers client navigations and session expiry mid-session.
@@ -21,12 +23,12 @@ import { isUnauthenticated } from "@/lib/api/error";
 export interface UseRequireAuthOptions {
   /** Require instance-admin (users.isAdmin). Default false. */
   requireAdmin?: boolean;
-  /** Where to send unauthenticated users (the backend login entry). */
+  /** Where to send unauthenticated users (the frontend /login page). */
   loginPath?: string;
 }
 
 export function useRequireAuth(options: UseRequireAuthOptions = {}) {
-  const { requireAdmin = false, loginPath = "/auth/login" } = options;
+  const { requireAdmin = false, loginPath = "/login" } = options;
   const router = useRouter();
   const pathname = usePathname();
   const query = useMe();
@@ -36,8 +38,9 @@ export function useRequireAuth(options: UseRequireAuthOptions = {}) {
     // Not authenticated -> bounce to login, preserving the intended target.
     if (isError && isUnauthenticated(error)) {
       const next = encodeURIComponent(pathname || "/dashboard");
-      // Full navigation (not router.push) so we hit the backend OIDC entry.
-      window.location.assign(`${loginPath}?next=${next}`);
+      // Go to the frontend /login page (it picks the provider UI from
+      // /api/config); never the backend /auth/login endpoint directly.
+      router.replace(`${loginPath}?next=${next}`);
       return;
     }
     // Authenticated but not an admin on an admin-only route -> dashboard.
