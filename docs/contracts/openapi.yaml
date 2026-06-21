@@ -1,0 +1,1214 @@
+openapi: 3.1.0
+info:
+  title: kotoji Control-Plane API
+  version: 1.0.0
+  description: >
+    The Go <-> Next REST/JSON control-plane API for kotoji. This spec is the SOURCE OF TRUTH
+    for the Go <-> TS type sync: Go types are generated via oapi-codegen (-generate types) and
+    the TS client via openapi-typescript + openapi-fetch. A CI drift gate fails on staleness.
+
+    All schemas match the canonical Go core types frozen in CANONICAL.md. Wire field names are
+    fixed there (e.g. baseSha, expected, actual, changedPaths). The data plane (static serving
+    of *.hosting.example.com) is NOT part of this API and is specified in routing-and-serving.md.
+  license:
+    name: AGPL-3.0-or-later
+    identifier: AGPL-3.0-or-later
+servers:
+  - url: https://hosting.example.com
+    description: Production control host (path-based split behind the proxy)
+  - url: http://kotoji.localhost:8080
+    description: Local dev
+
+tags:
+  - name: auth
+    description: Session, identity, and instance config
+  - name: sites
+    description: Site lifecycle
+  - name: members
+    description: Per-site membership and roles
+  - name: tokens
+    description: Per-site MCP/API tokens
+  - name: branches
+    description: Git branches
+  - name: files
+    description: File read/write/delete + zip import
+  - name: history
+    description: Commit/save, publish, diff, log, rollback
+  - name: webhook
+    description: GitHub webhook ingress
+
+security:
+  - sessionCookie: []
+  - bearerPAT: []
+
+paths:
+  # ===================================================================== auth
+  /api/me:
+    get:
+      tags: [auth]
+      operationId: getMe
+      summary: Current authenticated user + instance role context
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/config:
+    get:
+      tags: [auth]
+      operationId: getConfig
+      summary: Public-safe instance config (upload limits, handle rules, auth modes)
+      security: []
+      responses:
+        "200":
+          description: Instance config
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InstanceConfig" }
+
+  /auth/login:
+    get:
+      tags: [auth]
+      operationId: authLogin
+      summary: Begin OIDC login (302 to the IdP)
+      security: []
+      parameters:
+        - name: next
+          in: query
+          required: false
+          schema: { type: string, default: "/dashboard" }
+          description: Post-login redirect target (validated server-side).
+      responses:
+        "302":
+          description: Redirect to the OIDC authorization endpoint
+          headers:
+            Location: { schema: { type: string } }
+
+  /auth/callback:
+    get:
+      tags: [auth]
+      operationId: authCallback
+      summary: OIDC callback (verifies state, sets the __Host- session cookie, 302s to next)
+      security: []
+      parameters:
+        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses:
+        "302":
+          description: Login complete; session cookie set
+          headers:
+            Location: { schema: { type: string } }
+            Set-Cookie: { schema: { type: string }, description: "__Host-kotoji_session" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      operationId: authLogout
+      summary: Destroy the server session + clear the cookie
+      responses:
+        "204":
+          description: Logged out
+          headers:
+            Set-Cookie: { schema: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ===================================================================== sites
+  /api/sites:
+    get:
+      tags: [sites]
+      operationId: listSites
+      summary: List sites visible to the caller (owned or member)
+      responses:
+        "200":
+          description: Site list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sites]
+                properties:
+                  sites:
+                    type: array
+                    items: { $ref: "#/components/schemas/SiteSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [sites]
+      operationId: createSite
+      summary: Create a site (empty draft, or seed via a subsequent zip import)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSiteRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Site" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Caller lacks can_create_sites or exceeds the site quota
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    get:
+      tags: [sites]
+      operationId: getSite
+      summary: Get one site (current handle only; old handles 404 here)
+      responses:
+        "200":
+          description: Site detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Site" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [sites]
+      operationId: updateSite
+      summary: Update site settings (visibility, publishMode, description, webRoot) - owner only
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateSiteRequest" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Site" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [sites]
+      operationId: deleteSite
+      summary: Soft-delete a site (owner only; 30-day grace, then reaper reclaims disk)
+      responses:
+        "204": { description: Soft-deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/sites/{handle}/rename:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    post:
+      tags: [sites]
+      operationId: renameSite
+      summary: Rename the handle (owner only; records a redirect; files do not move)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [newHandle]
+              properties:
+                newHandle: { $ref: "#/components/schemas/HandleString" }
+      responses:
+        "200":
+          description: Renamed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Site" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  # ===================================================================== members
+  /api/sites/{handle}/members:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    get:
+      tags: [members]
+      operationId: listMembers
+      summary: List site members + roles
+      responses:
+        "200":
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items: { $ref: "#/components/schemas/Member" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [members]
+      operationId: addMember
+      summary: Add or upsert a member by email (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, role]
+              properties:
+                email: { type: string, format: email }
+                role: { $ref: "#/components/schemas/SiteRole" }
+      responses:
+        "200":
+          description: Member added/updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/members/{userId}:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/UserId"
+    patch:
+      tags: [members]
+      operationId: updateMemberRole
+      summary: Change a member's role (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/SiteRole" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Member" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [members]
+      operationId: removeMember
+      summary: Remove a member (owner only; cannot remove the sole owner)
+      responses:
+        "204": { description: Removed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ===================================================================== tokens
+  /api/sites/{handle}/tokens:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    get:
+      tags: [tokens]
+      operationId: listTokens
+      summary: List site tokens (never returns the secret or hash)
+      responses:
+        "200":
+          description: Tokens
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tokens]
+                properties:
+                  tokens:
+                    type: array
+                    items: { $ref: "#/components/schemas/TokenSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [tokens]
+      operationId: createToken
+      summary: Issue a site token (owner only; plaintext returned ONCE)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTokenRequest" }
+      responses:
+        "201":
+          description: Created; plaintext shown once
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedToken" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/tokens/{tokenId}:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/TokenId"
+    delete:
+      tags: [tokens]
+      operationId: revokeToken
+      summary: Revoke a site token (owner only)
+      responses:
+        "204": { description: Revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ===================================================================== branches
+  /api/sites/{handle}/branches:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    get:
+      tags: [branches]
+      operationId: listBranches
+      summary: List branches (enumerated from git, not the DB)
+      responses:
+        "200":
+          description: Branches
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [branches]
+                properties:
+                  branches:
+                    type: array
+                    items: { $ref: "#/components/schemas/Branch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [branches]
+      operationId: createBranch
+      summary: Create a host-safe branch (feature-<user>-<slug>) from a ref
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, from]
+              properties:
+                name: { $ref: "#/components/schemas/BranchString" }
+                from: { type: string, description: "source branch name or SHA" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Branch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/branches/{branch}:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    delete:
+      tags: [branches]
+      operationId: deleteBranch
+      summary: Delete a branch (never published/draft)
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  # ===================================================================== files
+  /api/sites/{handle}/branches/{branch}/files:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    get:
+      tags: [files]
+      operationId: listFiles
+      summary: List files under a directory at a branch tip or ref
+      parameters:
+        - { name: dir, in: query, required: false, schema: { type: string, default: "" } }
+        - { name: ref, in: query, required: false, schema: { type: string }, description: "commit SHA; default = branch tip" }
+        - { name: recursive, in: query, required: false, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          description: File listing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileListing" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/branches/{branch}/file:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    get:
+      tags: [files]
+      operationId: readFile
+      summary: Read one file; `sha` is the commit lock-token to echo as baseSha on write
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string } }
+        - { name: ref, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: File content
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FileContent" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    put:
+      tags: [files]
+      operationId: writeFile
+      summary: Write one file with optimistic locking (baseSha REQUIRED); published not writable
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WriteFileRequest" }
+      responses:
+        "200":
+          description: Written (and committed unless commit=false)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriteResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+    delete:
+      tags: [files]
+      operationId: deleteFile
+      summary: Delete one file with optimistic locking
+      parameters:
+        - { name: path, in: query, required: true, schema: { type: string } }
+        - { name: baseSha, in: query, required: true, schema: { type: string } }
+        - { name: message, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: Deleted (new commit)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommitInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/branches/{branch}/import:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    post:
+      tags: [files]
+      operationId: importZip
+      summary: Upload a zip; REPLACES the branch tree as one commit. multipart form.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: the .zip archive
+                baseSha:
+                  type: string
+                  description: REQUIRED unless the branch has no commits yet (initial seed)
+                message:
+                  type: string
+      responses:
+        "200":
+          description: Imported (new commit)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommitInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  # ===================================================================== history
+  /api/sites/{handle}/branches/{branch}/commit:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    post:
+      tags: [history]
+      operationId: commit
+      summary: Commit ("save") the staged working set as one commit (multi-file batch)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommitRequest" }
+      responses:
+        "200":
+          description: Committed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WriteResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/publish:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    post:
+      tags: [history]
+      operationId: publish
+      summary: Promote a source branch to published (direct mode) with optimistic locking
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishRequest" }
+      responses:
+        "200":
+          description: Published
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublishResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Stale base SHA (conflict) or publish merge conflict (publish_conflict)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ConflictEnvelope"
+                  - $ref: "#/components/schemas/PublishConflictEnvelope"
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/diff:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    get:
+      tags: [history]
+      operationId: getDiff
+      summary: Diff two refs (or a ref vs its working tree when `to` is omitted)
+      parameters:
+        - { name: from, in: query, required: true, schema: { type: string } }
+        - { name: to, in: query, required: false, schema: { type: string }, description: "omit => working tree of from's branch" }
+        - { name: path, in: query, required: false, schema: { type: string } }
+        - { name: contextLines, in: query, required: false, schema: { type: integer, default: 3 } }
+        - { name: nameStatus, in: query, required: false, schema: { type: boolean, default: false } }
+      responses:
+        "200":
+          description: Diff
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiffResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/branches/{branch}/log:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    get:
+      tags: [history]
+      operationId: getLog
+      summary: Commit history (newest first), cursor-paginated by `before`
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, default: 50, minimum: 1, maximum: 500 } }
+        - { name: before, in: query, required: false, schema: { type: string }, description: "cursor SHA (exclusive)" }
+        - { name: path, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: Log
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LogResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  /api/sites/{handle}/branches/{branch}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+      - $ref: "#/components/parameters/Branch"
+    post:
+      tags: [history]
+      operationId: rollback
+      summary: Restore a branch to an ancestor commit's tree as a NEW forward commit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RollbackRequest" }
+      responses:
+        "200":
+          description: Rolled back (new commit)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommitInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
+  # ===================================================================== webhook
+  /api/webhooks/github:
+    post:
+      tags: [webhook]
+      operationId: githubWebhook
+      summary: GitHub webhook ingress (HMAC-verified; advances published via fast-forward)
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-GitHub-Event
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Raw GitHub webhook payload (treated as untrusted until HMAC-verified)
+      responses:
+        "204": { description: Accepted (work may continue async) }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  # --------------------------------------------------------------- security
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-kotoji_session
+      description: Opaque server-side session id (host-only __Host- cookie). Browser/dashboard auth.
+    bearerPAT:
+      type: http
+      scheme: bearer
+      bearerFormat: kotoji_pat
+      description: >
+        Per-site personal access token "kotoji_pat_<base62>". Scope is the intersection of the
+        token scopes {read,write,publish} and the creating member's role (see CANONICAL.md §6).
+
+  # --------------------------------------------------------------- parameters
+  parameters:
+    Handle:
+      name: handle
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/HandleString" }
+    Branch:
+      name: branch
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/BranchString" }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TokenId:
+      name: tokenId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  # --------------------------------------------------------------- responses
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: Not authenticated
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: Authenticated but not permitted
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Conflict:
+      description: Optimistic-lock conflict, handle taken, or similar 409
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ConflictEnvelope" }
+    TooLarge:
+      description: Payload/zip too large
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    UnsupportedMediaType:
+      description: Disallowed file extension / media type
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ValidationFailed:
+      description: Validation failed (handle/path/branch/baseSha rules)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  # --------------------------------------------------------------- schemas
+  schemas:
+    HandleString:
+      type: string
+      pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+      minLength: 1
+      maxLength: 63
+      description: DNS-safe handle. Create-time min length is 3; resolver accepts 1-63. No "--".
+      example: expense-calc
+    BranchString:
+      type: string
+      pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+      maxLength: 63
+      description: Host-safe branch name. "published"/"draft" reserved; previews are feature-<user>-<slug>.
+      example: draft
+    Sha:
+      type: string
+      pattern: "^[0-9a-f]{40}([0-9a-f]{24})?$"
+      description: Full git commit SHA (40 hex SHA-1 or 64 hex SHA-256).
+
+    SiteRole:
+      type: string
+      enum: [owner, editor, viewer]
+    SiteVisibility:
+      type: string
+      enum: [public, internal, private]
+    PublishMode:
+      type: string
+      enum: [direct, request]
+    TokenScope:
+      type: string
+      enum: [read, write, publish]
+    WriteSource:
+      type: string
+      enum: [upload, editor, mcp, system]
+    AuthMode:
+      type: string
+      enum: [oidc, password, none]
+
+    # ---------- error envelopes ----------
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - unauthenticated
+                - forbidden
+                - validation
+                - conflict
+                - not_found
+                - handle_taken
+                - publish_conflict
+                - branch_exists
+                - nothing_to_commit
+                - too_large
+                - unsupported_media_type
+                - rate_limited
+                - quota_exceeded
+                - internal
+            message: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+              description: Code-specific structured detail (e.g. validation field, retry hint).
+    ConflictEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code: { type: string, enum: [conflict, handle_taken, branch_exists, nothing_to_commit] }
+            message: { type: string }
+            details: { $ref: "#/components/schemas/ConflictError" }
+    ConflictError:
+      type: object
+      description: Optimistic-lock conflict detail (frozen field names; CANONICAL.md §8).
+      required: [branch, expected, actual]
+      properties:
+        branch: { $ref: "#/components/schemas/BranchString" }
+        expected: { type: string, description: "the baseSha the caller sent" }
+        actual: { type: string, description: "the real current branch tip" }
+        changedPaths:
+          type: array
+          items: { type: string }
+    PublishConflictEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, details]
+          properties:
+            code: { type: string, enum: [publish_conflict] }
+            message: { type: string }
+            details:
+              type: object
+              required: [paths]
+              properties:
+                paths:
+                  type: array
+                  items: { type: string }
+
+    # ---------- auth ----------
+    Me:
+      type: object
+      required: [user, authMode]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        authMode: { $ref: "#/components/schemas/AuthMode" }
+    User:
+      type: object
+      required: [id, email, displayName, isAdmin, canCreateSites]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        avatarUrl: { type: ["string", "null"] }
+        isAdmin: { type: boolean, description: "instance superuser (separate axis from site roles)" }
+        canCreateSites: { type: boolean }
+    InstanceConfig:
+      type: object
+      required:
+        [maxUploadBytes, zipMaxFiles, zipMaxTotalBytes, allowedExtensions,
+         handleMinLen, handleMaxLen, reservedHandles, baseDomain, authMode, defaultPublishMode]
+      properties:
+        maxUploadBytes: { type: integer, format: int64 }
+        zipMaxFiles: { type: integer }
+        zipMaxTotalBytes: { type: integer, format: int64 }
+        zipMaxEntryBytes: { type: integer, format: int64 }
+        zipMaxRatio: { type: integer }
+        allowedExtensions:
+          type: array
+          items: { type: string }
+        handleMinLen: { type: integer }
+        handleMaxLen: { type: integer }
+        reservedHandles:
+          type: array
+          items: { type: string }
+        baseDomain: { type: string, example: hosting.example.com }
+        authMode: { $ref: "#/components/schemas/AuthMode" }
+        defaultPublishMode: { $ref: "#/components/schemas/PublishMode" }
+
+    # ---------- sites ----------
+    Site:
+      type: object
+      required:
+        [id, handle, ownerId, visibility, defaultBranch, publishMode, webRoot,
+         hasPublished, description, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        handle: { $ref: "#/components/schemas/HandleString" }
+        ownerId: { type: string, format: uuid }
+        visibility: { $ref: "#/components/schemas/SiteVisibility" }
+        defaultBranch: { $ref: "#/components/schemas/BranchString" }
+        githubRepo: { type: ["string", "null"], example: "necorox-com/expense-calc" }
+        publishMode: { $ref: "#/components/schemas/PublishMode" }
+        webRoot: { type: string, description: "served subdir; empty = repo root (v1)" }
+        hasPublished: { type: boolean, description: "derived: publishedSha is set" }
+        publishedSha: { type: ["string", "null"] }
+        publishedAt: { type: ["string", "null"], format: date-time }
+        description: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    SiteSummary:
+      type: object
+      required: [id, handle, visibility, hasPublished, updatedAt, role]
+      properties:
+        id: { type: string, format: uuid }
+        handle: { $ref: "#/components/schemas/HandleString" }
+        visibility: { $ref: "#/components/schemas/SiteVisibility" }
+        defaultBranch: { $ref: "#/components/schemas/BranchString" }
+        publishedSha: { type: ["string", "null"] }
+        publishedAt: { type: ["string", "null"], format: date-time }
+        hasPublished: { type: boolean }
+        description: { type: string }
+        updatedAt: { type: string, format: date-time }
+        role:
+          $ref: "#/components/schemas/SiteRole"
+    CreateSiteRequest:
+      type: object
+      required: [handle]
+      properties:
+        handle: { $ref: "#/components/schemas/HandleString" }
+        visibility: { $ref: "#/components/schemas/SiteVisibility", default: private }
+        publishMode: { $ref: "#/components/schemas/PublishMode", default: direct }
+        description: { type: string, default: "" }
+        githubRepo: { type: ["string", "null"] }
+    UpdateSiteRequest:
+      type: object
+      properties:
+        visibility: { $ref: "#/components/schemas/SiteVisibility" }
+        publishMode: { $ref: "#/components/schemas/PublishMode" }
+        description: { type: string }
+        webRoot: { type: string }
+        githubRepo: { type: ["string", "null"] }
+
+    # ---------- members ----------
+    Member:
+      type: object
+      required: [userId, email, displayName, role]
+      properties:
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { $ref: "#/components/schemas/SiteRole" }
+        createdAt: { type: string, format: date-time }
+
+    # ---------- tokens ----------
+    TokenSummary:
+      type: object
+      required: [id, name, tokenPrefix, scopes, canCreateSites, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        tokenPrefix: { type: string, description: "first 12 chars of the plaintext" }
+        scopes:
+          type: array
+          items: { $ref: "#/components/schemas/TokenScope" }
+        canCreateSites: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: ["string", "null"], format: date-time }
+        expiresAt: { type: ["string", "null"], format: date-time }
+        revokedAt: { type: ["string", "null"], format: date-time }
+    CreateTokenRequest:
+      type: object
+      required: [name, scopes]
+      properties:
+        name: { type: string }
+        scopes:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/TokenScope" }
+        canCreateSites: { type: boolean, default: false }
+        expiresAt: { type: ["string", "null"], format: date-time }
+    CreatedToken:
+      allOf:
+        - $ref: "#/components/schemas/TokenSummary"
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The plaintext "kotoji_pat_..." secret. Shown ONCE; never returned again.
+
+    # ---------- branches ----------
+    Branch:
+      type: object
+      required: [name, headSha, isPublished, previewSubdomain]
+      properties:
+        name: { $ref: "#/components/schemas/BranchString" }
+        headSha: { $ref: "#/components/schemas/Sha" }
+        isPublished: { type: boolean }
+        lastCommit: { $ref: "#/components/schemas/CommitInfo" }
+        previewSubdomain:
+          type: string
+          description: 'host label fragment: "{handle}" for published, "{handle}--{branch}" otherwise'
+
+    # ---------- files ----------
+    FileEntry:
+      type: object
+      required: [path, name, isDir, size, mode]
+      properties:
+        path: { type: string, description: "repo-relative, forward slashes, no leading /" }
+        name: { type: string }
+        isDir: { type: boolean }
+        size: { type: integer, format: int64 }
+        mode: { type: string, example: "100644" }
+    FileListing:
+      type: object
+      required: [branch, ref, files]
+      properties:
+        branch: { $ref: "#/components/schemas/BranchString" }
+        ref: { $ref: "#/components/schemas/Sha", description: "the resolved SHA the listing reflects" }
+        files:
+          type: array
+          items: { $ref: "#/components/schemas/FileEntry" }
+    FileContent:
+      type: object
+      required: [path, sha, blobSha, encoding, content, size, isBinary]
+      properties:
+        path: { type: string }
+        sha:
+          $ref: "#/components/schemas/Sha"
+          description: COMMIT SHA the content was read at - echo as baseSha on write (the lock token).
+        blobSha: { type: string }
+        encoding: { type: string, enum: [utf-8, base64] }
+        content: { type: string, description: "utf-8 text or base64 per encoding" }
+        size: { type: integer, format: int64 }
+        isBinary: { type: boolean }
+        truncated: { type: boolean, default: false }
+    WriteFileRequest:
+      type: object
+      required: [path, content, baseSha]
+      properties:
+        path: { type: string }
+        content: { type: string }
+        encoding: { type: string, enum: [utf-8, base64], default: utf-8 }
+        baseSha:
+          type: string
+          description: REQUIRED commit SHA the edit is based on. Empty/stale => 409 conflict.
+        commit: { type: boolean, default: true }
+        message: { type: string }
+    WriteResult:
+      type: object
+      required: [path, branch, committed, commit, pushed]
+      properties:
+        path: { type: string }
+        branch: { $ref: "#/components/schemas/BranchString" }
+        committed: { type: boolean }
+        commit: { $ref: "#/components/schemas/Sha", description: "new tip; becomes the next baseSha" }
+        blobSha: { type: string }
+        pushed: { type: boolean, description: "mirror-push to GitHub succeeded (best-effort)" }
+        bytesWritten: { type: integer }
+        filesChanged: { type: integer }
+        noOp: { type: boolean, default: false }
+        warnings:
+          type: array
+          items: { type: string }
+
+    # ---------- history ----------
+    CommitInfo:
+      type: object
+      required: [sha, shortSha, message, authorName, authorEmail, committed, via]
+      properties:
+        sha: { $ref: "#/components/schemas/Sha" }
+        shortSha: { type: string }
+        message: { type: string }
+        authorName: { type: string }
+        authorEmail: { type: string }
+        committed: { type: string, format: date-time }
+        parents:
+          type: array
+          items: { type: string }
+        via: { $ref: "#/components/schemas/WriteSource" }
+    CommitRequest:
+      type: object
+      required: [baseSha]
+      properties:
+        baseSha: { type: string, description: "REQUIRED optimistic lock; current branch tip" }
+        message: { type: string }
+    PublishRequest:
+      type: object
+      required: [baseSha]
+      properties:
+        from: { $ref: "#/components/schemas/BranchString", default: draft }
+        baseSha: { type: string, description: "REQUIRED tip of `from` the publish is intended for" }
+        message: { type: string }
+    PublishResult:
+      type: object
+      required: [publishedCommit, from, fromCommit, pushed]
+      properties:
+        publishedCommit: { $ref: "#/components/schemas/Sha" }
+        publishedUrl: { type: string, format: uri }
+        from: { $ref: "#/components/schemas/BranchString" }
+        fromCommit: { $ref: "#/components/schemas/Sha" }
+        pushed: { type: boolean }
+        warnings:
+          type: array
+          items: { type: string }
+    DiffResult:
+      type: object
+      required: [fromSha, toSha, files]
+      properties:
+        fromSha: { type: string }
+        toSha: { type: string }
+        files:
+          type: array
+          items: { $ref: "#/components/schemas/FileDiff" }
+        truncated: { type: boolean, default: false }
+    FileDiff:
+      type: object
+      required: [path, status, additions, deletions, isBinary]
+      properties:
+        path: { type: string }
+        oldPath: { type: ["string", "null"], description: "set on rename" }
+        status: { type: string, enum: [added, modified, deleted, renamed] }
+        additions: { type: integer }
+        deletions: { type: integer }
+        isBinary: { type: boolean }
+        unifiedPatch: { type: string, description: "empty if binary or name-status mode" }
+    LogResult:
+      type: object
+      required: [branch, commits]
+      properties:
+        branch: { $ref: "#/components/schemas/BranchString" }
+        commits:
+          type: array
+          items: { $ref: "#/components/schemas/CommitInfo" }
+        nextBefore: { type: ["string", "null"], description: "cursor for the next page; null at end" }
+    RollbackRequest:
+      type: object
+      required: [toSha, baseSha]
+      properties:
+        toSha:
+          type: string
+          description: ancestor commit on this branch whose tree to restore (non-ancestor => 404)
+        baseSha: { type: string, description: "REQUIRED current branch tip (optimistic lock)" }
+        message: { type: string }
