@@ -9,6 +9,9 @@ out/
 build/
 dist/
 
+# Go build output
+backend/bin/
+
 # Runtime data (hosted sites, git repos, uploads)
 /data/
 *.log
@@ -17,6 +20,10 @@ dist/
 .env
 .env.*
 !.env.example
+
+# necorox-specific deployment artifacts — keep OUT of the public OSS repo
+deploy/cf-dns-backup-*.json
+deploy/traefik-kotoji-dataplane.yml
 
 # Docker
 docker-compose.override.yml
