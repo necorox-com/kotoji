@@ -1,0 +1,226 @@
+/* src/app/globals.css
+ * kotoji design tokens (docs/design.md §2.2). Kaga-indigo brand primary,
+ * lacquer-red destructive, gold-leaf accent, warm "washi" neutrals. OKLCH is
+ * canonical; hex comments are the sRGB reference. Tailwind v4 CSS-first config
+ * via @theme inline; next-themes flips `.dark` on <html>. shadcn/base-ui
+ * variable conventions are preserved so the generated button.tsx works.
+ */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* radius base — 10px, soft but not pill (calm, paper-like) */
+  --radius: 0.625rem;
+
+  /* semantic — light */
+  --background: oklch(0.985 0.004 80); /* #faf9f7 washi canvas */
+  --foreground: oklch(0.27 0.012 70); /* #2a2620 body text */
+  --card: oklch(1 0 0); /* #ffffff */
+  --card-foreground: oklch(0.27 0.012 70);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.27 0.012 70);
+  --primary: oklch(0.45 0.11 268); /* #3a52a8 Kaga indigo */
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.955 0.005 80); /* #f3f1ee */
+  --secondary-foreground: oklch(0.34 0.012 70);
+  --muted: oklch(0.955 0.005 80);
+  --muted-foreground: oklch(0.55 0.012 70); /* #7c766c */
+  --accent: oklch(0.955 0.02 268); /* #eef2fb indigo-50 */
+  --accent-foreground: oklch(0.34 0.09 268);
+  --destructive: oklch(0.55 0.18 27); /* lacquer red */
+  --destructive-foreground: oklch(1 0 0);
+  --success: oklch(0.62 0.14 152);
+  --success-foreground: oklch(1 0 0);
+  --warning: oklch(0.72 0.14 70);
+  --warning-foreground: oklch(0.27 0.012 70);
+  --info: oklch(0.6 0.12 240);
+  --info-foreground: oklch(1 0 0);
+  --border: oklch(0.91 0.005 80); /* #e7e4df hairline */
+  --input: oklch(0.85 0.006 80); /* #d6d2cb */
+  --ring: oklch(0.55 0.1 268); /* indigo-400 focus ring */
+  --brand-gold: oklch(0.78 0.12 90); /* #d4af37 mark + success glint only */
+
+  /* editor surfaces (Monaco theme is generated from these) */
+  --editor-bg: var(--card);
+  --editor-fg: var(--foreground);
+
+  /* sidebar tokens (shadcn convention; kept on-brand) */
+  --sidebar: oklch(0.985 0.004 80);
+  --sidebar-foreground: oklch(0.27 0.012 70);
+  --sidebar-primary: oklch(0.45 0.11 268);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.955 0.02 268);
+  --sidebar-accent-foreground: oklch(0.34 0.09 268);
+  --sidebar-border: oklch(0.91 0.005 80);
+  --sidebar-ring: oklch(0.55 0.1 268);
+
+  /* chart ramp (reserved; indigo-leaning) */
+  --chart-1: oklch(0.45 0.11 268);
+  --chart-2: oklch(0.62 0.14 152);
+  --chart-3: oklch(0.72 0.14 70);
+  --chart-4: oklch(0.6 0.12 240);
+  --chart-5: oklch(0.78 0.12 90);
+}
+
+.dark {
+  --background: oklch(0.17 0.008 75); /* #19160f warm near-black */
+  --foreground: oklch(0.92 0.006 80);
+  --card: oklch(0.21 0.008 75);
+  --card-foreground: oklch(0.92 0.006 80);
+  --popover: oklch(0.26 0.008 75);
+  --popover-foreground: oklch(0.92 0.006 80);
+  --primary: oklch(0.66 0.1 268); /* lighter indigo for dark contrast */
+  --primary-foreground: oklch(0.2 0.05 268);
+  --secondary: oklch(0.26 0.008 75);
+  --secondary-foreground: oklch(0.92 0.006 80);
+  --muted: oklch(0.21 0.008 75);
+  --muted-foreground: oklch(0.68 0.01 75);
+  --accent: oklch(0.32 0.05 268);
+  --accent-foreground: oklch(0.85 0.06 268);
+  --destructive: oklch(0.7 0.14 25); /* lighter red, dark fg on filled */
+  --destructive-foreground: oklch(0.22 0.06 25);
+  --success: oklch(0.78 0.14 152);
+  --success-foreground: oklch(0.22 0.06 152);
+  --warning: oklch(0.8 0.13 75);
+  --warning-foreground: oklch(0.24 0.05 75);
+  --info: oklch(0.74 0.11 240);
+  --info-foreground: oklch(0.2 0.05 240);
+  --border: oklch(0.3 0.006 75);
+  --input: oklch(0.36 0.008 75);
+  --ring: oklch(0.66 0.1 268);
+  --brand-gold: oklch(0.82 0.1 90);
+
+  --editor-bg: oklch(0.165 0.01 70);
+  --editor-fg: oklch(0.92 0.006 80);
+
+  --sidebar: oklch(0.21 0.008 75);
+  --sidebar-foreground: oklch(0.92 0.006 80);
+  --sidebar-primary: oklch(0.66 0.1 268);
+  --sidebar-primary-foreground: oklch(0.2 0.05 268);
+  --sidebar-accent: oklch(0.32 0.05 268);
+  --sidebar-accent-foreground: oklch(0.85 0.06 268);
+  --sidebar-border: oklch(0.3 0.006 75);
+  --sidebar-ring: oklch(0.66 0.1 268);
+
+  --chart-1: oklch(0.66 0.1 268);
+  --chart-2: oklch(0.78 0.14 152);
+  --chart-3: oklch(0.8 0.13 75);
+  --chart-4: oklch(0.74 0.11 240);
+  --chart-5: oklch(0.82 0.1 90);
+}
+
+@theme inline {
+  /* expose semantic tokens to Tailwind utilities: bg-background, text-foreground, … */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand-gold: var(--brand-gold);
+
+  --color-editor-bg: var(--editor-bg);
+  --color-editor-fg: var(--editor-fg);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* radius scale */
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  /* fonts — JP-capable stacks (next/font vars set in layout.tsx) */
+  --font-sans: var(--font-inter), "Noto Sans JP", system-ui, sans-serif;
+  --font-mono: var(--font-jbmono), "Source Han Code JP", ui-monospace, monospace;
+  --font-heading: var(--font-sans);
+
+  /* typography scale (design.md §2.3) */
+  --text-display: 2.25rem;
+  --text-display--line-height: 2.75rem;
+  --text-h1: 1.875rem;
+  --text-h1--line-height: 2.375rem;
+  --text-h2: 1.5rem;
+  --text-h2--line-height: 2rem;
+  --text-h3: 1.25rem;
+  --text-h3--line-height: 1.75rem;
+  --text-h4: 1.125rem;
+  --text-h4--line-height: 1.625rem;
+  --text-body: 1rem;
+  --text-body--line-height: 1.625rem;
+  --text-code: 0.8125rem;
+  --text-code--line-height: 1.375rem;
+
+  /* shadow scale (soft, warm-tinted; design.md §2.6) */
+  --shadow-xs: 0 1px 2px oklch(0.27 0.01 70 / 0.06);
+  --shadow-sm: 0 1px 3px oklch(0.27 0.01 70 / 0.08), 0 1px 2px oklch(0.27 0.01 70 / 0.04);
+  --shadow-md: 0 4px 12px oklch(0.27 0.01 70 / 0.1);
+  --shadow-lg: 0 12px 32px oklch(0.27 0.01 70 / 0.14);
+
+  /* z-index layers (design.md §2.7) */
+  --z-sticky: 10;
+  --z-nav: 20;
+  --z-dropdown: 30;
+  --z-overlay: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  /* breakpoints (Tailwind defaults, restated for clarity) */
+  --breakpoint-sm: 40rem;
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+  --breakpoint-xl: 80rem;
+  --breakpoint-2xl: 96rem;
+
+  /* motion (design.md §2.10) */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 260ms;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  html {
+    @apply font-sans;
+  }
+}
