@@ -1,0 +1,14 @@
+# oapi-codegen configuration. Generates Go TYPES ONLY (no server/client) from
+# the hand-authored OpenAPI spec, into package `openapi`. Handlers are written by
+# hand (chi) against these generated DTOs so the Go side of the wire stays
+# spec-derived (see docs/architecture.md §7). The spec is authored in Phase 4;
+# until then this is just the config `make gen` will use.
+package: openapi
+output: internal/openapi/types.gen.go
+generate:
+  models: true
+  embedded-spec: false
+output-options:
+  skip-prune: true
+# Path to the OpenAPI 3.1 source of truth (created in Phase 4).
+# Used by `make gen`: oapi-codegen -config oapi-codegen.yaml ../docs/contracts/openapi.yaml
