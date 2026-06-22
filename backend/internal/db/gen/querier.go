@@ -36,6 +36,9 @@ type Querier interface {
 	CreateToken(ctx context.Context, arg CreateTokenParams) (CreateTokenRow, error)
 	// Janitor (system). Index on expires_at keeps this cheap.
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
+	// Remove one setting by key (idempotent: no-op when absent). Used to CLEAR a
+	// stored secret (the encrypted GitHub token) so it reverts to the env fallback.
+	DeleteInstanceSetting(ctx context.Context, key string) error
 	// Used on rename-back: drop a stale redirect of THIS site whose old_handle equals the
 	// handle we are renaming back to, so the namespace stays consistent.
 	DeleteRedirect(ctx context.Context, arg DeleteRedirectParams) error
@@ -125,6 +128,11 @@ type Querier interface {
 	ListSitesForUser(ctx context.Context, arg ListSitesForUserParams) ([]ListSitesForUserRow, error)
 	// Token management UI. NEVER returns the hash.
 	ListTokensForSite(ctx context.Context, siteID uuid.UUID) ([]ListTokensForSiteRow, error)
+	// Promote a user to instance admin (is_admin=true) WITHOUT touching
+	// can_create_sites. Used in PASSWORD mode only: the single admin IS the instance
+	// admin, so first-run setup and every password login promote that user. NEVER
+	// called for oidc/none users (they are governed by the admin screen instead).
+	PromoteUserAdmin(ctx context.Context, id uuid.UUID) error
 	RemoveMember(ctx context.Context, arg RemoveMemberParams) error
 	// Remove a non-baseline reserved handle (baseline protection is enforced in app code).
 	RemoveReserved(ctx context.Context, handle string) error

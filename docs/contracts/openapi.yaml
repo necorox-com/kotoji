@@ -36,6 +36,8 @@ tags:
     description: Commit/save, publish, diff, log, rollback
   - name: webhook
     description: GitHub webhook ingress
+  - name: admin
+    description: Instance-admin (is_admin) configuration
 
 security:
   - sessionCookie: []
@@ -788,6 +790,50 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  # ===================================================================== admin
+  /api/admin/github:
+    get:
+      tags: [admin]
+      operationId: adminGetGitHub
+      summary: Read the instance GitHub mirror config (admin only; secrets reduced to booleans)
+      description: >
+        Returns the EFFECTIVE GitHub mirror configuration (DB overrides env). It
+        is SECRET-SAFE: the push token and webhook secret are NEVER returned —
+        only `tokenSet`/`webhookSecretSet` "configured" booleans. Requires
+        is_admin (401 anonymous, 403 non-admin).
+      responses:
+        "200":
+          description: Effective GitHub mirror config (secret-safe)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GitHubAdminConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [admin]
+      operationId: adminPutGitHub
+      summary: Update the instance GitHub mirror config (admin only; token write-only)
+      description: >
+        Persists a PARTIAL update of the instance GitHub mirror config. Every
+        body field is optional: an absent field is left unchanged. The token is
+        WRITE-ONLY — supply it to set/rotate it; an empty or absent token KEEPS
+        the stored one; set `clearToken: true` to remove it. The response is the
+        same secret-safe view as GET (no secret values). Requires is_admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GitHubAdminConfigUpdate" }
+      responses:
+        "200":
+          description: Updated GitHub mirror config (secret-safe)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GitHubAdminConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
 components:
   # --------------------------------------------------------------- security
   securitySchemes:
@@ -1045,6 +1091,46 @@ components:
             password AND no admin password hash stored yet. When true the GUI shows
             the first-run admin-password setup screen and POST /auth/setup is open.
             Always false for oidc/none modes.
+
+    # ---------- admin (instance GitHub config) ----------
+    GitHubAdminConfig:
+      type: object
+      description: >
+        Secret-safe view of the instance GitHub mirror config (admin screen). The
+        token and webhook secret are NEVER returned — only "configured" booleans.
+        Values are the EFFECTIVE config (DB overrides env).
+      required: [enabled, org, tokenSet, webhookSecretSet]
+      properties:
+        enabled:
+          type: boolean
+          description: Whether GitHub mirroring is enabled (DB override of env).
+        org:
+          type: string
+          description: GitHub org/owner for created repos (empty if unset).
+        tokenSet:
+          type: boolean
+          description: True when a push token is configured (DB or env). The token itself is never returned.
+        webhookSecretSet:
+          type: boolean
+          description: True when a webhook HMAC secret is configured. The secret itself is never returned.
+    GitHubAdminConfigUpdate:
+      type: object
+      description: >
+        Partial update of the instance GitHub mirror config. All fields optional;
+        absent fields are unchanged. The token is write-only (empty/absent keeps
+        the stored one; clearToken removes it).
+      properties:
+        enabled: { type: boolean }
+        org: { type: string }
+        token:
+          type: string
+          description: New push PAT/app token (write-only; stored encrypted at rest). Empty/absent keeps the existing token.
+        webhookSecret:
+          type: string
+          description: New webhook HMAC secret (write-only). Empty/absent keeps the existing secret.
+        clearToken:
+          type: boolean
+          description: When true, remove the stored token (reverts to the env token if any).
 
     # ---------- sites ----------
     Site:

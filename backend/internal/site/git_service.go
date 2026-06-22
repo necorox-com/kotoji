@@ -33,7 +33,20 @@ type Config struct {
 	// any non-empty username with a token as the password; "x-access-token" is the
 	// canonical value for app/installation tokens, so we default to it.
 	GitHubUser string
-	Zip        ZipConfig
+	// MirrorToken, when non-nil, is the DYNAMIC source of the mirror credential,
+	// resolved PER git invocation (so a runtime change via the admin GUI takes
+	// effect without a restart). It returns the effective (token, user); an empty
+	// token means "unauthenticated" (mirror push to a private repo will fail, but
+	// we never block on a credential prompt). When nil the static GitHubToken /
+	// GitHubUser fields are used instead — preserving env-only deployments. The
+	// ctx is the in-flight request's so DB reads honor cancellation/deadlines.
+	MirrorToken func(ctx context.Context) (token, user string)
+	// MirrorEnabled, when non-nil, is the DYNAMIC "is mirroring on" gate resolved
+	// per write (DB-overrides-env via the composition root) so the admin can turn
+	// mirroring on/off at runtime. When nil the static MirrorOn flag is used (env-
+	// only deployments / tests). bestEffortMirror consults it before pushing.
+	MirrorEnabled func(ctx context.Context) bool
+	Zip           ZipConfig
 }
 
 // ZipConfig holds the ImportZip security limits (CANONICAL / site-service.md §7).

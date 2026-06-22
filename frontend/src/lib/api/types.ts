@@ -26,6 +26,10 @@ export type Me = S["Me"];
 export type User = S["User"];
 export type InstanceConfig = S["InstanceConfig"];
 
+// -------- admin (instance GitHub mirror config) --------
+export type GitHubAdminConfig = S["GitHubAdminConfig"];
+export type GitHubAdminConfigUpdate = S["GitHubAdminConfigUpdate"];
+
 // -------- sites --------
 export type Site = S["Site"];
 export type SiteSummary = S["SiteSummary"];

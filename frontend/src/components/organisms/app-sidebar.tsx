@@ -3,7 +3,8 @@
 /**
  * AppSidebar (organism) — design.md §3.3/§3.4.2. The primary app navigation:
  * Dashboard, Admin (instance superusers only — CANONICAL §6), a "Recent" list
- * of the caller's sites, and the "New site" CTA. Two presentations share one
+ * of the caller's sites, the "New site" CTA, and a Settings link pinned to the
+ * bottom (instance/account settings, /settings). Two presentations share one
  * inner body (`SidebarNav`):
  *  - desktop (`lg:`): a persistent left rail rendered by DashboardLayout,
  *  - phone/tablet: a Radix-style Sheet drawer opened from the TopNav hamburger
@@ -17,7 +18,7 @@
 import { usePathname } from "next/navigation";
 import NextLink from "next/link";
 import { useTranslations } from "next-intl";
-import { LayoutGrid, Plus, Shield } from "lucide-react";
+import { LayoutGrid, Plus, Settings, Shield } from "lucide-react";
 import {
   Sheet,
   SheetContent,
@@ -165,6 +166,19 @@ export function SidebarNav({ onNavigate, className }: SidebarNavProps) {
             </p>
           )}
         </div>
+      </div>
+
+      {/* Instance/account settings — pinned to the bottom of the rail. The
+          Recent section above is `flex-1`, so `mt-auto` keeps this row anchored
+          even when the list is short. */}
+      <div className="mt-auto border-t border-border pt-3">
+        <NavLink
+          href="/settings"
+          label={t("settings.title")}
+          icon={Settings}
+          active={isActive("/settings")}
+          onNavigate={onNavigate}
+        />
       </div>
     </nav>
   );

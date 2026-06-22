@@ -28,6 +28,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/preview"
 	"github.com/necorox-com/kotoji/backend/internal/ratelimit"
 	"github.com/necorox-com/kotoji/backend/internal/resolve"
+	"github.com/necorox-com/kotoji/backend/internal/secretbox"
 	"github.com/necorox-com/kotoji/backend/internal/serve"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 	"github.com/necorox-com/kotoji/backend/internal/webhook"
@@ -83,6 +84,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	a.store = store
 	a.ready = store // /readyz pings the DB
 
+	// At-rest secret box: encrypts the DB-stored GitHub PAT. The key is resolved
+	// from KOTOJI_SECRET_KEY (validated hex/base64 >=32 bytes) else derived via
+	// sha256 over the same stable server seed the preview-grant key uses. A short/
+	// undecodable env key silently falls back to the derived key (secretbox owns
+	// that policy). Construction only fails on a non-32-byte resolved key, which the
+	// resolver guarantees — so this is defensive, surfaced at boot rather than later.
+	box, berr := secretbox.New(secretKey(cfg))
+	if berr != nil {
+		store.Close()
+		return nil, berr
+	}
+	store.SetSecretBox(box)
+
 	// Provision the schema on boot so a fresh `docker compose up` needs zero manual
 	// migration steps. Advisory-locked (safe across rolling restarts); disable with
 	// KOTOJI_AUTO_MIGRATE=false to manage schema out of band.
@@ -95,8 +109,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	// The production SiteService: dbStoreAdapter + os/exec git runner, rooted at
 	// /data/sites. Built via the package's exported composition-root factory so
-	// the runner/adapter stay internal to the site package.
-	a.siteSvc = site.NewProductionService(store, siteConfig(cfg))
+	// the runner/adapter stay internal to the site package. siteConfig closes over
+	// the store so the mirror credential/enabled flag are resolved at git-call time
+	// (DB overrides env), letting a runtime admin change apply without a restart.
+	a.siteSvc = site.NewProductionService(store, siteConfig(cfg, store))
 
 	// Auth is only needed where the control plane runs.
 	if cfg.ServesControl() {
@@ -145,15 +161,19 @@ func (a *App) StartBackground(ctx context.Context) {
 }
 
 // siteConfig maps the env-derived config.Config onto the site package's Config
-// (its own bounded value object). Root is DataDir/sites per CANONICAL §1.
-func siteConfig(cfg config.Config) site.Config {
-	return site.Config{
+// (its own bounded value object). Root is DataDir/sites per CANONICAL §1. The
+// store backs the DYNAMIC mirror credential/enabled providers so DB settings
+// override env at git-call time (a nil store falls back to the static env fields,
+// keeping the function usable in tests / env-only paths).
+func siteConfig(cfg config.Config, store *db.Store) site.Config {
+	sc := site.Config{
 		Root:     filepath.Join(cfg.DataDir, sitesSubdir),
 		GitBin:   cfg.GitBin,
 		MirrorOn: cfg.GitHub.Enabled,
 		// The instance-level mirror token (KOTOJI_GITHUB_APP_TOKEN/PAT) authenticates
 		// push/fetch against github.com. It is injected per git call via an HTTP
 		// header in the environment, never written to .git/config (see git_auth.go).
+		// Static fields are the env fallback the dynamic providers below default to.
 		GitHubToken: cfg.GitHub.Token,
 		Zip: site.ZipConfig{
 			MaxUploadBytes:       cfg.Zip.MaxUploadBytes,
@@ -163,6 +183,44 @@ func siteConfig(cfg config.Config) site.Config {
 			AllowedExt:           cfg.Zip.AllowedExt,
 		},
 	}
+	if store != nil {
+		// MirrorToken: DB token (decrypted) when set, else the env token. Resolved per
+		// git call so a runtime PAT change applies without a restart. A DB read error
+		// degrades to the env token (fail safe). User defaults to x-access-token (the
+		// site layer fills the default when empty).
+		sc.MirrorToken = func(ctx context.Context) (token, user string) {
+			if gh, err := store.GetGitHubConfig(ctx); err == nil && gh.TokenSet {
+				return gh.Token, ""
+			}
+			return cfg.GitHub.Token, ""
+		}
+		// MirrorEnabled: DB flag overrides env; mirroring is only "on" when enabled
+		// AND a token is present (so a half-configured instance does not attempt
+		// doomed unauthenticated pushes). Mirrors the /api/config effective logic.
+		sc.MirrorEnabled = func(ctx context.Context) bool {
+			enabled := cfg.GitHub.Enabled
+			tokenPresent := cfg.GitHub.Token != ""
+			if gh, err := store.GetGitHubConfig(ctx); err == nil {
+				if gh.EnabledSet {
+					enabled = gh.Enabled
+				}
+				if gh.TokenSet {
+					tokenPresent = true
+				}
+			}
+			return enabled && tokenPresent
+		}
+	}
+	return sc
+}
+
+// secretKey resolves the 32-byte at-rest encryption key. KOTOJI_SECRET_KEY wins
+// when it decodes to >=32 bytes; otherwise it is derived (sha256) over the same
+// stable server seed the preview-grant key binds to (admin password | oidc secret
+// | control base url | base domain), so an env-only instance keeps a stable key
+// across restarts (sealed tokens stay decryptable).
+func secretKey(cfg config.Config) []byte {
+	return secretbox.ResolveKey(cfg.SecretKey, cfg.AdminPassword, cfg.OIDC.ClientSecret, cfg.ControlBaseURL, cfg.BaseDomain)
 }
 
 // ControlRouter builds the control-plane handler (REST API + /auth + /mcp) plus

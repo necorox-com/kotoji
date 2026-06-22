@@ -17,6 +17,10 @@ export const queryKeys = {
   me: () => ["me"] as const,
   config: () => ["config"] as const,
 
+  // -------- admin (instance-wide settings) --------
+  // Instance GitHub mirror config (admin-only; secret-safe view).
+  adminGitHub: () => ["admin", "github"] as const,
+
   // -------- sites --------
   sites: () => ["sites"] as const,
 

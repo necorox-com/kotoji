@@ -152,6 +152,13 @@ type Config struct {
 
 	GitHub GitHubMirror
 
+	// SecretKey is the raw KOTOJI_SECRET_KEY env value (hex/base64, empty when
+	// unset). It is the master key used to encrypt secrets at rest (the DB-stored
+	// GitHub PAT). The composition root resolves it to a 32-byte key via
+	// secretbox.ResolveKey (with a derived fallback); config keeps only the raw
+	// string so this package carries no crypto dependency.
+	SecretKey string
+
 	Zip            ZipLimits
 	SiteQuotaBytes int64
 	UserSiteQuota  int
@@ -305,6 +312,13 @@ func load(get getenv) (Config, error) {
 		Org:           getString(get, "KOTOJI_GITHUB_ORG", ""),
 		WebhookSecret: getString(get, "KOTOJI_GITHUB_WEBHOOK_SECRET", ""),
 	}
+
+	// --- at-rest secret key (encrypts the DB-stored GitHub PAT) ---
+	// Optional. When set it MUST decode (hex or base64) to >= 32 bytes; the
+	// secretbox layer validates and falls back to a derived key when unset. The
+	// raw env value is carried verbatim and resolved in the composition root so
+	// config stays free of the crypto dependency.
+	c.SecretKey = getString(get, "KOTOJI_SECRET_KEY", "")
 
 	// --- zip / quotas ---
 	c.Zip = ZipLimits{

@@ -37,12 +37,17 @@ const (
 // a single git invocation, or nil when no token is configured. The token is
 // carried ONLY in the environment, never in argv, so it cannot leak through
 // *GitError.Args or a process listing.
-func (g *gitService) mirrorAuthEnv() []string {
-	token := g.cfg.GitHubToken
+//
+// The credential is resolved PER call: when cfg.MirrorToken is set it is the
+// dynamic source (DB-then-env, so a runtime admin change applies without a
+// restart); otherwise the static cfg.GitHubToken/GitHubUser are used (env-only
+// deployments). The ctx flows into the dynamic provider so a DB read honors the
+// request deadline.
+func (g *gitService) mirrorAuthEnv(ctx context.Context) []string {
+	token, user := g.mirrorCreds(ctx)
 	if token == "" {
 		return nil
 	}
-	user := g.cfg.GitHubUser
 	if user == "" {
 		user = defaultGitHubUser
 	}
@@ -59,6 +64,28 @@ func (g *gitService) mirrorAuthEnv() []string {
 	}
 }
 
+// mirrorCreds resolves the effective mirror credential for one git call. The
+// dynamic cfg.MirrorToken provider (DB-then-env, wired by the composition root)
+// takes precedence so a runtime config change applies immediately; the static
+// cfg.GitHubToken/GitHubUser are the fallback for env-only deployments and tests.
+func (g *gitService) mirrorCreds(ctx context.Context) (token, user string) {
+	if g.cfg.MirrorToken != nil {
+		return g.cfg.MirrorToken(ctx)
+	}
+	return g.cfg.GitHubToken, g.cfg.GitHubUser
+}
+
+// mirrorEnabled reports whether mirror pushes should be attempted at all. The
+// dynamic cfg.MirrorEnabled gate (DB-overrides-env) wins when set so a runtime
+// toggle applies without a restart; otherwise the static cfg.MirrorOn flag is
+// used (env-only deployments / tests).
+func (g *gitService) mirrorEnabled(ctx context.Context) bool {
+	if g.cfg.MirrorEnabled != nil {
+		return g.cfg.MirrorEnabled(ctx)
+	}
+	return g.cfg.MirrorOn
+}
+
 // runMirror runs a network git command (push/fetch) with the per-invocation
 // GitHub auth header layered into the environment when a token is configured. It
 // uses the envRunner seam (execRunner supports it); a runner without RunEnv (the
@@ -66,7 +93,7 @@ func (g *gitService) mirrorAuthEnv() []string {
 // such runners do not actually hit the network. The returned error carries argv
 // via *GitError but NEVER the token (it lives only in env, which is not recorded).
 func (g *gitService) runMirror(ctx context.Context, id uuid.UUID, args ...string) (string, error) {
-	env := g.mirrorAuthEnv()
+	env := g.mirrorAuthEnv(ctx)
 	if er, ok := g.git.(envRunner); ok {
 		out, err := er.RunEnv(ctx, g.repoDir(id), env, nil, args...)
 		return string(out), err

@@ -3,8 +3,8 @@
 /**
  * UserMenu (organism) — design.md §3.2/§3.3/§4.3. Avatar trigger → dropdown with
  * the signed-in identity, a theme switcher (light/dark/system, next-themes), a
- * project-settings shortcut (when inside a project), the Admin link for instance
- * superusers (CANONICAL §6 `is_admin`), and Sign out.
+ * Settings link to the instance/account settings page (/settings), the Admin
+ * link for instance superusers (CANONICAL §6 `is_admin`), and Sign out.
  *
  * Sign out POSTs to the backend logout endpoint (it is POST-only — a GET 405s)
  * and then hard-navigates to /login so the server clears the session cookie and
@@ -17,7 +17,7 @@
  */
 
 import { useSyncExternalStore } from "react";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { useTranslations } from "next-intl";
 import { LogOut, Monitor, Moon, Settings, Shield, Sun } from "lucide-react";
@@ -93,18 +93,11 @@ export interface UserMenuProps {
 export function UserMenu({ align = "end", className }: UserMenuProps) {
   const t = useTranslations();
   const router = useRouter();
-  const pathname = usePathname();
   const { data: me, isLoading } = useMe();
   const { theme, setTheme } = useTheme();
 
   // Hydration guard: next-themes' resolved value is only correct after mount.
   const mounted = useMounted();
-
-  // Current project handle, when inside a project — powers the settings shortcut.
-  // Excludes the /sites/new create route.
-  const handleMatch = pathname?.match(/^\/sites\/([^/]+)/);
-  const projectHandle =
-    handleMatch && handleMatch[1] !== "new" ? handleMatch[1] : null;
 
   if (isLoading && !me) {
     return <Skeleton className={cn("size-8 rounded-full", className)} />;
@@ -181,15 +174,12 @@ export function UserMenu({ align = "end", className }: UserMenuProps) {
 
         <DropdownMenuSeparator />
 
-        {/* Project settings shortcut (only when inside a project). */}
-        {projectHandle ? (
-          <DropdownMenuItem
-            onClick={() => router.push(`/sites/${projectHandle}/settings`)}
-          >
-            <Settings aria-hidden="true" />
-            {t("tabs.settings")}
-          </DropdownMenuItem>
-        ) : null}
+        {/* Instance/account settings — a single clear entry to /settings (the
+            per-project settings stays reachable via the project tabs). */}
+        <DropdownMenuItem onClick={() => router.push("/settings")}>
+          <Settings aria-hidden="true" />
+          {t("settings.title")}
+        </DropdownMenuItem>
 
         {/* Admin link only for instance superusers (CANONICAL §6). */}
         {user.isAdmin ? (

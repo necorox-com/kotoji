@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/necorox-com/kotoji/backend/internal/config"
+	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 )
 
@@ -93,6 +94,17 @@ type StoreDeps interface {
 	// SetAdminPasswordHash persists the first-run admin-password bcrypt hash. The
 	// caller (the /auth/setup handler) computes the hash; the store only writes it.
 	SetAdminPasswordHash(ctx context.Context, hash string) error
+	// PromoteUserAdmin sets users.is_admin=true for the given user (leaving
+	// can_create_sites untouched). In single-admin PASSWORD mode the admin IS the
+	// instance admin, so first-run setup and every password login promote that
+	// user; it is NEVER called for oidc/none users. *db.Store satisfies it via the
+	// embedded generated query.
+	PromoteUserAdmin(ctx context.Context, id uuid.UUID) error
+	// GetGitHubConfig reads the DB-stored GitHub mirror config (the token decrypted
+	// but never surfaced here — PublicConfig only needs the boolean fold). It backs
+	// the EFFECTIVE githubMirrorEnabled value (DB overrides env). *db.Store
+	// satisfies it directly.
+	GetGitHubConfig(ctx context.Context) (db.GitHubConfig, error)
 }
 
 // CSRF exposes the CSRF guard so the composition root can mount its middleware on
@@ -337,10 +349,28 @@ func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, credential,
 		return
 	}
 
+	// PASSWORD mode: the single admin IS the instance admin (LOCKED decision), so
+	// every successful password login (re)asserts is_admin on that user. Never for
+	// oidc/none — promoteAdminIfPassword no-ops outside password mode.
+	a.promoteAdminIfPassword(r.Context(), user.ID)
+
 	if !a.establishSession(w, r, user.ID) {
 		return // establishSession already wrote the error envelope
 	}
 	http.Redirect(w, r, next, http.StatusFound)
+}
+
+// promoteAdminIfPassword sets is_admin=true on userID, but ONLY in single-admin
+// PASSWORD mode (the admin IS the instance admin). It is a no-op for oidc/none so
+// IdP-provisioned users are governed solely by the admin screen. A promotion
+// failure is logged-by-omission (best-effort): it must not break the login it
+// rides on, and the next login retries it. The gate is the auth MODE (config),
+// not the provider key, so it is correct even if a future provider reuses keys.
+func (a *Auth) promoteAdminIfPassword(ctx context.Context, userID uuid.UUID) {
+	if a.cfg.AuthMode != config.AuthModePassword {
+		return
+	}
+	_ = a.store.PromoteUserAdmin(ctx, userID)
 }
 
 // establishSession rotates a fresh server-side session for userID, sets the
@@ -433,6 +463,9 @@ func (a *Auth) Setup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not establish your account")
 		return
 	}
+	// First-run admin IS the instance admin: promote so /settings + the admin API
+	// are reachable immediately after setup (PASSWORD mode only, by construction).
+	a.promoteAdminIfPassword(r.Context(), user.ID)
 	if err := a.store.SetAdminPasswordHash(r.Context(), string(hash)); err != nil {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not set the password")
 		return
@@ -503,11 +536,35 @@ func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 		// The instance can mirror only when the feature is enabled AND a push token
 		// is configured; the GUI keys per-site linking/sync controls off this so a
 		// half-configured instance (enabled but no token) does not advertise mirroring.
-		GithubMirrorEnabled: a.cfg.GitHub.Enabled && a.cfg.GitHub.Token != "",
+		// EFFECTIVE value: DB overrides env (so a runtime admin change is reflected).
+		GithubMirrorEnabled: a.githubMirrorEnabled(r.Context()),
 		// True only in the first-run state: password mode, no env password, and no
 		// DB hash yet. The GUI shows the first-run setup screen when this is true.
 		SetupRequired: a.setupRequired(r.Context()),
 	})
+}
+
+// githubMirrorEnabled computes the EFFECTIVE "can this instance mirror" flag the
+// GUI gates on: the feature must be ENABLED and a push TOKEN must be present.
+// DB overrides env on BOTH axes — the github_mirror_enabled key (if present)
+// wins over cfg.GitHub.Enabled, and a DB-stored token (if set) wins over the env
+// token. A DB read error falls back to the env-only computation (fail safe: a
+// transient blip never flips the GUI to "no mirroring" if env is configured).
+func (a *Auth) githubMirrorEnabled(ctx context.Context) bool {
+	enabled := a.cfg.GitHub.Enabled
+	tokenPresent := a.cfg.GitHub.Token != ""
+
+	if a.store != nil {
+		if gh, err := a.store.GetGitHubConfig(ctx); err == nil {
+			if gh.EnabledSet {
+				enabled = gh.Enabled
+			}
+			if gh.TokenSet {
+				tokenPresent = true
+			}
+		}
+	}
+	return enabled && tokenPresent
 }
 
 // setupRequired reports whether the instance is in the first-run "set the admin

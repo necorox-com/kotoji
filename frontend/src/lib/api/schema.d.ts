@@ -487,6 +487,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/github": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the instance GitHub mirror config (admin only; secrets reduced to booleans)
+         * @description Returns the EFFECTIVE GitHub mirror configuration (DB overrides env). It is SECRET-SAFE: the push token and webhook secret are NEVER returned — only `tokenSet`/`webhookSecretSet` "configured" booleans. Requires is_admin (401 anonymous, 403 non-admin).
+         */
+        get: operations["adminGetGitHub"];
+        /**
+         * Update the instance GitHub mirror config (admin only; token write-only)
+         * @description Persists a PARTIAL update of the instance GitHub mirror config. Every body field is optional: an absent field is left unchanged. The token is WRITE-ONLY — supply it to set/rotate it; an empty or absent token KEEPS the stored one; set `clearToken: true` to remove it. The response is the same secret-safe view as GET (no secret values). Requires is_admin.
+         */
+        put: operations["adminPutGitHub"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -596,6 +620,28 @@ export interface components {
             githubMirrorEnabled: boolean;
             /** @description True only in the first-run state: AUTH_MODE=password AND no env admin password AND no admin password hash stored yet. When true the GUI shows the first-run admin-password setup screen and POST /auth/setup is open. Always false for oidc/none modes. */
             setupRequired: boolean;
+        };
+        /** @description Secret-safe view of the instance GitHub mirror config (admin screen). The token and webhook secret are NEVER returned — only "configured" booleans. Values are the EFFECTIVE config (DB overrides env). */
+        GitHubAdminConfig: {
+            /** @description Whether GitHub mirroring is enabled (DB override of env). */
+            enabled: boolean;
+            /** @description GitHub org/owner for created repos (empty if unset). */
+            org: string;
+            /** @description True when a push token is configured (DB or env). The token itself is never returned. */
+            tokenSet: boolean;
+            /** @description True when a webhook HMAC secret is configured. The secret itself is never returned. */
+            webhookSecretSet: boolean;
+        };
+        /** @description Partial update of the instance GitHub mirror config. All fields optional; absent fields are unchanged. The token is write-only (empty/absent keeps the stored one; clearToken removes it). */
+        GitHubAdminConfigUpdate: {
+            enabled?: boolean;
+            org?: string;
+            /** @description New push PAT/app token (write-only; stored encrypted at rest). Empty/absent keeps the existing token. */
+            token?: string;
+            /** @description New webhook HMAC secret (write-only). Empty/absent keeps the existing secret. */
+            webhookSecret?: string;
+            /** @description When true, remove the stored token (reverts to the env token if any). */
+            clearToken?: boolean;
         };
         Site: {
             /** Format: uuid */
@@ -1919,6 +1965,55 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    adminGetGitHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Effective GitHub mirror config (secret-safe) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitHubAdminConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    adminPutGitHub: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GitHubAdminConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated GitHub mirror config (secret-safe) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitHubAdminConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["ValidationFailed"];
         };
     };
 }

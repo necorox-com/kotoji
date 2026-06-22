@@ -25,6 +25,16 @@ SET is_admin         = @is_admin,
     updated_at        = now()
 WHERE id = @id;
 
+-- name: PromoteUserAdmin :exec
+-- Promote a user to instance admin (is_admin=true) WITHOUT touching
+-- can_create_sites. Used in PASSWORD mode only: the single admin IS the instance
+-- admin, so first-run setup and every password login promote that user. NEVER
+-- called for oidc/none users (they are governed by the admin screen instead).
+UPDATE users
+SET is_admin   = TRUE,
+    updated_at = now()
+WHERE id = @id;
+
 -- name: GetUserByEmail :one
 SELECT * FROM users WHERE email = @email;
 

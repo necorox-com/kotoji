@@ -44,3 +44,14 @@ export { MemberTable, type MemberTableProps } from "./member-table";
 export { CreateSiteForm, type CreateSiteFormProps } from "./create-site-form";
 export { McpTokenPanel, type McpTokenPanelProps } from "./mcp-token-panel";
 export { GitHubSection, type GitHubSectionProps } from "./github-section";
+
+// Instance Settings cluster (/settings): instance-wide GitHub mirror config
+// (admin-only) + the MCP connection guide (everyone).
+export {
+  GitHubAdminSection,
+  type GitHubAdminSectionProps,
+} from "./github-admin-section";
+export {
+  McpGuideSection,
+  type McpGuideSectionProps,
+} from "./mcp-guide-section";

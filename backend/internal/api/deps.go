@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/necorox-com/kotoji/backend/internal/config"
+	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
@@ -44,6 +45,13 @@ type MetaStore interface {
 	GetUserByEmail(ctx context.Context, email string) (gen.User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error)
 	SetUserAdminFlags(ctx context.Context, arg gen.SetUserAdminFlagsParams) error
+
+	// ---- instance GitHub mirror config (admin screen) ----
+	// GetGitHubConfig reads the DB-stored mirror config (token decrypted, but the
+	// admin handler NEVER echoes it — only a "configured" boolean). SetGitHubConfig
+	// persists a partial update (token write-only). *db.Store satisfies both.
+	GetGitHubConfig(ctx context.Context) (db.GitHubConfig, error)
+	SetGitHubConfig(ctx context.Context, in db.SetGitHubConfigInput) error
 
 	// ---- audit (best-effort append) ----
 	InsertAudit(ctx context.Context, arg gen.InsertAuditParams) error

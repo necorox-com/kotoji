@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/necorox-com/kotoji/backend/internal/auth"
+	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 )
 
@@ -34,6 +35,11 @@ type fakeMetaStore struct {
 	audit []gen.InsertAuditParams
 	// settingsUpdates captures UpdateSiteSettings calls.
 	settingsUpdates []gen.UpdateSiteSettingsParams
+
+	// github is the DB-stored GitHub mirror config the admin-github handler reads/
+	// writes. setGitHubInputs records every SetGitHubConfig call for assertions.
+	github          db.GitHubConfig
+	setGitHubInputs []db.SetGitHubConfigInput
 
 	failGetRole bool
 }
@@ -248,6 +254,39 @@ func (f *fakeMetaStore) InsertAudit(_ context.Context, arg gen.InsertAuditParams
 	return nil
 }
 
+// GetGitHubConfig returns the in-memory DB GitHub config (decrypted token).
+func (f *fakeMetaStore) GetGitHubConfig(_ context.Context) (db.GitHubConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.github, nil
+}
+
+// SetGitHubConfig applies a partial update mirroring the real store's semantics:
+// nil fields untouched, empty token keeps the stored one, clearToken removes it.
+// It records the raw input so tests can assert the token was/wasn't written.
+func (f *fakeMetaStore) SetGitHubConfig(_ context.Context, in db.SetGitHubConfigInput) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setGitHubInputs = append(f.setGitHubInputs, in)
+	if in.Enabled != nil {
+		f.github.Enabled = *in.Enabled
+		f.github.EnabledSet = true
+	}
+	if in.Org != nil {
+		f.github.Org = *in.Org
+	}
+	if in.WebhookSecret != nil {
+		f.github.WebhookSecret = *in.WebhookSecret
+	}
+	switch {
+	case in.ClearToken:
+		f.github.Token, f.github.TokenSet = "", false
+	case in.Token != nil && *in.Token != "":
+		f.github.Token, f.github.TokenSet = *in.Token, true
+	}
+	return nil
+}
+
 func (f *fakeMetaStore) ListAuditForSite(_ context.Context, arg gen.ListAuditForSiteParams) ([]gen.AuditLog, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -352,6 +391,18 @@ func (f *fakeSessionStore) GetAdminPasswordHash(context.Context) (string, bool, 
 	return "", false, nil
 }
 func (f *fakeSessionStore) SetAdminPasswordHash(context.Context, string) error { return nil }
+func (f *fakeSessionStore) PromoteUserAdmin(_ context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u, ok := f.users[id]; ok {
+		u.IsAdmin = true
+		f.users[id] = u
+	}
+	return nil
+}
+func (f *fakeSessionStore) GetGitHubConfig(context.Context) (db.GitHubConfig, error) {
+	return db.GitHubConfig{}, nil
+}
 
 // compile-time: fakeSessionStore satisfies auth.StoreDeps.
 var _ auth.StoreDeps = (*fakeSessionStore)(nil)

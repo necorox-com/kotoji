@@ -292,6 +292,36 @@ type FileListing struct {
 	Ref Sha `json:"ref"`
 }
 
+// GitHubAdminConfig Secret-safe view of the instance GitHub mirror config (admin screen). The token and webhook secret are NEVER returned — only "configured" booleans. Values are the EFFECTIVE config (DB overrides env).
+type GitHubAdminConfig struct {
+	// Enabled Whether GitHub mirroring is enabled (DB override of env).
+	Enabled bool `json:"enabled"`
+
+	// Org GitHub org/owner for created repos (empty if unset).
+	Org string `json:"org"`
+
+	// TokenSet True when a push token is configured (DB or env). The token itself is never returned.
+	TokenSet bool `json:"tokenSet"`
+
+	// WebhookSecretSet True when a webhook HMAC secret is configured. The secret itself is never returned.
+	WebhookSecretSet bool `json:"webhookSecretSet"`
+}
+
+// GitHubAdminConfigUpdate Partial update of the instance GitHub mirror config. All fields optional; absent fields are unchanged. The token is write-only (empty/absent keeps the stored one; clearToken removes it).
+type GitHubAdminConfigUpdate struct {
+	// ClearToken When true, remove the stored token (reverts to the env token if any).
+	ClearToken *bool `json:"clearToken,omitempty"`
+
+	Enabled *bool   `json:"enabled,omitempty"`
+	Org     *string `json:"org,omitempty"`
+
+	// Token New push PAT/app token (write-only; stored encrypted at rest). Empty/absent keeps the existing token.
+	Token *string `json:"token,omitempty"`
+
+	// WebhookSecret New webhook HMAC secret (write-only). Empty/absent keeps the existing secret.
+	WebhookSecret *string `json:"webhookSecret,omitempty"`
+}
+
 // HandleString DNS-safe handle. Create-time min length is 3; resolver accepts 1-63. No "--".
 type HandleString = string
 

@@ -9,6 +9,17 @@ import (
 	"context"
 )
 
+const deleteInstanceSetting = `-- name: DeleteInstanceSetting :exec
+DELETE FROM instance_settings WHERE key = $1
+`
+
+// Remove one setting by key (idempotent: no-op when absent). Used to CLEAR a
+// stored secret (the encrypted GitHub token) so it reverts to the env fallback.
+func (q *Queries) DeleteInstanceSetting(ctx context.Context, key string) error {
+	_, err := q.db.Exec(ctx, deleteInstanceSetting, key)
+	return err
+}
+
 const getInstanceSetting = `-- name: GetInstanceSetting :one
 
 SELECT value FROM instance_settings WHERE key = $1

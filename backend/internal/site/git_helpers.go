@@ -289,7 +289,7 @@ func (g *gitService) refreshServed(ctx context.Context, id uuid.UUID, branch Bra
 // mirroring is enabled. Push failure NEVER fails the originating write
 // (CANONICAL §1 MirrorPush contract).
 func (g *gitService) bestEffortMirror(ctx context.Context, id uuid.UUID, branch BranchName) {
-	if !g.cfg.MirrorOn {
+	if !g.mirrorEnabled(ctx) {
 		return
 	}
 	// Only push when an origin remote exists.

@@ -61,8 +61,38 @@ func testConfig() config.Config {
 // newTestEnv assembles the router with the REAL auth middleware (the only thing
 // that can populate auth.CurrentUser) over fake stores + the FakeService.
 func newTestEnv(t *testing.T) *testEnv {
+	return newTestEnvWith(t, nil)
+}
+
+// configForTest is the narrow set of config knobs a test may override (kept tiny
+// so the harness does not leak the full config surface). Currently only the
+// GitHub env fields, used by the admin-github "env fallback" tests.
+type configForTest struct {
+	GitHubEnabled bool
+	GitHubToken   string
+	GitHubOrg     string
+}
+
+// newTestEnvWithConfig builds a testEnv after applying mutate to a configForTest,
+// then folding those overrides onto the base testConfig.
+func newTestEnvWithConfig(t *testing.T, mutate func(*configForTest)) *testEnv {
+	t.Helper()
+	c := configForTest{}
+	if mutate != nil {
+		mutate(&c)
+	}
+	return newTestEnvWith(t, &c)
+}
+
+// newTestEnvWith is the shared assembler; overrides may be nil (defaults).
+func newTestEnvWith(t *testing.T, overrides *configForTest) *testEnv {
 	t.Helper()
 	cfg := testConfig()
+	if overrides != nil {
+		cfg.GitHub.Enabled = overrides.GitHubEnabled
+		cfg.GitHub.Token = overrides.GitHubToken
+		cfg.GitHub.Org = overrides.GitHubOrg
+	}
 	svc := site.NewFakeService()
 	store := newFakeMetaStore()
 	sessions := newFakeSessionStore()

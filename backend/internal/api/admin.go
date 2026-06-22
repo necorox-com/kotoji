@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -30,7 +31,115 @@ func (s *server) mountAdmin(r chi.Router) {
 		// RequireAdmin returns 401 anonymous / 403 non-admin before the handler.
 		r.Method(http.MethodGet, "/sites/{handle}/audit", auth.RequireAdmin(http.HandlerFunc(s.adminSiteAudit)))
 		r.Method(http.MethodPatch, "/users/{userId}/flags", auth.RequireAdmin(http.HandlerFunc(s.adminSetUserFlags)))
+		// Instance GitHub mirror config (write-only token; never echoed).
+		r.Method(http.MethodGet, "/github", auth.RequireAdmin(http.HandlerFunc(s.adminGetGitHub)))
+		r.Method(http.MethodPut, "/github", auth.RequireAdmin(http.HandlerFunc(s.adminPutGitHub)))
 	})
+}
+
+// githubAdminConfig is the admin-screen view of the instance GitHub mirror
+// config. It is SECRET-SAFE: the token and webhook secret are reduced to boolean
+// "configured" flags and NEVER returned verbatim (LOCKED decision: the token is
+// write-only over the API). The values fold DB-over-env so the admin sees the
+// EFFECTIVE configuration.
+type githubAdminConfig struct {
+	Enabled          bool   `json:"enabled"`
+	Org              string `json:"org"`
+	TokenSet         bool   `json:"tokenSet"`
+	WebhookSecretSet bool   `json:"webhookSecretSet"`
+}
+
+// adminGetGitHub GET /api/admin/github — return the effective (DB-over-env)
+// GitHub mirror config with secrets reduced to "configured" booleans.
+func (s *server) adminGetGitHub(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.effectiveGitHubAdminConfig(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// adminPutGitHub PUT /api/admin/github — persist a partial update. The body
+// fields are all OPTIONAL (partial update): a nil field is left untouched. The
+// token is WRITE-ONLY — an empty/absent token keeps the stored one; clearToken
+// removes it. Returns the post-update secret-safe view.
+func (s *server) adminPutGitHub(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled       *bool   `json:"enabled"`
+		Org           *string `json:"org"`
+		Token         *string `json:"token"`
+		WebhookSecret *string `json:"webhookSecret"`
+		ClearToken    bool    `json:"clearToken"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+
+	if err := s.deps.Store.SetGitHubConfig(r.Context(), db.SetGitHubConfigInput{
+		Enabled:       body.Enabled,
+		Org:           body.Org,
+		WebhookSecret: body.WebhookSecret,
+		Token:         body.Token,
+		ClearToken:    body.ClearToken,
+	}); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+
+	// Best-effort audit (no secret values in metadata — only "what changed").
+	if actor, ok := auth.CurrentUser(r.Context()); ok && actor != nil {
+		s.auditBestEffort(r.Context(), gen.InsertAuditParams{
+			ActorUserID: uuidPtr(actor.UserID),
+			Action:      "admin.github.config",
+			Source:      gen.AuditSourceSystem,
+			Metadata: auditMeta(map[string]any{
+				"enabled_set":        body.Enabled != nil,
+				"org_set":            body.Org != nil,
+				"token_set":          body.Token != nil && *body.Token != "",
+				"token_cleared":      body.ClearToken,
+				"webhook_secret_set": body.WebhookSecret != nil,
+			}),
+		})
+	}
+
+	cfg, err := s.effectiveGitHubAdminConfig(r.Context())
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// effectiveGitHubAdminConfig folds the DB-stored config over the env defaults
+// into the secret-safe admin view. DB overrides env on every axis; the env token
+// counts toward TokenSet so an env-only deployment shows "token configured".
+func (s *server) effectiveGitHubAdminConfig(ctx context.Context) (githubAdminConfig, error) {
+	gh, err := s.deps.Store.GetGitHubConfig(ctx)
+	if err != nil {
+		return githubAdminConfig{}, err
+	}
+
+	envCfg := s.deps.Config.GitHub
+	out := githubAdminConfig{
+		Enabled:          envCfg.Enabled,
+		Org:              envCfg.Org,
+		TokenSet:         envCfg.Token != "",
+		WebhookSecretSet: envCfg.WebhookSecret != "",
+	}
+	if gh.EnabledSet {
+		out.Enabled = gh.Enabled
+	}
+	if gh.Org != "" {
+		out.Org = gh.Org
+	}
+	if gh.TokenSet {
+		out.TokenSet = true
+	}
+	if gh.WebhookSecret != "" {
+		out.WebhookSecretSet = true
+	}
+	return out, nil
 }
 
 // adminSiteAudit GET /api/admin/sites/{handle}/audit — per-site activity feed

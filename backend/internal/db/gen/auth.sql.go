@@ -234,6 +234,22 @@ func (q *Queries) ListIdentitiesForUser(ctx context.Context, userID uuid.UUID) (
 	return items, nil
 }
 
+const promoteUserAdmin = `-- name: PromoteUserAdmin :exec
+UPDATE users
+SET is_admin   = TRUE,
+    updated_at = now()
+WHERE id = $1
+`
+
+// Promote a user to instance admin (is_admin=true) WITHOUT touching
+// can_create_sites. Used in PASSWORD mode only: the single admin IS the instance
+// admin, so first-run setup and every password login promote that user. NEVER
+// called for oidc/none users (they are governed by the admin screen instead).
+func (q *Queries) PromoteUserAdmin(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, promoteUserAdmin, id)
+	return err
+}
+
 const setUserAdminFlags = `-- name: SetUserAdminFlags :exec
 UPDATE users
 SET is_admin         = $1,

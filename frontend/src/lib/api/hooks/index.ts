@@ -4,6 +4,7 @@
  */
 
 export { useMe, useConfig } from "./use-me";
+export { useAdminGitHub, useUpdateAdminGitHub } from "./use-admin";
 export {
   useSites,
   useSite,

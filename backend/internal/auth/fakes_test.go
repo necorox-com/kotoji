@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 )
 
@@ -30,6 +31,14 @@ type fakeStore struct {
 	adminHash    string
 	adminHashSet bool
 
+	// promoted records the user ids passed to PromoteUserAdmin so the is_admin
+	// promotion tests can assert it was (or was NOT) called per auth mode.
+	promoted map[uuid.UUID]int
+
+	// githubCfg is the DB-stored GitHub config the effective-enabled tests read
+	// through GetGitHubConfig.
+	githubCfg db.GitHubConfig
+
 	// failNextCreate / failNextGet force a store error for error-path tests.
 	failCreate bool
 	failGet    bool
@@ -42,6 +51,7 @@ func newFakeStore() *fakeStore {
 		byEmail:  map[string]uuid.UUID{},
 		idents:   map[string]uuid.UUID{},
 		touched:  map[string]int{},
+		promoted: map[uuid.UUID]int{},
 	}
 }
 
@@ -163,6 +173,33 @@ func (f *fakeStore) SetAdminPasswordHash(_ context.Context, hash string) error {
 	defer f.mu.Unlock()
 	f.adminHash, f.adminHashSet = hash, true
 	return nil
+}
+
+// PromoteUserAdmin records the promotion and flips is_admin on any seeded user
+// row so the promotion assertions and any subsequent reads see is_admin=true.
+func (f *fakeStore) PromoteUserAdmin(_ context.Context, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.promoted[id]++
+	if u, ok := f.users[id]; ok {
+		u.IsAdmin = true
+		f.users[id] = u
+	}
+	return nil
+}
+
+// GetGitHubConfig returns the DB-stored GitHub config seeded by the test.
+func (f *fakeStore) GetGitHubConfig(_ context.Context) (db.GitHubConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.githubCfg, nil
+}
+
+// promotedCount reports how many times PromoteUserAdmin ran for id (assertions).
+func (f *fakeStore) promotedCount(id uuid.UUID) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.promoted[id]
 }
 
 // WithTx runs fn against the SAME fakeStore via a thin gen.Queries shim. The

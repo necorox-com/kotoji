@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
+	"github.com/necorox-com/kotoji/backend/internal/secretbox"
 )
 
 // Querier is the full generated query surface. Re-exported here so consumers can
@@ -37,13 +38,47 @@ const pingTimeout = 5 * time.Second
 // is exported so the auth layer can assert its own copy of the key stays in sync.
 const SettingAdminPasswordHash = "admin_password_hash"
 
+// GitHub mirror config keys in instance_settings. These let the admin configure
+// the GitHub mirror at RUNTIME via the GUI (overriding the KOTOJI_GITHUB_* env at
+// the effective-config layer). The token is stored ENCRYPTED (AES-256-GCM via
+// secretbox); the rest are plain (a feature flag, an org name, and the webhook
+// HMAC secret which never leaves the server).
+const (
+	// SettingGitHubMirrorEnabled is "true"/"false"; absent => fall back to env.
+	SettingGitHubMirrorEnabled = "github_mirror_enabled"
+	// SettingGitHubOrg is the org/owner for created repos.
+	SettingGitHubOrg = "github_org"
+	// SettingGitHubWebhookSecret is the HMAC secret for /api/webhooks/github.
+	SettingGitHubWebhookSecret = "github_webhook_secret"
+	// SettingGitHubToken holds the AES-256-GCM CIPHERTEXT of the push PAT/app token.
+	SettingGitHubToken = "github_token"
+)
+
+// boolTrue / boolFalse are the canonical string encodings for boolean settings.
+const (
+	boolTrue  = "true"
+	boolFalse = "false"
+)
+
 // Store is the application-facing handle to the metadata database. It embeds the
 // generated *gen.Queries (so every named query is available directly) and owns the
 // underlying pgxpool for lifecycle (Close) and transactions (WithTx).
 type Store struct {
 	*gen.Queries
 	pool *pgxpool.Pool
+	// box encrypts/decrypts secrets stored at rest in instance_settings (the
+	// GitHub PAT). Optional: when nil, GetGitHubConfig reports the token as not set
+	// and SetGitHubConfig refuses to persist a token (so a misconfigured instance
+	// never stores a plaintext credential). The composition root wires it via
+	// SetSecretBox after deriving the key.
+	box *secretbox.Box
 }
+
+// SetSecretBox installs the at-rest encryption box used for secret settings (the
+// GitHub token). The composition root calls it once after deriving the key. It is
+// a setter (not a New parameter) so existing callers/tests keep working unchanged
+// and a Store without a box simply treats secrets as unconfigured.
+func (s *Store) SetSecretBox(box *secretbox.Box) { s.box = box }
 
 // compile-time guarantee: a *Store exposes the whole generated query surface.
 var _ gen.Querier = (*Store)(nil)
@@ -202,4 +237,141 @@ func (s *Store) SetAdminPasswordHash(ctx context.Context, hash string) error {
 		return fmt.Errorf("db: set admin password hash: %w", err)
 	}
 	return nil
+}
+
+// ---- instance settings (GitHub mirror config) ----
+
+// GitHubConfig is the DB-stored GitHub mirror configuration. EnabledSet reports
+// whether the github_mirror_enabled key exists at all so the effective-config
+// layer can distinguish "admin explicitly disabled" (Enabled=false, EnabledSet=true)
+// from "never configured -> fall back to env" (EnabledSet=false). The token is
+// returned DECRYPTED (or "" with TokenSet=false when absent or undecryptable);
+// callers must never echo Token/WebhookSecret over the API.
+type GitHubConfig struct {
+	Enabled       bool
+	EnabledSet    bool
+	Token         string
+	TokenSet      bool
+	Org           string
+	WebhookSecret string
+}
+
+// SetGitHubConfigInput is the write payload for SetGitHubConfig. Pointer fields
+// are OPTIONAL partial updates: a nil pointer leaves that setting untouched, a
+// non-nil pointer overwrites it. Token is special (see SetGitHubConfig): an empty
+// *Token keeps the existing stored token; ClearToken removes it.
+type SetGitHubConfigInput struct {
+	Enabled       *bool
+	Org           *string
+	WebhookSecret *string
+	Token         *string
+	ClearToken    bool
+}
+
+// GetGitHubConfig reads the DB-stored GitHub mirror config. Absent keys map to
+// zero values (never an error) so the caller can layer env fallbacks. The token
+// is decrypted via the secretbox; a missing box or a decryption failure (rotated
+// KOTOJI_SECRET_KEY) yields TokenSet=false — treated as "not configured", never a
+// crash (LOCKED policy). Returns enabled/token/org/webhookSecret/tokenSet folded
+// into GitHubConfig for ergonomic callers.
+func (s *Store) GetGitHubConfig(ctx context.Context) (GitHubConfig, error) {
+	var cfg GitHubConfig
+
+	if v, found, err := s.getSetting(ctx, SettingGitHubMirrorEnabled); err != nil {
+		return GitHubConfig{}, err
+	} else if found {
+		cfg.EnabledSet = true
+		cfg.Enabled = v == boolTrue
+	}
+
+	if v, found, err := s.getSetting(ctx, SettingGitHubOrg); err != nil {
+		return GitHubConfig{}, err
+	} else if found {
+		cfg.Org = v
+	}
+
+	if v, found, err := s.getSetting(ctx, SettingGitHubWebhookSecret); err != nil {
+		return GitHubConfig{}, err
+	} else if found {
+		cfg.WebhookSecret = v
+	}
+
+	// Token: stored as ciphertext; decrypt best-effort. A nil box or a decode/auth
+	// failure leaves TokenSet=false so a rotated key degrades to "re-enter the PAT".
+	if v, found, err := s.getSetting(ctx, SettingGitHubToken); err != nil {
+		return GitHubConfig{}, err
+	} else if found && v != "" && s.box != nil {
+		if plain, ok := s.box.Open(v); ok {
+			cfg.Token = plain
+			cfg.TokenSet = true
+		}
+	}
+
+	return cfg, nil
+}
+
+// SetGitHubConfig persists a partial GitHub mirror config update. Only the
+// non-nil fields are written, so the admin GUI can PATCH a subset. The token is
+// WRITE-ONLY semantics: a non-nil, non-empty Token is encrypted and stored; an
+// empty Token (or a nil Token) LEAVES the existing stored token in place (so a
+// "save" that does not re-type the PAT keeps it); ClearToken=true removes the
+// stored token entirely. Encrypting a token without a configured secretbox is an
+// error (refuse to store a plaintext credential).
+func (s *Store) SetGitHubConfig(ctx context.Context, in SetGitHubConfigInput) error {
+	return s.WithTx(ctx, func(q *gen.Queries) error {
+		if in.Enabled != nil {
+			val := boolFalse
+			if *in.Enabled {
+				val = boolTrue
+			}
+			if err := q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: SettingGitHubMirrorEnabled, Value: val}); err != nil {
+				return fmt.Errorf("db: set github_mirror_enabled: %w", err)
+			}
+		}
+		if in.Org != nil {
+			if err := q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: SettingGitHubOrg, Value: *in.Org}); err != nil {
+				return fmt.Errorf("db: set github_org: %w", err)
+			}
+		}
+		if in.WebhookSecret != nil {
+			if err := q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: SettingGitHubWebhookSecret, Value: *in.WebhookSecret}); err != nil {
+				return fmt.Errorf("db: set github_webhook_secret: %w", err)
+			}
+		}
+		// Token handling (order: clear wins over set; empty set is a no-op).
+		switch {
+		case in.ClearToken:
+			if err := q.DeleteInstanceSetting(ctx, SettingGitHubToken); err != nil {
+				return fmt.Errorf("db: clear github_token: %w", err)
+			}
+		case in.Token != nil && *in.Token != "":
+			if s.box == nil {
+				// Refuse to persist a credential we cannot encrypt (no plaintext at rest).
+				return errors.New("db: cannot store github token without a secret key configured")
+			}
+			ct, err := s.box.Seal(*in.Token)
+			if err != nil {
+				return fmt.Errorf("db: encrypt github_token: %w", err)
+			}
+			if err := q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: SettingGitHubToken, Value: ct}); err != nil {
+				return fmt.Errorf("db: set github_token: %w", err)
+			}
+		}
+		// Token == nil OR empty (and not clearing): leave the stored token untouched.
+		return nil
+	})
+}
+
+// getSetting reads one instance_settings value, mapping the no-rows sentinel to
+// (.., false, nil) so the GitHub-config readers treat an absent key as "unset"
+// rather than an error.
+func (s *Store) getSetting(ctx context.Context, key string) (string, bool, error) {
+	v, err := s.GetInstanceSetting(ctx, key)
+	if err != nil {
+		if IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("db: get setting %q: %w", key, err)
+	}
+	return v, true, nil
 }
