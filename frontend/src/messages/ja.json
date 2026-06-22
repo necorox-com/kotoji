@@ -188,6 +188,9 @@
     "deleteConfirmTitle": "バージョンを削除しますか？",
     "deleteConfirmBody": "「{name}」を削除します。",
     "preview": "プレビュー",
+    "openLive": "公開サイトを開く",
+    "openPreview": "プレビューを開く",
+    "previewError": "プレビューURLの発行に失敗しました",
     "empty": {
       "title": "別バージョンはまだありません",
       "body": "下書きとは別に試したいときに新しいバージョンを作れます。"

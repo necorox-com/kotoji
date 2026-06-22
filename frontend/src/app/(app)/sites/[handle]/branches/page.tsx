@@ -10,16 +10,19 @@
  * framed as versions (not git branches) per design.md §1.2 #3.
  */
 
-import { use } from "react";
+import { use, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
-import { GitBranch } from "lucide-react";
+import { ExternalLink, GitBranch } from "lucide-react";
+import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 import { CopyableUrl } from "@/components/molecules/copyable-url";
 import { EmptyState } from "@/components/molecules/empty-state";
 import { ErrorState } from "@/components/molecules/error-state";
 import { LoadingState } from "@/components/molecules/loading-state";
-import { StatusBadge } from "@/components/atoms";
+import { Spinner, StatusBadge } from "@/components/atoms";
 import { useBranches, useConfig } from "@/lib/api/hooks";
+import { requestPreviewGrant } from "@/lib/api/preview";
 
 const DEFAULT_BASE_DOMAIN = "hosting.example.com";
 
@@ -79,14 +82,72 @@ export default function BranchesPage({ params }: SiteParams) {
                 ) : null}
                 <StatusBadge status={b.isPublished ? "published" : "draft"} />
               </div>
-              <CopyableUrl
-                value={`${b.previewSubdomain}.${baseDomain}`}
-                className="min-w-0 max-w-full sm:max-w-xs"
-              />
+              <div className="flex shrink-0 items-center gap-2">
+                <CopyableUrl
+                  value={`${b.previewSubdomain}.${baseDomain}`}
+                  className="min-w-0 max-w-full sm:max-w-[15rem]"
+                />
+                {b.isPublished ? (
+                  // Published is public — a plain external link to the live site.
+                  <a
+                    href={`//${b.previewSubdomain}.${baseDomain}/`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium text-primary hover:bg-accent"
+                  >
+                    <ExternalLink className="size-4" aria-hidden="true" />
+                    {t("openLive")}
+                  </a>
+                ) : (
+                  // Non-published previews need a one-time signed grant first.
+                  <PreviewOpenButton handle={handle} branch={b.name} />
+                )}
+              </div>
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * Opens a non-published branch's preview. Requests a one-time signed grant from
+ * the backend (sets a host-only cookie on the preview origin) and opens the
+ * returned URL in a new tab. Errors surface as a toast.
+ */
+function PreviewOpenButton({
+  handle,
+  branch,
+}: {
+  handle: string;
+  branch: string;
+}) {
+  const t = useTranslations("branches");
+  const [loading, setLoading] = useState(false);
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={loading}
+      onClick={async () => {
+        setLoading(true);
+        try {
+          const grant = await requestPreviewGrant(handle, branch);
+          window.open(grant.previewUrl, "_blank", "noopener,noreferrer");
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : t("previewError"));
+        } finally {
+          setLoading(false);
+        }
+      }}
+    >
+      {loading ? (
+        <Spinner size="sm" />
+      ) : (
+        <ExternalLink className="size-4" aria-hidden="true" />
+      )}
+      {t("openPreview")}
+    </Button>
   );
 }

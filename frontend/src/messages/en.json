@@ -188,6 +188,9 @@
     "deleteConfirmTitle": "Delete this version?",
     "deleteConfirmBody": "This will delete \"{name}\".",
     "preview": "Preview",
+    "openLive": "Open live site",
+    "openPreview": "Open preview",
+    "previewError": "Couldn't open the preview",
     "empty": {
       "title": "No alternate versions yet",
       "body": "Create a new version to try things apart from your draft."
