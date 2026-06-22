@@ -53,7 +53,11 @@ export function readCookie(name: string): string {
 const csrfMiddleware: Middleware = {
   onRequest({ request }) {
     if (MUTATING_METHODS.has(request.method.toUpperCase())) {
-      const token = readCookie(CSRF_COOKIE);
+      // In production (Secure cookies) the backend names the cookie with the
+      // `__Host-` prefix; in insecure dev it uses the bare name. Try both so the
+      // double-submit header is always set.
+      const token =
+        readCookie(`__Host-${CSRF_COOKIE}`) || readCookie(CSRF_COOKIE);
       if (token) {
         request.headers.set(CSRF_HEADER, token);
       }
