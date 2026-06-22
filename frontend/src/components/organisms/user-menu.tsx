@@ -157,12 +157,14 @@ export function UserMenu({ align = "end", className }: UserMenuProps) {
 
         <DropdownMenuSeparator />
 
-        {/* Theme switcher (radio group; hydration-safe value). */}
-        <DropdownMenuLabel>{t("theme.label")}</DropdownMenuLabel>
+        {/* Theme switcher. DropdownMenuLabel is a base-ui GroupLabel and REQUIRES
+            a Group/RadioGroup ancestor — outside one it throws Base UI error #31
+            and crashes the menu on open — so it lives INSIDE the radio group. */}
         <DropdownMenuRadioGroup
           value={mounted ? (theme ?? "system") : undefined}
           onValueChange={setTheme}
         >
+          <DropdownMenuLabel>{t("theme.label")}</DropdownMenuLabel>
           <DropdownMenuRadioItem value="light">
             <Sun aria-hidden="true" />
             {t("theme.light")}
