@@ -211,6 +211,72 @@ func (s *server) renameSite(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toSiteWire(renamed))
 }
 
+// mirrorSite POST /api/sites/{handle}/mirror — owner-only TEST + TRIGGER of the
+// GitHub mirror. It force-pushes draft+published to origin and returns a result
+// the UI can show. The mirror push is best-effort by contract (CANONICAL §1), so
+// a push failure returns 200 with ok=false + a message (NOT an HTTP error) — the
+// only non-200 outcomes are auth/not-found from resolveAccess. A site with no
+// linked repo returns 200 ok=false with a clear "not linked" message so the GUI
+// can prompt the user to link one first.
+func (s *server) mirrorSite(w http.ResponseWriter, r *http.Request) {
+	ac, ok := s.resolveAccess(w, r, chi.URLParam(r, "handle"), capOwner)
+	if !ok {
+		return
+	}
+
+	// Not linked: nothing to push. Report cleanly (200) so the UI distinguishes
+	// "not configured yet" from "push failed".
+	if ac.site.GitHubRepo == "" {
+		writeJSON(w, http.StatusOK, openapi.MirrorResult{
+			Ok:       false,
+			Pushed:   false,
+			Branches: []string{},
+			Message:  "this site is not linked to a GitHub repository",
+		})
+		return
+	}
+
+	// Push the two logical branches that matter for a mirror: the working draft and
+	// the served published tip. MirrorPush no-ops branches that do not exist.
+	branches := []site.BranchName{site.BranchDraft, site.BranchPublished}
+	branchNames := []string{string(site.BranchDraft), string(site.BranchPublished)}
+
+	err := s.deps.Site.MirrorPush(r.Context(), ac.site.ID, branches...)
+
+	res := openapi.MirrorResult{
+		Branches: branchNames,
+		Pushed:   err == nil,
+		Ok:       err == nil,
+	}
+	if err != nil {
+		// Best-effort: surface the failure in the body, NOT as an HTTP error, so the
+		// GUI can show "GitHub sync failed" without treating it as a hard error. The
+		// detail string is machine-safe (mirror codes), never the raw git stderr.
+		res.Message = "GitHub sync failed"
+		detail := mirrorErrorDetail(err)
+		res.Error = &detail
+	} else {
+		res.Message = "pushed draft and published to GitHub"
+	}
+
+	s.auditBestEffort(r.Context(), gen.InsertAuditParams{
+		ActorUserID: uuidPtr(ac.user.UserID),
+		SiteID:      uuidPtr(ac.site.ID),
+		Action:      "site.mirror",
+		Source:      gen.AuditSourceEditor,
+		Metadata:    auditMeta(map[string]any{"handle": string(ac.site.Handle), "ok": res.Ok}),
+	})
+	writeJSON(w, http.StatusOK, res)
+}
+
+// mirrorErrorDetail maps a mirror push error to a short, machine-safe code for the
+// MirrorResult.error field. It never returns raw git stderr (which could echo a
+// remote URL or hint); the taxonomy mirrors statusAndCode's wire codes.
+func mirrorErrorDetail(err error) string {
+	_, code := statusAndCode(err)
+	return code
+}
+
 // derefStr returns the pointed-to string, or "" when nil.
 func derefStr(p *string) string {
 	if p == nil {

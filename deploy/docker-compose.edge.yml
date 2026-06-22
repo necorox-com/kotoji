@@ -1,0 +1,156 @@
+# kotoji edge overlay — OPT-IN, turnkey all-in-one self-hosting.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d
+#
+# The BASE file (docker-compose.yml) stays proxy-less so it drops cleanly behind
+# an existing shared edge (Nginx Proxy Manager, Caddy, nginx, ...). This overlay
+# ADDS a single Traefik v3 service and merges routing labels onto the unchanged
+# backend/frontend services, turning the stack into a self-contained edge with
+# automatic TLS. Nothing here mutates the base service definitions beyond adding
+# labels (and dropping the host port bindings, since Traefik fronts everything).
+#
+# Routing (Host = ${KOTOJI_BASE_DOMAIN}):
+#   - HostRegexp 2-level `{anything}.${KOTOJI_BASE_DOMAIN}`  -> backend :8081  (data/serve plane; priority 30)
+#   - Host(${KOTOJI_BASE_DOMAIN}) + PathPrefix(/api /auth /mcp /healthz /readyz)
+#                                                            -> backend :8080  (control plane; priority 20)
+#   - Host(${KOTOJI_BASE_DOMAIN}) bare                       -> frontend :3000 (UI;          priority 10)
+# Hosted sites live one DNS label below the bare control host, so the 2-level
+# regexp must NOT match the bare host — it requires at least one label before
+# `.${KOTOJI_BASE_DOMAIN}`, so `kotoji.example.com` (bare) never matches it.
+#
+# TLS:
+#   - Always: entrypoint `web` :80 + entrypoint `websecure` :443.
+#   - If KOTOJI_ACME_EMAIL is unset/empty -> HTTP only (great for localhost/dev),
+#     no redirect, no cert resolver requested.
+#   - If KOTOJI_ACME_EMAIL is set -> the `letsencrypt` DNS-01 resolver issues a
+#     WILDCARD cert for ${KOTOJI_BASE_DOMAIN} + *.${KOTOJI_BASE_DOMAIN} (required
+#     for the 2-level hosted-site hosts) and web->websecure is redirected.
+#     Requires a DNS provider token, e.g. KOTOJI_ACME_DNS_PROVIDER=cloudflare with
+#     KOTOJI_CF_DNS_API_TOKEN. See deploy/README.md.
+
+name: kotoji
+
+services:
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      # --- providers ---
+      - "--providers.docker=true"
+      # Opt-in: only containers with traefik.enable=true are routed.
+      - "--providers.docker.exposedByDefault=false"
+      # Scope discovery to this compose project's network.
+      - "--providers.docker.network=kotoji_edge"
+      # --- entrypoints ---
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # When ACME is configured (KOTOJI_ACME_EMAIL set), force http->https. The
+      # value is templated from the env: empty => the flag is a harmless no-op
+      # ("redirect to web" = same entrypoint), set => redirect to websecure.
+      - "--entrypoints.web.http.redirections.entrypoint.to=${KOTOJI_EDGE_REDIRECT_TO:-web}"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=${KOTOJI_EDGE_REDIRECT_SCHEME:-http}"
+      # --- ACME (DNS-01 wildcard) — values come from env; the resolver is only
+      #     *used* by routers when KOTOJI_EDGE_CERTRESOLVER is non-empty. Defining
+      #     it unconditionally is harmless when no router references it. ---
+      - "--certificatesresolvers.letsencrypt.acme.email=${KOTOJI_ACME_EMAIL:-}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=${KOTOJI_ACME_DNS_PROVIDER:-cloudflare}"
+      # --- dashboard (opt-in, insecure local only) ---
+      - "--api.dashboard=${KOTOJI_TRAEFIK_DASHBOARD:-false}"
+      - "--api.insecure=${KOTOJI_TRAEFIK_DASHBOARD:-false}"
+      # --- logging / proxy hardening ---
+      - "--log.level=${KOTOJI_TRAEFIK_LOG_LEVEL:-INFO}"
+      - "--global.sendanonymoususage=false"
+    environment:
+      # DNS-01 provider credentials (lego picks these up by name). Cloudflare is
+      # the documented default; for other providers set KOTOJI_ACME_DNS_PROVIDER
+      # and pass that provider's token env via your own .env (these are inert when
+      # ACME is disabled).
+      CF_DNS_API_TOKEN: ${KOTOJI_CF_DNS_API_TOKEN:-}
+      # Some lego versions read CLOUDFLARE_DNS_API_TOKEN; set both for safety.
+      CLOUDFLARE_DNS_API_TOKEN: ${KOTOJI_CF_DNS_API_TOKEN:-}
+    ports:
+      - "80:80"
+      - "443:443"
+      # Traefik dashboard (only reachable when KOTOJI_TRAEFIK_DASHBOARD=true).
+      - "${KOTOJI_TRAEFIK_DASHBOARD_PORT:-8082}:8080"
+    volumes:
+      # Read-only socket: Traefik watches container labels but cannot write.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Persisted ACME material (account key + issued certs).
+      - traefikacme:/letsencrypt
+    networks:
+      - edge
+      - default
+    depends_on:
+      - backend
+      - frontend
+
+  backend:
+    # The base file binds 8080/8081 to the host; behind Traefik that is
+    # unnecessary and clashes with multi-host setups, so drop the host bindings.
+    # `!reset` clears the sequence merged from the base compose (Compose v2.24+).
+    ports: !reset []
+    networks:
+      - edge
+      - default
+    labels:
+      - "traefik.enable=true"
+      # One container exposes two ports, so declare two explicit loadbalancer
+      # services and bind each router to the matching internal port.
+      - "traefik.docker.network=kotoji_edge"
+
+      # ---- control plane (:8080): /api /auth /mcp /healthz /readyz on the bare host ----
+      - "traefik.http.routers.kotoji-control.rule=Host(`${KOTOJI_BASE_DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/auth`) || PathPrefix(`/mcp`) || PathPrefix(`/healthz`) || PathPrefix(`/readyz`))"
+      - "traefik.http.routers.kotoji-control.priority=20"
+      - "traefik.http.routers.kotoji-control.entrypoints=${KOTOJI_EDGE_ENTRYPOINTS:-web}"
+      - "traefik.http.routers.kotoji-control.service=kotoji-control"
+      - "traefik.http.routers.kotoji-control.tls=${KOTOJI_EDGE_TLS:-false}"
+      - "traefik.http.routers.kotoji-control.tls.certresolver=${KOTOJI_EDGE_CERTRESOLVER:-}"
+      - "traefik.http.services.kotoji-control.loadbalancer.server.port=8080"
+
+      # ---- data/serve plane (:8081): every 2-level hosted-site host, ALL paths ----
+      # HostRegexp requires >=1 label before `.${KOTOJI_BASE_DOMAIN}`, so the bare
+      # control host never matches. Highest priority so hosted sites win.
+      # KOTOJI_BASE_DOMAIN_REGEX is the SAME domain with literal dots escaped
+      # (Go regexp). It defaults to the .env.example dev domain. Set it whenever
+      # you set KOTOJI_BASE_DOMAIN, e.g. example.com -> example\.com.
+      - "traefik.http.routers.kotoji-sites.rule=HostRegexp(`^[^.]+\\.${KOTOJI_BASE_DOMAIN_REGEX:-hosting\\.localhost}$`)"
+      - "traefik.http.routers.kotoji-sites.priority=30"
+      - "traefik.http.routers.kotoji-sites.entrypoints=${KOTOJI_EDGE_ENTRYPOINTS:-web}"
+      - "traefik.http.routers.kotoji-sites.service=kotoji-serve"
+      - "traefik.http.routers.kotoji-sites.tls=${KOTOJI_EDGE_TLS:-false}"
+      - "traefik.http.routers.kotoji-sites.tls.certresolver=${KOTOJI_EDGE_CERTRESOLVER:-}"
+      # Wildcard cert domains for the hosted-site host set (DNS-01 only).
+      - "traefik.http.routers.kotoji-sites.tls.domains[0].main=${KOTOJI_BASE_DOMAIN}"
+      - "traefik.http.routers.kotoji-sites.tls.domains[0].sans=*.${KOTOJI_BASE_DOMAIN}"
+      - "traefik.http.services.kotoji-serve.loadbalancer.server.port=8081"
+
+  frontend:
+    ports: !reset []
+    networks:
+      - edge
+      - default
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=kotoji_edge"
+      # ---- UI (:3000): bare host, lowest priority — the catch-all for everything
+      #      on ${KOTOJI_BASE_DOMAIN} that is not a control-plane path. ----
+      - "traefik.http.routers.kotoji-ui.rule=Host(`${KOTOJI_BASE_DOMAIN}`)"
+      - "traefik.http.routers.kotoji-ui.priority=10"
+      - "traefik.http.routers.kotoji-ui.entrypoints=${KOTOJI_EDGE_ENTRYPOINTS:-web}"
+      - "traefik.http.routers.kotoji-ui.service=kotoji-ui"
+      - "traefik.http.routers.kotoji-ui.tls=${KOTOJI_EDGE_TLS:-false}"
+      - "traefik.http.routers.kotoji-ui.tls.certresolver=${KOTOJI_EDGE_CERTRESOLVER:-}"
+      - "traefik.http.services.kotoji-ui.loadbalancer.server.port=3000"
+
+networks:
+  # Dedicated edge network so Traefik's docker provider scoping
+  # (--providers.docker.network) is deterministic. The compose project name is
+  # `kotoji`, so this network's real name is `kotoji_edge`.
+  edge:
+    name: kotoji_edge
+
+volumes:
+  traefikacme:

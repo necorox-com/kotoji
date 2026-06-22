@@ -178,8 +178,9 @@ func (c *conformantEnv) checkConformance(t *testing.T, method, path string, reqB
 // exactly the 23 paths the task documents.
 func TestSpecLoadsAndIsValid(t *testing.T) {
 	doc := loadSpec(t)
-	if got := doc.Paths.Len(); got != 23 {
-		t.Fatalf("spec paths = %d, want 23", got)
+	// 24 = 23 baseline + the new POST /api/sites/{handle}/mirror operation.
+	if got := doc.Paths.Len(); got != 24 {
+		t.Fatalf("spec paths = %d, want 24", got)
 	}
 }
 
@@ -216,6 +217,9 @@ func TestResponseConformance(t *testing.T) {
 		{"listMembers", http.MethodGet, "/api/sites/conform-site/members", nil, http.StatusOK},
 		{"listTokens", http.MethodGet, "/api/sites/conform-site/tokens", nil, http.StatusOK},
 		{"getLog", http.MethodGet, "/api/sites/conform-site/branches/draft/log", nil, http.StatusOK},
+		// mirrorSite returns 200 with a MirrorResult even when not linked (ok=false);
+		// this validates the new response schema against the contract.
+		{"mirrorSite", http.MethodPost, "/api/sites/conform-site/mirror", nil, http.StatusOK},
 		{
 			"writeFile", http.MethodPut, "/api/sites/conform-site/branches/draft/file",
 			openapi.WriteFileRequest{Path: "index.html", Content: "<h1>c</h1>", BaseSha: fc.Sha}, http.StatusOK,

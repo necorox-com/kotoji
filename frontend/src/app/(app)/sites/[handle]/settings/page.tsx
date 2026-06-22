@@ -23,7 +23,7 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
 
-import { McpTokenPanel } from "@/components/organisms";
+import { McpTokenPanel, GitHubSection } from "@/components/organisms";
 import { ConfirmDialog } from "@/components/molecules/confirm-dialog";
 import { ErrorState } from "@/components/molecules/error-state";
 import { LoadingState } from "@/components/molecules/loading-state";
@@ -306,6 +306,14 @@ export default function SettingsPage({ params }: SiteParams) {
           </p>
         </section>
       ) : null}
+
+      {/* GitHub mirror linking + manual sync (owner-only; renders null otherwise). */}
+      <GitHubSection
+        handle={handle}
+        role={role}
+        githubRepo={site.githubRepo ?? null}
+        mirrorEnabled={config?.githubMirrorEnabled ?? false}
+      />
 
       {/* AI / MCP tokens */}
       <McpTokenPanel handle={handle} role={role} baseDomain={baseDomain} />

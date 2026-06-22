@@ -69,13 +69,46 @@ Then open `http://kotoji.localhost:8080`. Any `*.localhost` subdomain resolves t
 
 > Detailed setup, configuration and the MCP connection guide live in [`docs/`](./docs) *(coming soon)*.
 
-## Production (Nginx Proxy Manager + Cloudflare)
+## Production
 
-One-time setup; after this, new projects need no infra changes.
+kotoji is a `postgres + backend + frontend` Docker Compose stack. The base
+compose is deliberately **proxy-less**, so you choose one of two deployment
+modes. Full steps (DNS records, copy-paste proxy configs, env) live in
+[`deploy/README.md`](./deploy/README.md).
 
-1. **DNS (Cloudflare):** add an `A` record `*.hosting` → your server IP (DNS-only / grey cloud). DNS wildcards only match one label, so `*.example.com` does **not** cover `*.hosting.example.com` — you need this record.
-2. **NPM:** issue a Let's Encrypt **wildcard** cert for `*.hosting.example.com` via the **DNS-01 challenge** (Cloudflare API token). Wildcard certs require DNS validation.
-3. **NPM:** proxy `*.hosting.example.com` and `hosting.example.com` to the kotoji app.
+### (a) Behind your existing proxy
+
+If you already run a shared edge (Nginx Proxy Manager, Caddy, nginx, Traefik…),
+use the base compose and point your proxy at the backend (`:8080` control,
+`:8081` serve) and frontend (`:3000`):
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+Copy-paste NPM and Caddy configs are in [`deploy/npm/README.md`](./deploy/npm/README.md).
+
+### (b) All-in-one (turnkey)
+
+If you want a self-contained box with automatic TLS, add the opt-in Traefik
+overlay — it bundles a Traefik v3 edge and issues a wildcard cert for you:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.edge.yml up -d
+```
+
+One-time infra; after this, new projects need no changes:
+
+1. **DNS:** add `A` records `your-domain` → server IP **and** `*.your-domain` →
+   server IP. DNS wildcards match one label, so `*.your-domain` covers every
+   hosted site (`my-tool.your-domain`) but not the bare apex — you need both.
+2. **ACME DNS token:** a wildcard cert requires the **DNS-01 challenge**, so set
+   `KOTOJI_ACME_EMAIL` + a DNS provider token (e.g. `KOTOJI_CF_DNS_API_TOKEN` for
+   Cloudflare) in `deploy/.env`. Traefik then auto-issues the
+   `your-domain` + `*.your-domain` wildcard cert.
+
+Leave the ACME vars empty and the overlay serves plain **HTTP** — handy for
+`hosting.localhost` and first runs.
 
 ## Status
 

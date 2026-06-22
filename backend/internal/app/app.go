@@ -148,6 +148,10 @@ func siteConfig(cfg config.Config) site.Config {
 		Root:     filepath.Join(cfg.DataDir, sitesSubdir),
 		GitBin:   cfg.GitBin,
 		MirrorOn: cfg.GitHub.Enabled,
+		// The instance-level mirror token (KOTOJI_GITHUB_APP_TOKEN/PAT) authenticates
+		// push/fetch against github.com. It is injected per git call via an HTTP
+		// header in the environment, never written to .git/config (see git_auth.go).
+		GitHubToken: cfg.GitHub.Token,
 		Zip: site.ZipConfig{
 			MaxUploadBytes:       cfg.Zip.MaxUploadBytes,
 			MaxUncompressedBytes: cfg.Zip.MaxTotalBytes,

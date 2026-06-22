@@ -383,6 +383,10 @@ func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 		BaseDomain:         a.cfg.BaseDomain,
 		AuthMode:           string(a.cfg.AuthMode),
 		DefaultPublishMode: "direct",
+		// The instance can mirror only when the feature is enabled AND a push token
+		// is configured; the GUI keys per-site linking/sync controls off this so a
+		// half-configured instance (enabled but no token) does not advertise mirroring.
+		GithubMirrorEnabled: a.cfg.GitHub.Enabled && a.cfg.GitHub.Token != "",
 	})
 }
 
@@ -403,17 +407,18 @@ type userJSON struct {
 }
 
 type instanceConfigJSON struct {
-	MaxUploadBytes     int64    `json:"maxUploadBytes"`
-	ZipMaxFiles        int      `json:"zipMaxFiles"`
-	ZipMaxTotalBytes   int64    `json:"zipMaxTotalBytes"`
-	ZipMaxRatio        int      `json:"zipMaxRatio"`
-	AllowedExtensions  []string `json:"allowedExtensions"`
-	HandleMinLen       int      `json:"handleMinLen"`
-	HandleMaxLen       int      `json:"handleMaxLen"`
-	ReservedHandles    []string `json:"reservedHandles"`
-	BaseDomain         string   `json:"baseDomain"`
-	AuthMode           string   `json:"authMode"`
-	DefaultPublishMode string   `json:"defaultPublishMode"`
+	MaxUploadBytes      int64    `json:"maxUploadBytes"`
+	ZipMaxFiles         int      `json:"zipMaxFiles"`
+	ZipMaxTotalBytes    int64    `json:"zipMaxTotalBytes"`
+	ZipMaxRatio         int      `json:"zipMaxRatio"`
+	AllowedExtensions   []string `json:"allowedExtensions"`
+	HandleMinLen        int      `json:"handleMinLen"`
+	HandleMaxLen        int      `json:"handleMaxLen"`
+	ReservedHandles     []string `json:"reservedHandles"`
+	BaseDomain          string   `json:"baseDomain"`
+	AuthMode            string   `json:"authMode"`
+	DefaultPublishMode  string   `json:"defaultPublishMode"`
+	GithubMirrorEnabled bool     `json:"githubMirrorEnabled"`
 }
 
 // reservedHandles is the locked baseline blocklist (CANONICAL §5.1). Returned in

@@ -6,6 +6,7 @@ import (
 
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/openapi"
+	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
 func TestCreateSite(t *testing.T) {
@@ -199,6 +200,96 @@ func TestUpdateSite(t *testing.T) {
 	if got := e.store.settingsUpdates[0].Visibility; got != gen.SiteVisibilityInternal {
 		t.Fatalf("visibility = %q, want internal", got)
 	}
+}
+
+func TestMirrorSite(t *testing.T) {
+	// withRepo links the seeded site to a GitHub repo so the mirror has a target.
+	withRepo := func(in *site.CreateSiteInput) { in.GitHubRepo = "necorox-com/example" }
+
+	t.Run("owner triggers a successful mirror push", func(t *testing.T) {
+		e := newTestEnv(t)
+		owner := e.newUser()
+		e.createSiteWith("mirror-ok", owner, withRepo)
+		rec := e.request(http.MethodPost, "/api/sites/mirror-ok/mirror").as(owner).do()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var got openapi.MirrorResult
+		decodeBody(t, rec, &got)
+		if !got.Ok || !got.Pushed {
+			t.Fatalf("ok=%v pushed=%v, want both true (body=%s)", got.Ok, got.Pushed, rec.Body.String())
+		}
+		if got.Error != nil {
+			t.Fatalf("error = %v, want nil on success", *got.Error)
+		}
+		// draft + published are the mirrored branches.
+		if len(got.Branches) != 2 {
+			t.Fatalf("branches = %v, want draft+published", got.Branches)
+		}
+		if !contains(e.store.auditActions(), "site.mirror") {
+			t.Fatalf("audit actions = %v, want site.mirror", e.store.auditActions())
+		}
+	})
+
+	t.Run("not linked returns 200 ok=false with a clear message", func(t *testing.T) {
+		e := newTestEnv(t)
+		owner := e.newUser()
+		e.createSite("mirror-unlinked", owner) // no GitHubRepo
+		rec := e.request(http.MethodPost, "/api/sites/mirror-unlinked/mirror").as(owner).do()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var got openapi.MirrorResult
+		decodeBody(t, rec, &got)
+		if got.Ok || got.Pushed {
+			t.Fatalf("ok=%v pushed=%v, want both false when not linked", got.Ok, got.Pushed)
+		}
+		if got.Message == "" {
+			t.Fatalf("message must explain the site is not linked (got empty)")
+		}
+	})
+
+	t.Run("best-effort push failure returns 200 ok=false (not an HTTP error)", func(t *testing.T) {
+		e := newTestEnv(t)
+		owner := e.newUser()
+		e.createSiteWith("mirror-fail", owner, withRepo)
+		// Force the next MirrorPush to fail (origin unreachable / auth rejected).
+		e.svc.FailNext["MirrorPush"] = site.ErrGit
+		rec := e.request(http.MethodPost, "/api/sites/mirror-fail/mirror").as(owner).do()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 even on push failure (body=%s)", rec.Code, rec.Body.String())
+		}
+		var got openapi.MirrorResult
+		decodeBody(t, rec, &got)
+		if got.Ok || got.Pushed {
+			t.Fatalf("ok=%v pushed=%v, want both false on push failure", got.Ok, got.Pushed)
+		}
+		if got.Error == nil || *got.Error == "" {
+			t.Fatalf("error detail must be set on push failure")
+		}
+	})
+
+	t.Run("editor cannot mirror (owner-only, 403)", func(t *testing.T) {
+		e := newTestEnv(t)
+		owner := e.newUser()
+		editor := e.newUser()
+		st := e.createSiteWith("mirror-deny", owner, withRepo)
+		e.store.setRole(st.ID, editor.rec.ID, gen.SiteRoleEditor)
+		rec := e.request(http.MethodPost, "/api/sites/mirror-deny/mirror").as(editor).do()
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", rec.Code)
+		}
+	})
+
+	t.Run("anonymous is unauthenticated (401)", func(t *testing.T) {
+		e := newTestEnv(t)
+		owner := e.newUser()
+		e.createSiteWith("mirror-anon", owner, withRepo)
+		rec := e.request(http.MethodPost, "/api/sites/mirror-anon/mirror").do()
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+	})
 }
 
 func contains(ss []string, want string) bool {

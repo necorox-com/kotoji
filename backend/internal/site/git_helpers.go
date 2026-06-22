@@ -296,7 +296,11 @@ func (g *gitService) bestEffortMirror(ctx context.Context, id uuid.UUID, branch 
 	if err := g.runErr(ctx, id, "remote", "get-url", "origin"); err != nil {
 		return
 	}
-	_, _ = g.run(ctx, id, "push", "--force-with-lease", "origin", string(branch))
+	// runMirror injects the GitHub auth header (env-only, never argv/logged). With
+	// no token configured the push is unauthenticated and will simply fail against
+	// a private remote; that failure is swallowed here (best-effort), so the
+	// originating save/publish still succeeds.
+	_, _ = g.runMirror(ctx, id, "push", "--force-with-lease", "origin", string(branch))
 }
 
 // ---- parsing helpers ----

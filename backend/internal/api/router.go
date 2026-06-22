@@ -100,6 +100,8 @@ func (s *server) mountAPI(r chi.Router) {
 			r.Patch("/", s.updateSite)
 			r.Delete("/", s.deleteSite)
 			r.Post("/rename", s.renameSite)
+			// GitHub mirror: owner-only manual TEST + TRIGGER of a draft+published push.
+			r.Post("/mirror", s.mirrorSite)
 
 			// members
 			r.Get("/members", s.listMembers)

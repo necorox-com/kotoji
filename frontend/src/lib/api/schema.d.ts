@@ -369,6 +369,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sites/{handle}/mirror": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handle: components["parameters"]["Handle"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Manually TEST + TRIGGER a GitHub mirror push of draft + published (owner only)
+         * @description Force-pushes the working draft and the served published branch to the linked GitHub repository (origin) using the instance-level mirror token. The push is best-effort by contract: a remote/auth failure returns 200 with ok=false and a message (never an HTTP error) so the GUI can surface "GitHub sync failed". A site with no linked repository returns 200 ok=false with a "not linked" message. The only non-200 outcomes are 401/403/404 from access control. No request body.
+         */
+        post: operations["mirrorSite"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sites/{handle}/diff": {
         parameters: {
             query?: never;
@@ -543,6 +565,8 @@ export interface components {
             baseDomain: string;
             authMode: components["schemas"]["AuthMode"];
             defaultPublishMode: components["schemas"]["PublishMode"];
+            /** @description True when the instance can mirror to GitHub at all (KOTOJI_GITHUB_MIRROR_ENABLED set AND a push token configured). The GUI keys per-site linking/sync controls off this flag. */
+            githubMirrorEnabled: boolean;
         };
         Site: {
             /** Format: uuid */
@@ -738,6 +762,18 @@ export interface components {
             fromCommit: components["schemas"]["Sha"];
             pushed: boolean;
             warnings?: string[];
+        };
+        MirrorResult: {
+            /** @description True when the mirror push succeeded; false on a best-effort failure (still 200). */
+            ok: boolean;
+            /** @description True when a push was actually attempted and accepted by the remote. */
+            pushed: boolean;
+            /** @description Branches the mirror push targeted (typically draft + published). */
+            branches: string[];
+            /** @description Human-readable outcome the UI can show (e.g. "GitHub sync failed" or "this site is not linked to a GitHub repository"). */
+            message: string;
+            /** @description Short machine-safe error detail when the push failed; null on success. */
+            error?: string | null;
         };
         DiffResult: {
             fromSha: string;
@@ -1664,6 +1700,31 @@ export interface operations {
                 };
             };
             422: components["responses"]["ValidationFailed"];
+        };
+    };
+    mirrorSite: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handle: components["parameters"]["Handle"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Mirror push attempted (see ok/pushed for the outcome) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MirrorResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     getDiff: {

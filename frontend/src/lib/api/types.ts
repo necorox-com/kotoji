@@ -31,6 +31,7 @@ export type Site = S["Site"];
 export type SiteSummary = S["SiteSummary"];
 export type CreateSiteRequest = S["CreateSiteRequest"];
 export type UpdateSiteRequest = S["UpdateSiteRequest"];
+export type MirrorResult = S["MirrorResult"];
 
 // -------- members --------
 export type Member = S["Member"];

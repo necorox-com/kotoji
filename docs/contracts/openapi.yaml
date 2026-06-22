@@ -623,6 +623,31 @@ paths:
                   - $ref: "#/components/schemas/PublishConflictEnvelope"
         "422": { $ref: "#/components/responses/ValidationFailed" }
 
+  /api/sites/{handle}/mirror:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    post:
+      tags: [sites]
+      operationId: mirrorSite
+      summary: Manually TEST + TRIGGER a GitHub mirror push of draft + published (owner only)
+      description: >
+        Force-pushes the working draft and the served published branch to the
+        linked GitHub repository (origin) using the instance-level mirror token.
+        The push is best-effort by contract: a remote/auth failure returns 200
+        with ok=false and a message (never an HTTP error) so the GUI can surface
+        "GitHub sync failed". A site with no linked repository returns 200 ok=false
+        with a "not linked" message. The only non-200 outcomes are 401/403/404 from
+        access control. No request body.
+      responses:
+        "200":
+          description: Mirror push attempted (see ok/pushed for the outcome)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MirrorResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/sites/{handle}/diff:
     parameters:
       - $ref: "#/components/parameters/Handle"
@@ -937,7 +962,8 @@ components:
       type: object
       required:
         [maxUploadBytes, zipMaxFiles, zipMaxTotalBytes, allowedExtensions,
-         handleMinLen, handleMaxLen, reservedHandles, baseDomain, authMode, defaultPublishMode]
+         handleMinLen, handleMaxLen, reservedHandles, baseDomain, authMode,
+         defaultPublishMode, githubMirrorEnabled]
       properties:
         maxUploadBytes: { type: integer, format: int64 }
         zipMaxFiles: { type: integer }
@@ -955,6 +981,12 @@ components:
         baseDomain: { type: string, example: hosting.example.com }
         authMode: { $ref: "#/components/schemas/AuthMode" }
         defaultPublishMode: { $ref: "#/components/schemas/PublishMode" }
+        githubMirrorEnabled:
+          type: boolean
+          description: >
+            True when the instance can mirror to GitHub at all
+            (KOTOJI_GITHUB_MIRROR_ENABLED set AND a push token configured). The GUI
+            keys per-site linking/sync controls off this flag.
 
     # ---------- sites ----------
     Site:
@@ -1173,6 +1205,28 @@ components:
         warnings:
           type: array
           items: { type: string }
+    MirrorResult:
+      type: object
+      required: [ok, pushed, branches, message]
+      properties:
+        ok:
+          type: boolean
+          description: True when the mirror push succeeded; false on a best-effort failure (still 200).
+        pushed:
+          type: boolean
+          description: True when a push was actually attempted and accepted by the remote.
+        branches:
+          type: array
+          items: { type: string }
+          description: Branches the mirror push targeted (typically draft + published).
+        message:
+          type: string
+          description: >
+            Human-readable outcome the UI can show (e.g. "GitHub sync failed" or
+            "this site is not linked to a GitHub repository").
+        error:
+          type: ["string", "null"]
+          description: Short machine-safe error detail when the push failed; null on success.
     DiffResult:
       type: object
       required: [fromSha, toSha, files]

@@ -301,14 +301,17 @@ type InstanceConfig struct {
 	AuthMode           AuthMode    `json:"authMode"`
 	BaseDomain         string      `json:"baseDomain"`
 	DefaultPublishMode PublishMode `json:"defaultPublishMode"`
-	HandleMaxLen       int         `json:"handleMaxLen"`
-	HandleMinLen       int         `json:"handleMinLen"`
-	MaxUploadBytes     int64       `json:"maxUploadBytes"`
-	ReservedHandles    []string    `json:"reservedHandles"`
-	ZipMaxEntryBytes   *int64      `json:"zipMaxEntryBytes,omitempty"`
-	ZipMaxFiles        int         `json:"zipMaxFiles"`
-	ZipMaxRatio        *int        `json:"zipMaxRatio,omitempty"`
-	ZipMaxTotalBytes   int64       `json:"zipMaxTotalBytes"`
+
+	// GithubMirrorEnabled True when the instance can mirror to GitHub at all (KOTOJI_GITHUB_MIRROR_ENABLED set AND a push token configured). The GUI keys per-site linking/sync controls off this flag.
+	GithubMirrorEnabled bool     `json:"githubMirrorEnabled"`
+	HandleMaxLen        int      `json:"handleMaxLen"`
+	HandleMinLen        int      `json:"handleMinLen"`
+	MaxUploadBytes      int64    `json:"maxUploadBytes"`
+	ReservedHandles     []string `json:"reservedHandles"`
+	ZipMaxEntryBytes    *int64   `json:"zipMaxEntryBytes,omitempty"`
+	ZipMaxFiles         int      `json:"zipMaxFiles"`
+	ZipMaxRatio         *int     `json:"zipMaxRatio,omitempty"`
+	ZipMaxTotalBytes    int64    `json:"zipMaxTotalBytes"`
 }
 
 // LogResult defines model for LogResult.
@@ -334,6 +337,24 @@ type Member struct {
 	Email       openapi_types.Email `json:"email"`
 	Role        SiteRole            `json:"role"`
 	UserId      openapi_types.UUID  `json:"userId"`
+}
+
+// MirrorResult defines model for MirrorResult.
+type MirrorResult struct {
+	// Branches Branches the mirror push targeted (typically draft + published).
+	Branches []string `json:"branches"`
+
+	// Error Short machine-safe error detail when the push failed; null on success.
+	Error *string `json:"error"`
+
+	// Message Human-readable outcome the UI can show (e.g. "GitHub sync failed" or "this site is not linked to a GitHub repository").
+	Message string `json:"message"`
+
+	// Ok True when the mirror push succeeded; false on a best-effort failure (still 200).
+	Ok bool `json:"ok"`
+
+	// Pushed True when a push was actually attempted and accepted by the remote.
+	Pushed bool `json:"pushed"`
 }
 
 // PublishConflictEnvelope defines model for PublishConflictEnvelope.

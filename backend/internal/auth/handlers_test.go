@@ -63,6 +63,37 @@ func TestPublicConfig(t *testing.T) {
 	require.Equal(t, 3, got.HandleMinLen)
 	require.Contains(t, got.ReservedHandles, "draft")
 	require.Equal(t, "direct", got.DefaultPublishMode)
+	// Default config has the mirror disabled and no token => not advertised.
+	require.False(t, got.GithubMirrorEnabled)
+}
+
+// TestPublicConfig_GithubMirrorEnabled is the config-plumbing test for the
+// instance mirror flag: it is true ONLY when the feature is enabled AND a push
+// token is configured (a half-configured instance must report false).
+func TestPublicConfig_GithubMirrorEnabled(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled bool
+		token   string
+		want    bool
+	}{
+		{name: "disabled, no token", enabled: false, token: "", want: false},
+		{name: "enabled but no token (half-configured)", enabled: true, token: "", want: false},
+		{name: "disabled but token present", enabled: false, token: "ghp_x", want: false},
+		{name: "enabled and token present", enabled: true, token: "ghp_x", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, _ := newTestAuth(t, &fakeProvider{key: "dev"})
+			a.cfg.GitHub = config.GitHubMirror{Enabled: tc.enabled, Token: tc.token}
+			rec := httptest.NewRecorder()
+			router(a).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+			require.Equal(t, http.StatusOK, rec.Code)
+			var got instanceConfigJSON
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+			require.Equal(t, tc.want, got.GithubMirrorEnabled)
+		})
+	}
 }
 
 func TestMe_Unauthenticated(t *testing.T) {

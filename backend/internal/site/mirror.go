@@ -62,7 +62,9 @@ func (g *gitService) MirrorPush(ctx context.Context, id uuid.UUID, branches ...B
 		for _, b := range branches {
 			args = append(args, string(b))
 		}
-		if _, e := g.run(ctx, id, args...); e != nil {
+		// runMirror injects the GitHub auth header via the environment (never argv),
+		// so the token cannot leak into the *GitError this may wrap.
+		if _, e := g.runMirror(ctx, id, args...); e != nil {
 			return wrapGit(e)
 		}
 		return nil
@@ -82,7 +84,8 @@ func (g *gitService) FetchAndUpdate(ctx context.Context, id uuid.UUID, branch Br
 	}
 	var ci CommitInfo
 	err = g.withWriteLock(id, func() error {
-		if _, e := g.run(ctx, id, "fetch", "origin", string(branch)); e != nil {
+		// Authenticated fetch (private mirrors need the token); auth travels via env.
+		if _, e := g.runMirror(ctx, id, "fetch", "origin", string(branch)); e != nil {
 			return wrapGit(e)
 		}
 		localTip, e := g.revParse(ctx, id, string(branch))

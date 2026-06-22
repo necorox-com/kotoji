@@ -939,6 +939,11 @@ func (f *FakeService) MirrorPush(ctx context.Context, id uuid.UUID, branches ...
 	if _, err := f.liveSite(id); err != nil {
 		return err
 	}
+	// FailNext lets handler tests exercise the best-effort push-failure branch
+	// (origin unreachable / auth rejected) without a real remote.
+	if err := f.failOnce("MirrorPush"); err != nil {
+		return err
+	}
 	// The fake has no remote to push to; success is the best-effort contract.
 	return nil
 }

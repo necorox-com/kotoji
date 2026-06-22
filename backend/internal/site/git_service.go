@@ -22,7 +22,18 @@ type Config struct {
 	MirrorOn    bool   // whether mirror-push is attempted at all (best-effort regardless)
 	ListLimit   int    // default LogOptions.Limit when 0
 	MaxLogLimit int    // hard cap for LogOptions.Limit
-	Zip         ZipConfig
+	// GitHubToken is the instance-level PAT/app token used to AUTHENTICATE mirror
+	// push/fetch against github.com. It is injected per git invocation via an HTTP
+	// extra-header (NEVER written to .git/config or the remote URL on disk) and is
+	// scrubbed from every command output/log (see git_auth.go). Empty => mirroring
+	// is unauthenticated (anonymous push to a public repo fails; we no-op with a
+	// warning rather than hang on a credential prompt — scrubbedEnv disables prompts).
+	GitHubToken string
+	// GitHubUser is the basic-auth username paired with the token. GitHub accepts
+	// any non-empty username with a token as the password; "x-access-token" is the
+	// canonical value for app/installation tokens, so we default to it.
+	GitHubUser string
+	Zip        ZipConfig
 }
 
 // ZipConfig holds the ImportZip security limits (CANONICAL / site-service.md §7).

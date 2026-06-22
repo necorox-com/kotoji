@@ -43,3 +43,4 @@ export { HistoryTimeline, type HistoryTimelineProps } from "./history-timeline";
 export { MemberTable, type MemberTableProps } from "./member-table";
 export { CreateSiteForm, type CreateSiteFormProps } from "./create-site-form";
 export { McpTokenPanel, type McpTokenPanelProps } from "./mcp-token-panel";
+export { GitHubSection, type GitHubSectionProps } from "./github-section";

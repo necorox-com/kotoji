@@ -12,6 +12,7 @@ import { apiClient, call } from "../client";
 import { queryKeys } from "../keys";
 import type {
   CreateSiteRequest,
+  MirrorResult,
   Site,
   SiteSummary,
   UpdateSiteRequest,
@@ -88,6 +89,33 @@ export function useUpdateSite(handle: string) {
     onSuccess: (site) => {
       qc.setQueryData(queryKeys.site(handle).detail(), site);
       qc.invalidateQueries({ queryKey: queryKeys.sites() });
+    },
+  });
+}
+
+/**
+ * Manually trigger a GitHub mirror push of draft + published (owner only).
+ *
+ * The endpoint is best-effort by contract: it returns 200 in EVERY non-access
+ * outcome (not linked / remote unreachable / success). Therefore `call()` only
+ * throws on the access-control codes (401/403/404); the {ok,message} body for
+ * the not-linked / push-failed cases arrives as a normal resolved MirrorResult
+ * that the caller surfaces via toast. On a successful push the site detail is
+ * refreshed (publishedSha/updatedAt may have advanced server-side).
+ */
+export function useMirror(handle: string) {
+  const qc = useQueryClient();
+  return useMutation<MirrorResult, Error, void>({
+    mutationFn: () =>
+      call(() =>
+        apiClient.POST("/api/sites/{handle}/mirror", {
+          params: { path: { handle } },
+        })
+      ),
+    onSuccess: (result) => {
+      if (result.ok) {
+        qc.invalidateQueries({ queryKey: queryKeys.site(handle).detail() });
+      }
     },
   });
 }
