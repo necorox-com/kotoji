@@ -46,27 +46,42 @@ function useMounted(): boolean {
   );
 }
 
-/** The koto-bridge "人"-shaped brand glyph (§1.1). Gold string accent. */
+/**
+ * kotoji-tōrō (琴柱灯籠) brand mark — the same lantern as the favicon
+ * (app/icon.svg): curved cap + finial, a glowing light chamber, and the two
+ * splayed koto-bridge legs, on the Kaga-indigo→violet brand tile.
+ */
 export function BrandMark({ className }: { className?: string }) {
   return (
     <svg
-      viewBox="0 0 56 56"
-      fill="none"
-      aria-hidden="true"
-      className={cn("size-6 text-primary", className)}
+      viewBox="0 0 32 32"
+      role="img"
+      aria-label="kotoji"
+      className={cn("size-6", className)}
     >
+      <defs>
+        <linearGradient id="kotoji-mark-bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="#5b5bf0" />
+          <stop offset=".55" stopColor="#7a5bf5" />
+          <stop offset="1" stopColor="#9b6bff" />
+        </linearGradient>
+        <radialGradient id="kotoji-mark-glow" cx=".5" cy=".5" r=".5">
+          <stop offset="0" stopColor="#ffe6a8" />
+          <stop offset="1" stopColor="#ffcf6b" />
+        </radialGradient>
+      </defs>
+      <rect width="32" height="32" rx="7.5" fill="url(#kotoji-mark-bg)" />
+      <g stroke="#fff" strokeWidth="2.2" strokeLinecap="round">
+        <path d="M12.8 18.7 8.2 26.3" />
+        <path d="M19.2 18.7 23.8 26.3" />
+      </g>
       <path
-        d="M28 10 L44 44 M28 10 L12 44"
-        stroke="currentColor"
-        strokeWidth="3"
-        strokeLinecap="round"
+        d="M6 11.7 Q9 10.8 10.8 11.1 Q16 6.7 21.2 11.1 Q23 10.8 26 11.7 Q21 8.2 16 7 Q11 8.2 6 11.7 Z"
+        fill="#fff"
       />
-      <path
-        d="M18 34 L38 34"
-        stroke="var(--brand-gold)"
-        strokeWidth="3"
-        strokeLinecap="round"
-      />
+      <circle cx="16" cy="5.4" r="1.5" fill="#fff" />
+      <rect x="10.7" y="12" width="10.6" height="7.4" rx="2.4" fill="#fff" />
+      <circle cx="16" cy="15.7" r="2.2" fill="url(#kotoji-mark-glow)" />
     </svg>
   );
 }
