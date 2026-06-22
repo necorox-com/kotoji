@@ -80,22 +80,23 @@ export default function LoginPage() {
         </Button>
       ) : null}
 
-      {/* Admin-password mode — internal/self-host. Posts to the same backend
-          entry; the field is sent as the `password` query so the backend can
-          establish the session, then redirect to `next`. */}
+      {/* Admin-password mode (internal/self-host). NATIVE form POST: the password
+          travels in the request BODY (never the URL/query), the backend sets the
+          opaque session cookie and 302s to `next`. /auth/login is outside the
+          /api CSRF subtree, so no CSRF token is needed here. */}
       {authMode === "password" ? (
         <form
           className="space-y-3"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const params = new URLSearchParams({ next, password });
-            go(`${API_BASE}/auth/login?${params.toString()}`);
-          }}
+          method="post"
+          action={`${API_BASE}/auth/login`}
+          onSubmit={() => setSigningIn(true)}
         >
+          <input type="hidden" name="next" value={next} />
           <div className="space-y-1.5">
             <Label htmlFor="admin-password">{t("adminPassword")}</Label>
             <Input
               id="admin-password"
+              name="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
