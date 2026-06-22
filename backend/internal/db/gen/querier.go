@@ -42,6 +42,11 @@ type Querier interface {
 	DeleteSession(ctx context.Context, id string) error
 	// "Log out everywhere" / admin kill-switch.
 	DeleteUserSessions(ctx context.Context, userID uuid.UUID) error
+	// instance_settings.sql — instance-level key/value settings.
+	// Columns match the 0003_instance_settings DDL.
+	// Read one setting value by key. pgx.ErrNoRows => the key is unset (found=false
+	// at the store layer). Used by the first-run admin-password flow.
+	GetInstanceSetting(ctx context.Context, key string) (string, error)
 	// Full membership row for (site, user).
 	GetMember(ctx context.Context, arg GetMemberParams) (SiteMember, error)
 	// AUTHZ HOT PATH: this user's role on this site; no row => no access.
@@ -127,6 +132,9 @@ type Querier interface {
 	RenameHandle(ctx context.Context, arg RenameHandleParams) error
 	// Soft revoke (instant). Scoped to the site to prevent cross-site revocation.
 	RevokeToken(ctx context.Context, arg RevokeTokenParams) error
+	// Upsert one setting value (insert or overwrite). The updated_at trigger stamps
+	// the time on UPDATE; the INSERT default covers first write.
+	SetInstanceSetting(ctx context.Context, arg SetInstanceSettingParams) error
 	// Update the cache pointer at publish time (called AFTER the git ref move succeeds).
 	SetPublished(ctx context.Context, arg SetPublishedParams) error
 	// Configure (or clear, when NULL) the GitHub mirror remote for a site.

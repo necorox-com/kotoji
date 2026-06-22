@@ -18,6 +18,7 @@ const (
 	codeForbidden       = "forbidden"
 	codeInternal        = "internal"
 	codeValidation      = "validation"
+	codeConflict        = "conflict"
 )
 
 // SessionAuth is the request middleware that loads the session (if any) onto the

@@ -32,6 +32,11 @@ type Querier = gen.Querier
 // dead/slow database fails fast instead of hanging the caller.
 const pingTimeout = 5 * time.Second
 
+// SettingAdminPasswordHash is the instance_settings key under which the first-run
+// admin-password bcrypt hash is stored (AUTH_MODE=password, no env password). It
+// is exported so the auth layer can assert its own copy of the key stays in sync.
+const SettingAdminPasswordHash = "admin_password_hash"
+
 // Store is the application-facing handle to the metadata database. It embeds the
 // generated *gen.Queries (so every named query is available directly) and owns the
 // underlying pgxpool for lifecycle (Close) and transactions (WithTx).
@@ -168,4 +173,33 @@ func (s *Store) RenameHandleWithRedirect(ctx context.Context, id uuid.UUID, oldH
 // not exist" signal from the :one queries. Callers map this to site.ErrNotFound.
 func IsNotFound(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+// ---- instance settings (first-run admin password) ----
+
+// GetAdminPasswordHash returns the DB-stored bcrypt hash of the admin password
+// and whether it is set. A missing key yields ("", false, nil) — NOT an error —
+// so callers can branch cleanly into the "no DB credential" first-run path. Any
+// other store error is surfaced (found is false in that case).
+func (s *Store) GetAdminPasswordHash(ctx context.Context) (hash string, found bool, err error) {
+	v, err := s.GetInstanceSetting(ctx, SettingAdminPasswordHash)
+	if err != nil {
+		if IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("db: get admin password hash: %w", err)
+	}
+	return v, true, nil
+}
+
+// SetAdminPasswordHash persists (or overwrites) the admin-password bcrypt hash.
+// The plaintext is hashed by the caller (auth layer); this layer never sees it.
+func (s *Store) SetAdminPasswordHash(ctx context.Context, hash string) error {
+	if err := s.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{
+		Key:   SettingAdminPasswordHash,
+		Value: hash,
+	}); err != nil {
+		return fmt.Errorf("db: set admin password hash: %w", err)
+	}
+	return nil
 }

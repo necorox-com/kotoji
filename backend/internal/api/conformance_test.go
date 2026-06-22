@@ -175,12 +175,13 @@ func (c *conformantEnv) checkConformance(t *testing.T, method, path string, reqB
 }
 
 // TestSpecLoadsAndIsValid asserts the frozen contract loads + validates and has
-// exactly the 23 paths the task documents.
+// exactly the documented number of paths.
 func TestSpecLoadsAndIsValid(t *testing.T) {
 	doc := loadSpec(t)
-	// 24 = 23 baseline + the new POST /api/sites/{handle}/mirror operation.
-	if got := doc.Paths.Len(); got != 24 {
-		t.Fatalf("spec paths = %d, want 24", got)
+	// 25 = 23 baseline + POST /api/sites/{handle}/mirror + POST /auth/setup
+	// (first-run admin-password setup).
+	if got := doc.Paths.Len(); got != 25 {
+		t.Fatalf("spec paths = %d, want 25", got)
 	}
 }
 

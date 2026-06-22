@@ -10,6 +10,12 @@
  *  - password  → an admin-password field posting to the backend login,
  *  - none/dev  → an explicit, clearly-labeled "開発モードで入る" button.
  *
+ * FIRST-RUN: when the instance reports `setupRequired === true` (AUTH_MODE=
+ * password AND no env admin password AND no stored hash yet — see /api/config),
+ * we render the first-run admin-password setup screen INSTEAD of the sign-in UI.
+ * On success the backend has set the session cookie, so we navigate client-side
+ * to the validated `next`. On 409 (already set up) we fall back to sign-in.
+ *
  * Auth is a full browser navigation to the Go backend (never an in-app fetch) so
  * the opaque session cookie is set by the backend; the frontend never sees tokens
  * (design.md §4.3). The card chrome (mark + tagline) is the (auth) layout.
@@ -19,7 +25,7 @@
  */
 
 import { useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { LogIn } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -27,6 +33,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/atoms";
 import { LoadingState } from "@/components/molecules/loading-state";
+import { SetupForm } from "@/components/organisms/setup-form";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useConfig } from "@/lib/api/hooks";
 
 // The backend origin (dev http://localhost:8080; prod "" = same-origin).
@@ -38,15 +46,34 @@ function loginUrl(next: string): string {
   return `${API_BASE}/auth/login?${params.toString()}`;
 }
 
+/**
+ * Sanitize a post-auth redirect target for CLIENT-side navigation. Only same-app
+ * absolute paths are allowed — anything that could escape the origin (scheme,
+ * protocol-relative "//host", or a non-"/" value) collapses to /dashboard. This
+ * prevents an open-redirect via the `next` query when we use router.replace
+ * (the backend validates its own `next` for the full-navigation flows).
+ */
+function safeNext(next: string | null): string {
+  if (!next || !next.startsWith("/") || next.startsWith("//")) {
+    return "/dashboard";
+  }
+  return next;
+}
+
 export default function LoginPage() {
   const t = useTranslations("auth");
+  const router = useRouter();
   const searchParams = useSearchParams();
   const { data: config, isLoading } = useConfig();
 
   const [signingIn, setSigningIn] = useState(false);
   const [password, setPassword] = useState("");
+  // When setup completes with a 409 (already configured), flip to the sign-in UI
+  // even though a stale cached config may still report setupRequired=true.
+  const [setupClosed, setSetupClosed] = useState(false);
 
-  // Validated server-side; default to the dashboard.
+  // Validated server-side for the full-navigation flows; for the client-side
+  // setup redirect we additionally guard it against open redirects.
   const next = searchParams.get("next") || "/dashboard";
 
   // Full navigation to the backend (sets the session cookie, then 302s back).
@@ -61,11 +88,30 @@ export default function LoginPage() {
 
   const authMode = config?.authMode ?? "oidc";
 
+  // First-run setup screen: a password-mode instance with no credential yet.
+  // `setupClosed` lets a 409 during setup immediately reveal the sign-in form.
+  if (config?.setupRequired && !setupClosed) {
+    return (
+      <SetupForm
+        onDone={() => router.replace(safeNext(searchParams.get("next")))}
+        onAlreadyDone={() => setSetupClosed(true)}
+      />
+    );
+  }
+
   return (
     <div className="space-y-6" data-slot="login">
       <h1 className="text-center text-xl font-semibold text-foreground">
         {t("loginTitle")}
       </h1>
+
+      {/* A first-run setup attempt that hit a 409 (already configured) lands
+          here; explain why the sign-in form is shown instead. */}
+      {setupClosed ? (
+        <Alert>
+          <AlertDescription>{t("setupAlreadyDone")}</AlertDescription>
+        </Alert>
+      ) : null}
 
       {/* OIDC (Google) — the primary path. */}
       {authMode === "oidc" ? (

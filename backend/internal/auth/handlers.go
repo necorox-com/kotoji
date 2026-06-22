@@ -15,10 +15,17 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/necorox-com/kotoji/backend/internal/config"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 )
+
+// adminPasswordHashKey is the instance_settings key for the first-run admin
+// password bcrypt hash. It MUST match db.settingAdminPasswordHash (the store
+// helper writes under the same key); a go test asserts the two stay in sync.
+const adminPasswordHashKey = "admin_password_hash"
 
 // loginStateTTL bounds how long a started login may take to complete. After this
 // the state cookie expires and the callback is rejected (replay/abandon defense).
@@ -39,6 +46,9 @@ type Auth struct {
 	sessions *SessionManager
 	csrf     *CSRF
 	upserter UserUpserter
+	// store is the metadata persistence seam used by the first-run setup flow
+	// (read/write the admin-password hash) and the setupRequired computation.
+	store StoreDeps
 
 	// signKey signs the login-state cookie (HMAC). Derived from the admin
 	// password / a random per-process key so the cookie is tamper-evident.
@@ -69,6 +79,7 @@ func New(cfg config.Config, store StoreDeps, provider AuthProvider) *Auth {
 		sessions: NewSessionManager(store, cfg.SessionCookieName, cfg.SessionTTL, cfg.CookieSecure),
 		csrf:     NewCSRF(cfg.CSRFCookieName, cfg.CookieSecure),
 		upserter: &storeUpserter{store: store},
+		store:    store,
 		signKey:  deriveSignKey(cfg),
 	}
 }
@@ -77,7 +88,11 @@ func New(cfg config.Config, store StoreDeps, provider AuthProvider) *Auth {
 // satisfies it directly (it embeds the generated queries and owns WithTx).
 type StoreDeps interface {
 	SessionStore
+	AdminHashStore
 	WithTx(ctx context.Context, fn func(q *gen.Queries) error) error
+	// SetAdminPasswordHash persists the first-run admin-password bcrypt hash. The
+	// caller (the /auth/setup handler) computes the hash; the store only writes it.
+	SetAdminPasswordHash(ctx context.Context, hash string) error
 }
 
 // CSRF exposes the CSRF guard so the composition root can mount its middleware on
@@ -93,6 +108,7 @@ func (a *Auth) RegisterRoutes(r chi.Router) {
 	r.Get("/auth/login", a.LoginStart)
 	r.Get("/auth/callback", a.Callback)
 	r.Post("/auth/login", a.LoginPassword) // non-interactive password/dev submit
+	r.Post("/auth/setup", a.Setup)         // first-run admin-password setup (gated by setupRequired)
 	r.Post("/auth/logout", a.Logout)
 	r.Get("/api/me", a.Me)
 	r.Get("/api/config", a.PublicConfig)
@@ -321,18 +337,119 @@ func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, credential,
 		return
 	}
 
-	// ROTATE: always mint a fresh session id (Create generates a new one), never
-	// reuse a pre-auth cookie value -> defeats session fixation (architecture §8.1).
-	sid, err := a.sessions.Create(r.Context(), user.ID, r.UserAgent(), clientIP(r, a.cfg.TrustProxyHeaders))
+	if !a.establishSession(w, r, user.ID) {
+		return // establishSession already wrote the error envelope
+	}
+	http.Redirect(w, r, next, http.StatusFound)
+}
+
+// establishSession rotates a fresh server-side session for userID, sets the
+// __Host- session cookie, and issues a CSRF token. It is the shared session tail
+// of every authenticated entry point (login + first-run setup). On failure it
+// writes the error envelope and returns false so the caller stops. ROTATE: Create
+// always mints a new id, never reusing a pre-auth cookie -> defeats session
+// fixation (architecture §8.1).
+func (a *Auth) establishSession(w http.ResponseWriter, r *http.Request, userID uuid.UUID) bool {
+	sid, err := a.sessions.Create(r.Context(), userID, r.UserAgent(), clientIP(r, a.cfg.TrustProxyHeaders))
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not start your session")
-		return
+		return false
 	}
 	a.sessions.SetCookie(w, sid)
 	// Issue a CSRF token immediately so the SPA can make mutating calls.
 	_, _ = a.csrf.Issue(w, r)
+	return true
+}
 
-	http.Redirect(w, r, next, http.StatusFound)
+// Setup is the first-run admin-password endpoint (POST /auth/setup), mounted
+// OUTSIDE the /api CSRF subtree like /auth/login. It ONLY works while the instance
+// is in the setupRequired state (password mode, no env password, no DB hash); once
+// a credential exists it returns 409 and can never reset the admin. On success it
+// stores the bcrypt hash, ensures the admin user row exists (the same upsert path
+// LoginPassword uses), establishes a session, and returns 200 so the caller is
+// immediately authenticated. The password is NEVER logged.
+func (a *Auth) Setup(w http.ResponseWriter, r *http.Request) {
+	// GUARD: the endpoint is live ONLY during first-run. Re-checking here (not just
+	// in /api/config) closes the window where two requests race the same first run:
+	// the second sees the hash written by the first and gets 409.
+	if !a.setupRequired(r.Context()) {
+		writeError(w, r, http.StatusConflict, codeConflict, "setup already completed")
+		return
+	}
+
+	var password string
+	// Accept a JSON body (the SPA) or a form post. An optional `confirm` is matched
+	// client-side; if present here it must equal `password` (defense in depth).
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Password string `json:"password"`
+			Confirm  string `json:"confirm"`
+		}
+		// Decode errors fall through to the empty-password validation below; we do
+		// not echo the parse error (it could carry body bytes -> never log the pw).
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err == nil {
+			password = body.Password
+			if body.Confirm != "" && body.Confirm != password {
+				writeError(w, r, http.StatusUnprocessableEntity, codeValidation, "passwords do not match")
+				return
+			}
+		}
+	} else {
+		_ = r.ParseForm()
+		password = r.PostFormValue("password")
+		if c := r.PostFormValue("confirm"); c != "" && c != password {
+			writeError(w, r, http.StatusUnprocessableEntity, codeValidation, "passwords do not match")
+			return
+		}
+	}
+
+	// Validate against the shared minimum length (config.AdminPasswordMinLen).
+	if len(password) < config.AdminPasswordMinLen {
+		writeError(w, r, http.StatusUnprocessableEntity, codeValidation,
+			fmt.Sprintf("password must be at least %d characters", config.AdminPasswordMinLen))
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not set the password")
+		return
+	}
+	password = "" // drop the plaintext as soon as it is hashed (never logged/kept)
+
+	// ORDER MATTERS. Ensure the admin user row exists FIRST (reusing the exact
+	// UpsertUser+UpsertIdentity path LoginPassword takes, in its own tx), THEN write
+	// the credential hash. Writing the hash last means the setupRequired gate only
+	// closes once a usable admin account already exists: a crash between the two
+	// leaves the instance still in first-run state (idempotent retry), never with a
+	// credential that has no account behind it.
+	user, err := a.upserter.UpsertLogin(r.Context(), UpsertLoginInput{
+		Provider:    passwordProviderKey,
+		Subject:     devSubject,
+		Email:       a.adminEmail(),
+		DisplayName: "Admin",
+	})
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not establish your account")
+		return
+	}
+	if err := a.store.SetAdminPasswordHash(r.Context(), string(hash)); err != nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not set the password")
+		return
+	}
+
+	// Log the freshly-configured admin straight in (same session tail as login).
+	if !a.establishSession(w, r, user.ID) {
+		return
+	}
+	writeJSON(w, http.StatusOK, setupResponse{OK: true})
+}
+
+// adminEmail returns the normalized admin email used for the setup-created admin
+// row, mirroring the PasswordProvider's default (lowercased, falling back to the
+// local default) so login and setup converge on the same users row.
+func (a *Auth) adminEmail() string {
+	return defaultIfEmpty(strings.ToLower(a.cfg.AdminEmail), "admin@kotoji.local")
 }
 
 // Logout destroys the server session and clears the cookies. Idempotent: a
@@ -387,7 +504,29 @@ func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 		// is configured; the GUI keys per-site linking/sync controls off this so a
 		// half-configured instance (enabled but no token) does not advertise mirroring.
 		GithubMirrorEnabled: a.cfg.GitHub.Enabled && a.cfg.GitHub.Token != "",
+		// True only in the first-run state: password mode, no env password, and no
+		// DB hash yet. The GUI shows the first-run setup screen when this is true.
+		SetupRequired: a.setupRequired(r.Context()),
 	})
+}
+
+// setupRequired reports whether the instance is in the first-run "set the admin
+// password" state: AUTH_MODE=password AND no env password AND no DB-stored hash.
+// For oidc/none modes it is always false (those modes have no setup screen). A
+// store read error is treated as "not required" (fail closed: do NOT advertise an
+// open setup endpoint on a DB blip — a real first-run instance reads cleanly).
+func (a *Auth) setupRequired(ctx context.Context) bool {
+	if a.cfg.AuthMode != config.AuthModePassword {
+		return false
+	}
+	if a.cfg.AdminPassword != "" {
+		return false
+	}
+	_, found, err := a.store.GetAdminPasswordHash(ctx)
+	if err != nil {
+		return false
+	}
+	return !found
 }
 
 // ---- response shapes (mirror openapi.yaml) ----
@@ -395,6 +534,13 @@ func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 type meResponse struct {
 	User     userJSON `json:"user"`
 	AuthMode string   `json:"authMode"`
+}
+
+// setupResponse is the small success body returned by POST /auth/setup. The
+// session + CSRF cookies set alongside it are what actually authenticate the
+// caller; the body just confirms completion.
+type setupResponse struct {
+	OK bool `json:"ok"`
 }
 
 type userJSON struct {
@@ -419,6 +565,7 @@ type instanceConfigJSON struct {
 	AuthMode            string   `json:"authMode"`
 	DefaultPublishMode  string   `json:"defaultPublishMode"`
 	GithubMirrorEnabled bool     `json:"githubMirrorEnabled"`
+	SetupRequired       bool     `json:"setupRequired"`
 }
 
 // reservedHandles is the locked baseline blocklist (CANONICAL §5.1). Returned in
@@ -524,13 +671,15 @@ func deriveSignKey(cfg config.Config) []byte {
 
 // ProviderFor builds the AuthProvider matching cfg.AuthMode. OIDC performs
 // discovery (network) so it takes a ctx; dev/password are local. The composition
-// root calls this once and passes the result to New.
-func ProviderFor(ctx context.Context, cfg config.Config) (AuthProvider, error) {
+// root calls this once and passes the result to New. store supplies the DB-backed
+// admin-password hash to the password provider (first-run setup); it is unused by
+// the OIDC/dev providers and may be nil for those modes.
+func ProviderFor(ctx context.Context, cfg config.Config, store AdminHashStore) (AuthProvider, error) {
 	switch cfg.AuthMode {
 	case config.AuthModeOIDC:
 		return NewOIDCProvider(ctx, cfg.OIDC)
 	case config.AuthModePassword:
-		return NewPasswordProvider(cfg)
+		return NewPasswordProvider(cfg, store)
 	case config.AuthModeNone:
 		return NewDevProvider(cfg), nil
 	default:

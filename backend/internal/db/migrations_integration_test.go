@@ -60,10 +60,21 @@ func TestMigrationsUpDownRoundTrip(t *testing.T) {
 	for _, tbl := range []string{
 		"users", "user_identities", "sessions", "sites", "site_members",
 		"site_tokens", "handle_redirects", "reserved_handles", "audit_log",
+		"instance_settings",
 	} {
 		_, err := sqlDB.Exec("SELECT 1 FROM " + tbl + " LIMIT 0")
 		require.NoErrorf(t, err, "table %s must exist after up", tbl)
 	}
+
+	// The instance_settings key/value upsert round-trips (first-run admin hash path).
+	_, err := sqlDB.Exec(`INSERT INTO instance_settings (key, value) VALUES ('admin_password_hash', 'h1')`)
+	require.NoError(t, err)
+	_, err = sqlDB.Exec(`INSERT INTO instance_settings (key, value) VALUES ('admin_password_hash', 'h2')
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`)
+	require.NoError(t, err)
+	var v string
+	require.NoError(t, sqlDB.QueryRow(`SELECT value FROM instance_settings WHERE key = 'admin_password_hash'`).Scan(&v))
+	require.Equal(t, "h2", v, "upsert must overwrite the existing value")
 
 	// Tear all the way down; every object must drop without error.
 	require.NoError(t, goose.DownTo(sqlDB, migrationsDir, 0), "goose down")

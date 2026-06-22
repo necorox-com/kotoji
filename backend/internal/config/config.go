@@ -48,6 +48,11 @@ const (
 	AuthModeNone AuthMode = "none"
 )
 
+// AdminPasswordMinLen is the minimum length of the single-admin password,
+// enforced both for the env-provided password and the first-run setup flow.
+// Centralized here so the env validation and the /auth/setup handler agree.
+const AdminPasswordMinLen = 8
+
 // Default values for optional settings. Centralized so there are no magic
 // literals scattered through Load.
 const (
@@ -414,8 +419,12 @@ func (c Config) validate(prod bool) error {
 				errs = append(errs, errors.New("KOTOJI_AUTH_GOOGLE_HD or KOTOJI_AUTH_ALLOWED_EMAILS must be set when AUTH_MODE=oidc"))
 			}
 		case AuthModePassword:
-			if c.AdminPassword == "" {
-				errs = append(errs, errors.New("KOTOJI_AUTH_ADMIN_PASSWORD is required when AUTH_MODE=password"))
+			// The env password is OPTIONAL: when empty, the instance enters the
+			// first-run "setup required" state and the admin sets the password via
+			// the GUI (stored hashed in the DB). When provided, it must meet the
+			// same minimum length the setup flow enforces.
+			if c.AdminPassword != "" && len(c.AdminPassword) < AdminPasswordMinLen {
+				errs = append(errs, fmt.Errorf("KOTOJI_AUTH_ADMIN_PASSWORD must be at least %d characters", AdminPasswordMinLen))
 			}
 		case AuthModeNone:
 			// Allowed in development only (guarded above for production).

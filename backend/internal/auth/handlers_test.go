@@ -13,6 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/necorox-com/kotoji/backend/internal/config"
 )
@@ -147,10 +148,10 @@ func TestPasswordLogin(t *testing.T) {
 	cfg.AdminPassword = "s3cret-pass"
 	cfg.AdminEmail = "admin@kotoji.local"
 
-	provider, err := NewPasswordProvider(cfg)
+	store := newFakeStore()
+	provider, err := NewPasswordProvider(cfg, store)
 	require.NoError(t, err)
 
-	store := newFakeStore()
 	a := New(cfg, store, provider)
 	a.upserter = &fakeUpserter{store: store}
 	h := router(a)
@@ -167,6 +168,38 @@ func TestPasswordLogin(t *testing.T) {
 	require.Equal(t, http.StatusFound, ok.Code)
 	require.Equal(t, 1, store.sessionCount())
 	require.NotNil(t, findCookie(ok.Result().Cookies(), a.sessions.CookieName()))
+}
+
+// TestPasswordLogin_DBHashVerifiedBeforeEnv proves the precedence at the HTTP
+// layer: with a DB hash present, the DB password logs in and the (superseded) env
+// password is rejected.
+func TestPasswordLogin_DBHashVerifiedBeforeEnv(t *testing.T) {
+	cfg := testConfig()
+	cfg.AuthMode = config.AuthModePassword
+	cfg.AdminPassword = "env-pass-1234"
+	cfg.AdminEmail = "admin@kotoji.local"
+
+	dbHash, err := bcrypt.GenerateFromPassword([]byte("db-pass-1234"), bcrypt.MinCost)
+	require.NoError(t, err)
+	store := newFakeStore()
+	require.NoError(t, store.SetAdminPasswordHash(context.Background(), string(dbHash)))
+
+	provider, err := NewPasswordProvider(cfg, store)
+	require.NoError(t, err)
+	a := New(cfg, store, provider)
+	a.upserter = &fakeUpserter{store: store}
+	h := router(a)
+
+	// Env password (now superseded by the DB hash) -> 401.
+	bad := httptest.NewRecorder()
+	h.ServeHTTP(bad, postForm("/auth/login", url.Values{"password": {"env-pass-1234"}}))
+	require.Equal(t, http.StatusUnauthorized, bad.Code)
+
+	// DB password -> 302 + session.
+	ok := httptest.NewRecorder()
+	h.ServeHTTP(ok, postForm("/auth/login", url.Values{"password": {"db-pass-1234"}}))
+	require.Equal(t, http.StatusFound, ok.Code)
+	require.Equal(t, 1, store.sessionCount())
 }
 
 func TestOIDCLogin_StartSetsStateAndRedirects(t *testing.T) {

@@ -348,6 +348,10 @@ func (f *fakeSessionStore) UpsertIdentity(context.Context, gen.UpsertIdentityPar
 func (f *fakeSessionStore) WithTx(_ context.Context, fn func(q *gen.Queries) error) error {
 	return errors.New("not used in api tests")
 }
+func (f *fakeSessionStore) GetAdminPasswordHash(context.Context) (string, bool, error) {
+	return "", false, nil
+}
+func (f *fakeSessionStore) SetAdminPasswordHash(context.Context, string) error { return nil }
 
 // compile-time: fakeSessionStore satisfies auth.StoreDeps.
 var _ auth.StoreDeps = (*fakeSessionStore)(nil)

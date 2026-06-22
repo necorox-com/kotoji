@@ -104,6 +104,45 @@ paths:
             Set-Cookie: { schema: { type: string }, description: "__Host-kotoji_session" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /auth/setup:
+    post:
+      tags: [auth]
+      operationId: authSetup
+      summary: First-run admin-password setup (only while setupRequired is true)
+      description: >
+        Sets the single-admin password on a fresh password-mode instance
+        (AUTH_MODE=password with no env KOTOJI_AUTH_ADMIN_PASSWORD and no
+        previously-stored hash). The hash is stored in the database. On success it
+        establishes a session (sets the __Host- session + CSRF cookies) so the
+        caller is immediately authenticated. Once any admin credential exists
+        (env or DB) the endpoint is permanently closed and returns 409 — it can
+        never reset the admin. Mounted outside the /api CSRF subtree (like
+        /auth/login). The password is never logged.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetupRequest" }
+      responses:
+        "200":
+          description: Password set; session established
+          headers:
+            Set-Cookie: { schema: { type: string }, description: "__Host-kotoji_session" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, enum: [true] }
+        "409":
+          description: Setup already completed (an admin credential already exists)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
   /auth/logout:
     post:
       tags: [auth]
@@ -948,6 +987,18 @@ components:
       properties:
         user: { $ref: "#/components/schemas/User" }
         authMode: { $ref: "#/components/schemas/AuthMode" }
+    SetupRequest:
+      type: object
+      description: First-run admin-password setup body (POST /auth/setup).
+      required: [password]
+      properties:
+        password:
+          type: string
+          minLength: 8
+          description: The admin password to set (min 8 chars; never logged).
+        confirm:
+          type: string
+          description: Optional confirmation; when present it must equal password.
     User:
       type: object
       required: [id, email, displayName, isAdmin, canCreateSites]
@@ -963,7 +1014,7 @@ components:
       required:
         [maxUploadBytes, zipMaxFiles, zipMaxTotalBytes, allowedExtensions,
          handleMinLen, handleMaxLen, reservedHandles, baseDomain, authMode,
-         defaultPublishMode, githubMirrorEnabled]
+         defaultPublishMode, githubMirrorEnabled, setupRequired]
       properties:
         maxUploadBytes: { type: integer, format: int64 }
         zipMaxFiles: { type: integer }
@@ -987,6 +1038,13 @@ components:
             True when the instance can mirror to GitHub at all
             (KOTOJI_GITHUB_MIRROR_ENABLED set AND a push token configured). The GUI
             keys per-site linking/sync controls off this flag.
+        setupRequired:
+          type: boolean
+          description: >
+            True only in the first-run state: AUTH_MODE=password AND no env admin
+            password AND no admin password hash stored yet. When true the GUI shows
+            the first-run admin-password setup screen and POST /auth/setup is open.
+            Always false for oidc/none modes.
 
     # ---------- sites ----------
     Site:

@@ -29,7 +29,7 @@ func readMigration(t *testing.T, name string) string {
 // TestMigrationFilesExistAndNonEmpty asserts both migration files are present and
 // have content. This is the lightweight guard runnable without Postgres.
 func TestMigrationFilesExistAndNonEmpty(t *testing.T) {
-	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql"} {
+	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql", "0003_instance_settings.sql"} {
 		_ = readMigration(t, name)
 	}
 }
@@ -38,7 +38,7 @@ func TestMigrationFilesExistAndNonEmpty(t *testing.T) {
 // directives. Every StatementBegin must be balanced by a StatementEnd so goose's
 // parser does not choke on function/trigger bodies.
 func TestMigrationGooseFraming(t *testing.T) {
-	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql"} {
+	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql", "0003_instance_settings.sql"} {
 		src := readMigration(t, name)
 		assert.Containsf(t, src, "-- +goose Up", "%s missing +goose Up", name)
 		assert.Containsf(t, src, "-- +goose Down", "%s missing +goose Down", name)

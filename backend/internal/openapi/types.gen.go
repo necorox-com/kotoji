@@ -308,10 +308,13 @@ type InstanceConfig struct {
 	HandleMinLen        int      `json:"handleMinLen"`
 	MaxUploadBytes      int64    `json:"maxUploadBytes"`
 	ReservedHandles     []string `json:"reservedHandles"`
-	ZipMaxEntryBytes    *int64   `json:"zipMaxEntryBytes,omitempty"`
-	ZipMaxFiles         int      `json:"zipMaxFiles"`
-	ZipMaxRatio         *int     `json:"zipMaxRatio,omitempty"`
-	ZipMaxTotalBytes    int64    `json:"zipMaxTotalBytes"`
+
+	// SetupRequired True only in the first-run state: AUTH_MODE=password AND no env admin password AND no admin password hash stored yet. When true the GUI shows the first-run admin-password setup screen and POST /auth/setup is open. Always false for oidc/none modes.
+	SetupRequired    bool   `json:"setupRequired"`
+	ZipMaxEntryBytes *int64 `json:"zipMaxEntryBytes,omitempty"`
+	ZipMaxFiles      int    `json:"zipMaxFiles"`
+	ZipMaxRatio      *int   `json:"zipMaxRatio,omitempty"`
+	ZipMaxTotalBytes int64  `json:"zipMaxTotalBytes"`
 }
 
 // LogResult defines model for LogResult.
@@ -407,6 +410,15 @@ type RollbackRequest struct {
 
 	// ToSha ancestor commit on this branch whose tree to restore (non-ancestor => 404)
 	ToSha string `json:"toSha"`
+}
+
+// SetupRequest First-run admin-password setup body (POST /auth/setup).
+type SetupRequest struct {
+	// Confirm Optional confirmation; when present it must equal password.
+	Confirm *string `json:"confirm,omitempty"`
+
+	// Password The admin password to set (min 8 chars; never logged).
+	Password string `json:"password"`
 }
 
 // Sha Full git commit SHA (40 hex SHA-1 or 64 hex SHA-256).
@@ -710,3 +722,6 @@ type CreateTokenJSONRequestBody = CreateTokenRequest
 
 // GithubWebhookJSONRequestBody defines body for GithubWebhook for application/json ContentType.
 type GithubWebhookJSONRequestBody GithubWebhookJSONBody
+
+// AuthSetupJSONRequestBody defines body for AuthSetup for application/json ContentType.
+type AuthSetupJSONRequestBody = SetupRequest

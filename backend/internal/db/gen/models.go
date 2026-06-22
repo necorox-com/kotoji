@@ -161,6 +161,12 @@ type HandleRedirect struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type InstanceSetting struct {
+	Key       string             `json:"key"`
+	Value     string             `json:"value"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ReservedHandle struct {
 	Handle    string             `json:"handle"`
 	Reason    string             `json:"reason"`

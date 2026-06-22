@@ -72,6 +72,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * First-run admin-password setup (only while setupRequired is true)
+         * @description Sets the single-admin password on a fresh password-mode instance (AUTH_MODE=password with no env KOTOJI_AUTH_ADMIN_PASSWORD and no previously-stored hash). The hash is stored in the database. On success it establishes a session (sets the __Host- session + CSRF cookies) so the caller is immediately authenticated. Once any admin credential exists (env or DB) the endpoint is permanently closed and returns 409 — it can never reset the admin. Mounted outside the /api CSRF subtree (like /auth/login). The password is never logged.
+         */
+        post: operations["authSetup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/logout": {
         parameters: {
             query?: never;
@@ -537,6 +557,13 @@ export interface components {
             user: components["schemas"]["User"];
             authMode: components["schemas"]["AuthMode"];
         };
+        /** @description First-run admin-password setup body (POST /auth/setup). */
+        SetupRequest: {
+            /** @description The admin password to set (min 8 chars; never logged). */
+            password: string;
+            /** @description Optional confirmation; when present it must equal password. */
+            confirm?: string;
+        };
         User: {
             /** Format: uuid */
             id: string;
@@ -567,6 +594,8 @@ export interface components {
             defaultPublishMode: components["schemas"]["PublishMode"];
             /** @description True when the instance can mirror to GitHub at all (KOTOJI_GITHUB_MIRROR_ENABLED set AND a push token configured). The GUI keys per-site linking/sync controls off this flag. */
             githubMirrorEnabled: boolean;
+            /** @description True only in the first-run state: AUTH_MODE=password AND no env admin password AND no admin password hash stored yet. When true the GUI shows the first-run admin-password setup screen and POST /auth/setup is open. Always false for oidc/none modes. */
+            setupRequired: boolean;
         };
         Site: {
             /** Format: uuid */
@@ -980,6 +1009,45 @@ export interface operations {
                 content?: never;
             };
             403: components["responses"]["Forbidden"];
+        };
+    };
+    authSetup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupRequest"];
+            };
+        };
+        responses: {
+            /** @description Password set; session established */
+            200: {
+                headers: {
+                    /** @description __Host-kotoji_session */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        ok: true;
+                    };
+                };
+            };
+            /** @description Setup already completed (an admin credential already exists) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: components["responses"]["ValidationFailed"];
         };
     };
     authLogout: {

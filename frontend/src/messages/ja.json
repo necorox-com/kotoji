@@ -90,7 +90,17 @@
     "signOut": "サインアウト",
     "notAuthenticated": "サインインが必要です",
     "notAuthorized": "この操作を行う権限がありません",
-    "redirecting": "リダイレクトしています…"
+    "redirecting": "リダイレクトしています…",
+    "setupTitle": "管理者パスワードを設定",
+    "setupSubtitle": "最初に管理者パスワードを決めてください。設定すると、このアカウントでサインインできるようになります。",
+    "newPassword": "新しいパスワード",
+    "confirmPassword": "パスワード（確認）",
+    "passwordHint": "{min} 文字以上で設定してください。",
+    "passwordTooShort": "パスワードは {min} 文字以上で入力してください。",
+    "passwordMismatch": "パスワードが一致しません。",
+    "setupSubmit": "パスワードを設定する",
+    "setupError": "パスワードを設定できませんでした。もう一度お試しください。",
+    "setupAlreadyDone": "設定はすでに完了しています。サインインしてください。"
   },
   "dashboard": {
     "title": "ダッシュボード",

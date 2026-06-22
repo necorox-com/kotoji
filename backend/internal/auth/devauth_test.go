@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/necorox-com/kotoji/backend/internal/config"
 )
@@ -23,7 +24,8 @@ func TestDevProvider(t *testing.T) {
 }
 
 func TestPasswordProvider(t *testing.T) {
-	p, err := NewPasswordProvider(config.Config{AdminPassword: "correct horse", AdminEmail: "admin@kotoji.local"})
+	// nil store => env-only credential (the classic configured-password path).
+	p, err := NewPasswordProvider(config.Config{AdminPassword: "correct horse", AdminEmail: "admin@kotoji.local"}, nil)
 	require.NoError(t, err)
 	require.Equal(t, passwordProviderKey, p.Key())
 	require.False(t, p.Interactive())
@@ -39,23 +41,60 @@ func TestPasswordProvider(t *testing.T) {
 	require.ErrorIs(t, err, ErrBadPassword)
 }
 
-func TestPasswordProvider_RequiresPassword(t *testing.T) {
-	_, err := NewPasswordProvider(config.Config{})
-	require.Error(t, err)
+// TestPasswordProvider_EmptyEnvPasswordAllowed: an empty env password is the
+// valid first-run state, not an error. With no DB hash either, Exchange refuses
+// every password (no credential configured yet).
+func TestPasswordProvider_EmptyEnvPasswordAllowed(t *testing.T) {
+	p, err := NewPasswordProvider(config.Config{AdminEmail: "admin@kotoji.local"}, nil)
+	require.NoError(t, err)
+	_, err = p.Exchange(context.Background(), "anything", "", "")
+	require.ErrorIs(t, err, ErrBadPassword)
+}
+
+// TestPasswordProvider_DBHashTakesPrecedence: when the store has a hash, it is
+// verified INSTEAD of the env password (first-run setup credential wins).
+func TestPasswordProvider_DBHashTakesPrecedence(t *testing.T) {
+	dbHash, err := bcrypt.GenerateFromPassword([]byte("db-password"), bcrypt.MinCost)
+	require.NoError(t, err)
+	store := &fakeAdminHashStore{hash: string(dbHash), found: true}
+
+	// env password differs from the DB password.
+	p, err := NewPasswordProvider(config.Config{AdminPassword: "env-password", AdminEmail: "a@b.c"}, store)
+	require.NoError(t, err)
+
+	// DB password is accepted...
+	_, err = p.Exchange(context.Background(), "db-password", "", "")
+	require.NoError(t, err)
+	// ...and the (now superseded) env password is rejected.
+	_, err = p.Exchange(context.Background(), "env-password", "", "")
+	require.ErrorIs(t, err, ErrBadPassword)
+}
+
+// TestPasswordProvider_FallsBackToEnvWhenNoDBHash: with the store present but no
+// hash set, the env password is the active credential.
+func TestPasswordProvider_FallsBackToEnvWhenNoDBHash(t *testing.T) {
+	store := &fakeAdminHashStore{found: false}
+	p, err := NewPasswordProvider(config.Config{AdminPassword: "env-password", AdminEmail: "a@b.c"}, store)
+	require.NoError(t, err)
+
+	_, err = p.Exchange(context.Background(), "env-password", "", "")
+	require.NoError(t, err)
+	_, err = p.Exchange(context.Background(), "wrong", "", "")
+	require.ErrorIs(t, err, ErrBadPassword)
 }
 
 func TestProviderFor(t *testing.T) {
 	// none -> dev provider.
-	dev, err := ProviderFor(context.Background(), config.Config{AuthMode: config.AuthModeNone, AdminEmail: "a@b.c"})
+	dev, err := ProviderFor(context.Background(), config.Config{AuthMode: config.AuthModeNone, AdminEmail: "a@b.c"}, nil)
 	require.NoError(t, err)
 	require.Equal(t, devProviderKey, dev.Key())
 
-	// password -> password provider.
-	pw, err := ProviderFor(context.Background(), config.Config{AuthMode: config.AuthModePassword, AdminPassword: "x"})
+	// password -> password provider (store may be nil for env-only).
+	pw, err := ProviderFor(context.Background(), config.Config{AuthMode: config.AuthModePassword, AdminPassword: "supersecret"}, nil)
 	require.NoError(t, err)
 	require.Equal(t, passwordProviderKey, pw.Key())
 
 	// unknown -> error.
-	_, err = ProviderFor(context.Background(), config.Config{AuthMode: config.AuthMode("bogus")})
+	_, err = ProviderFor(context.Background(), config.Config{AuthMode: config.AuthMode("bogus")}, nil)
 	require.Error(t, err)
 }

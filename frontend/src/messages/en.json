@@ -90,7 +90,17 @@
     "signOut": "Sign out",
     "notAuthenticated": "Sign in required",
     "notAuthorized": "You don't have permission for this action",
-    "redirecting": "Redirecting…"
+    "redirecting": "Redirecting…",
+    "setupTitle": "Set the admin password",
+    "setupSubtitle": "Choose the admin password to finish setting up this instance. Once set, you can sign in with this account.",
+    "newPassword": "New password",
+    "confirmPassword": "Confirm password",
+    "passwordHint": "Use at least {min} characters.",
+    "passwordTooShort": "Password must be at least {min} characters.",
+    "passwordMismatch": "Passwords do not match.",
+    "setupSubmit": "Set password",
+    "setupError": "Couldn't set the password. Please try again.",
+    "setupAlreadyDone": "Setup is already complete. Please sign in."
   },
   "dashboard": {
     "title": "Dashboard",

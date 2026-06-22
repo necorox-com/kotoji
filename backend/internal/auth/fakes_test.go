@@ -25,6 +25,11 @@ type fakeStore struct {
 	idents   map[string]uuid.UUID   // provider|subject -> user id
 	touched  map[string]int         // session id -> touch count (assertions)
 
+	// adminHash is the DB-stored admin password hash (first-run setup). adminHashSet
+	// distinguishes "" (unset) from a real (empty-ish) value.
+	adminHash    string
+	adminHashSet bool
+
 	// failNextCreate / failNextGet force a store error for error-path tests.
 	failCreate bool
 	failGet    bool
@@ -142,6 +147,24 @@ func (f *fakeStore) UpsertIdentity(_ context.Context, arg gen.UpsertIdentityPara
 	return nil
 }
 
+// GetAdminPasswordHash mirrors *db.Store: a missing hash is (.., false, nil).
+func (f *fakeStore) GetAdminPasswordHash(_ context.Context) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.adminHashSet {
+		return "", false, nil
+	}
+	return f.adminHash, true, nil
+}
+
+// SetAdminPasswordHash records the first-run admin hash (idempotent overwrite).
+func (f *fakeStore) SetAdminPasswordHash(_ context.Context, hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.adminHash, f.adminHashSet = hash, true
+	return nil
+}
+
 // WithTx runs fn against the SAME fakeStore via a thin gen.Queries shim. The
 // fake does not implement real transactions (single in-memory map under a mutex
 // is atomic enough for these tests); fn either fully succeeds or returns an err.
@@ -203,6 +226,21 @@ func (f *fakeUpserter) UpsertLogin(ctx context.Context, in UpsertLoginInput) (ge
 		return gen.User{}, err
 	}
 	return u, nil
+}
+
+// fakeAdminHashStore is a one-method AdminHashStore for the PasswordProvider unit
+// tests (DB-hash precedence / env fallback) without the full fakeStore.
+type fakeAdminHashStore struct {
+	hash  string
+	found bool
+	err   error
+}
+
+func (f *fakeAdminHashStore) GetAdminPasswordHash(_ context.Context) (string, bool, error) {
+	if f.err != nil {
+		return "", false, f.err
+	}
+	return f.hash, f.found, nil
 }
 
 // fakeProvider is a mock AuthProvider with programmable Start/Exchange behavior.

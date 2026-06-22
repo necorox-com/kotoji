@@ -100,7 +100,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	// Auth is only needed where the control plane runs.
 	if cfg.ServesControl() {
-		provider, perr := auth.ProviderFor(ctx, cfg) // OIDC does network discovery
+		// The store backs the password provider's first-run DB credential (the hash
+		// set via /auth/setup takes precedence over the env password). It is unused
+		// by the OIDC/dev providers.
+		provider, perr := auth.ProviderFor(ctx, cfg, store) // OIDC does network discovery
 		if perr != nil {
 			store.Close()
 			return nil, perr

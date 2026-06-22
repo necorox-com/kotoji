@@ -74,7 +74,7 @@ func TestLoad_ProductionRequiresEssentials(t *testing.T) {
 	// Bare production env: every hard-required field is missing.
 	env := map[string]string{
 		"KOTOJI_ENV":       "production",
-		"KOTOJI_AUTH_MODE": "password", // also missing the password
+		"KOTOJI_AUTH_MODE": "password",
 	}
 	_, err := LoadFromMap(env)
 	require.Error(t, err)
@@ -82,7 +82,30 @@ func TestLoad_ProductionRequiresEssentials(t *testing.T) {
 	assert.Contains(t, msg, "KOTOJI_DATABASE_URL")
 	assert.Contains(t, msg, "KOTOJI_BASE_DOMAIN")
 	assert.Contains(t, msg, "KOTOJI_CONTROL_BASE_URL")
-	assert.Contains(t, msg, "KOTOJI_AUTH_ADMIN_PASSWORD")
+}
+
+// TestLoad_PasswordModeAllowsEmptyEnvPassword is the first-run setup contract:
+// AUTH_MODE=password with NO env password is valid — the instance boots into the
+// "setup required" state and the admin sets the password via the GUI (DB hash).
+func TestLoad_PasswordModeAllowsEmptyEnvPassword(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "password"
+	delete(env, "KOTOJI_AUTH_ADMIN_PASSWORD")
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.Equal(t, AuthModePassword, cfg.AuthMode)
+	assert.Empty(t, cfg.AdminPassword)
+}
+
+// TestLoad_PasswordModeRejectsShortEnvPassword: when an env password IS provided
+// it must still meet the shared minimum length.
+func TestLoad_PasswordModeRejectsShortEnvPassword(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "password"
+	env["KOTOJI_AUTH_ADMIN_PASSWORD"] = "short"
+	_, err := LoadFromMap(env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "KOTOJI_AUTH_ADMIN_PASSWORD")
 }
 
 func TestLoad_ProductionRejectsNoAuth(t *testing.T) {
