@@ -634,24 +634,25 @@ type TreeHandle struct {
 
 **Worktree-per-served-branch on publish/save, served from disk; never read .git on request.**
 
-- For **published**: on `publish`, SiteService checks out the new `published`
+- For **published**: on `publish`, SiteService materializes the new `published`
   commit into a stable served directory `/data/sites/{uuid}/served/published/`
-  (atomic swap: build into a temp dir, then `rename()` over the live symlink, so
-  readers never see a half-written tree). The data plane serves this directory
-  via `os.DirFS`. This is the resilient path: even if the whole control plane
-  process is dead, the directory is still on disk and the data-plane serve mode
-  can read it.
-- For **preview branches**: materialize on demand into
-  `/data/sites/{uuid}/served/branch/{branch}/` (or use `git archive | extract`
-  into a temp dir, cached with a TTL keyed by branch HEAD SHA). Previews are
-  auth-gated and lower-traffic, so on-demand + short cache is fine.
+  via `git archive --format=tar | extract` into a temp dir, then an atomic swap
+  (remove the old tree, `rename()` the temp into place) so readers never see a
+  half-written tree. The data plane serves this directory via `os.DirFS`. This is
+  the resilient path: even if the whole control plane process is dead, the
+  directory is still on disk and the data-plane serve mode can read it.
+- For **preview branches** (`draft`, `feature-*`): the SAME mechanism into
+  `/data/sites/{uuid}/served/{branch}/`, materialized lazily on read (and eagerly
+  refreshed after a commit on that branch). `ServedTree` skips the rebuild when the
+  sidecar already records the current HEAD SHA, so a fresh tree is a cheap stat.
 - The served directory is the **web root**. If a site has a configured
-  subdirectory web root (future: `dist/`), the checkout/export honors it; v1
-  serves the repo root. `.git` is never inside `served/` (we check out files
-  only), satisfying "never serve `.git`".
-- `CommitTime`/`CommitSHA` come from a tiny sidecar `served/published/.kotoji-meta`
-  (JSON: `{commit, committedAt}`) written atomically with the tree, so the data
-  plane gets them without touching `.git`.
+  subdirectory web root (future: `dist/`), the export honors it; v1 serves the repo
+  root. `.git` is never inside `served/` (we export the tree via `git archive`,
+  never a checkout), satisfying "never serve `.git`".
+- `CommitSHA` comes from a tiny sidecar (`served/{branch}/.kotoji-served-sha`,
+  the bare 40-hex SHA) written atomically with the tree; it doubles as the
+  freshness key and the ETag source. `CommitTime` is read from the git commit by
+  the control plane (`ServedTree` returns it in the `TreeHandle`).
 
 Why not serve straight from a git object DB (go-git on each request)? It couples
 serving to git availability and integrity, costs CPU, and breaks the "plane
@@ -715,8 +716,9 @@ Two credential paths (either suffices):
    - Preferred, isolation-safe path: **preview tokens** (path 2), so we do NOT
      need a domain-wide cookie at all.
 
-2. **Scoped preview token** — a per-site (optionally per-branch) bearer token,
-   matching the MCP "token scoped per-project" model. Accepted as:
+2. **Scoped preview token** — a per-site (optionally per-branch) bearer token
+   for previews specifically (distinct from MCP/API tokens, which are per-user and
+   membership-capped — CANONICAL §6). Accepted as:
    - `Authorization: Bearer <token>` (for programmatic/MCP-driven preview), or
    - a **signed, short-TTL preview cookie** set by a control-plane endpoint:
      the dashboard's "Preview" button calls
@@ -927,11 +929,13 @@ All serving tests run against an in-memory `fs.FS` (`fstest.MapFS`) via a fake
   domain). **Recommend: ship §8 host-only preview cookies for v1; strongly
   document the second-domain option and consider making it the default in prod.**
   Needs a product decision.
-- **Q2: who materializes/garbage-collects preview worktrees?** §7.2 says
-  on-demand with TTL. Need a concrete eviction policy (LRU by disk budget? TTL
+- **Q2: who garbage-collects preview worktrees?** §7.2 materializes preview trees
+  lazily on read (atomic swap, sidecar-keyed freshness) but v1 ships **no
+  eviction** — a `served/{branch}` dir persists until the branch is deleted (which
+  removes it). Still open: a concrete eviction policy (LRU by disk budget? TTL
   since last hit?) and a max number of live preview trees per site to bound disk.
   Belongs in the SiteService contract; flagged here because it affects serve
-  latency (cold preview = checkout cost).
+  latency (cold preview = export cost).
 - **Q3: top-level `sandbox` CSP directive default.** §6.1 ships it **off**
   because `allow-scripts allow-same-origin` neutralizes it and it can break
   downloads/popups. Confirm we are comfortable relying solely on per-origin

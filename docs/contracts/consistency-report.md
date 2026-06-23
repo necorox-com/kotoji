@@ -1,5 +1,24 @@
 # kotoji — Cross-Document Consistency Report
 
+> **⚠️ HISTORICAL ARTIFACT (point-in-time).** This report was written *before* implementation
+> to reconcile six parallel design drafts. Its resolutions were subsequently **implemented and
+> superseded**: the binding law is now [`CANONICAL.md`](./CANONICAL.md) (frozen) plus the live
+> code + migrations under `backend/`. Read this document for the *history* of how the drift was
+> resolved, not as a current contract — where it disagrees with `CANONICAL.md` or the shipped
+> code, **`CANONICAL.md` and the code win.**
+>
+> One resolution here was later **re-architected** and is therefore stale in places below: the
+> **token model**. This report resolves tokens as *per-project* `site_tokens` (one token = one
+> site, "no MCP tool takes a site selector"). That was shipped first, then **replaced** by a
+> **per-user** `user_tokens` model (migration `0004_user_tokens.sql` DROPPED `site_tokens`): a
+> token is owned by a user, auto-covers all the user's memberships, and its effective scope on a
+> site = `token.scopes ∩ role_scopes(membership)`, re-evaluated per request. MCP tools now take a
+> `site` (handle) selector and are membership-capped; token issuance moved to per-user
+> `/api/tokens`. The affected passages below (§1.2, §2 P0-5/P1-2/P1-14/P2-1, §3, §4) are annotated
+> inline with **[SUPERSEDED]** / **[UPDATED]** markers; see `CANONICAL.md` §6 and `mcp.md` §3–§4
+> for the live model. Everything else (interface shape, DDL columns, identifier rules, cookies,
+> roles) was implemented as resolved.
+>
 > **Purpose.** Six design docs were authored in parallel by different agents. They are
 > individually strong but, being parallel, they **drifted**: the same Go interface is
 > defined three incompatible ways, the token table is defined twice with different
@@ -66,7 +85,19 @@ backend code is written.
 
 ---
 
-### 1.2 `site_tokens` table defined twice with different columns — **P0**
+### 1.2 `site_tokens` table defined twice with different columns — **P0** — **[SUPERSEDED]**
+
+> **[SUPERSEDED — token model re-architected to per-user.]** The resolution below
+> (per-project `site_tokens`, `site_id NOT NULL`, "one token = one site") was implemented and
+> then **replaced**. Migration `0004_user_tokens.sql` **DROPPED `site_tokens`** in favour of a
+> **per-user `user_tokens`** table: `user_id NOT NULL` (no `site_id`), one scope set +
+> `can_create_sites`, auto-covering all the owner's memberships. Effective scope on a site is
+> computed at call time as `token.scopes ∩ role_scopes(membership)`. Token issuance is now the
+> per-user endpoint `/api/tokens` (it replaced `/api/sites/{handle}/tokens`). The live DDL is
+> `CANONICAL.md` §4 (`user_tokens`). The column-reconciliation findings below are accurate as
+> *history* (and several columns carried over verbatim: `created_by`→now `user_id`,
+> `scopes TEXT[]`, `token_prefix`=12, `can_create_sites`, `kotoji_pat_<base62>` format,
+> hash-only storage).
 
 `access_tokens`/`site_tokens` is defined in **D1 §7.1**, **D4 §1.6**, and **D5 §3.2** — three
 different shapes.
@@ -85,8 +116,15 @@ different shapes.
 **Canonical resolution (binding):**
 
 - **Table name `site_tokens`** (D4/D5). D1's `access_tokens` is the outlier — patch D1.
-- **User FK = `created_by`** (D4) — clearer ("the human this token acts as"); patch D5's `user_id` → `created_by`. (Keep `ON DELETE CASCADE`.)
-- **`site_id` NOT NULL** (D4/D5). D1's nullable "account-wide token" is **rejected for v1** — it contradicts D5's headline security property ("one token = one site", §11.1) and reopens the cross-site pivot surface. Account-wide tokens are deferred (see §2 gap list, P2).
+  **[SUPERSEDED]** The live table is `user_tokens` (per-user); `site_tokens` was dropped in `0004`.
+- **User FK** (D4 called it `created_by`). **[SUPERSEDED]** In the per-user `user_tokens` table
+  the owning-user FK is named **`user_id`** (the human the token acts as), `ON DELETE CASCADE`.
+- ~~**`site_id` NOT NULL**~~ **[SUPERSEDED]** There is **no `site_id` column** on the live token
+  table. A token is per-user and auto-covers all the user's memberships; the per-site cap is the
+  runtime `token.scopes ∩ role_scopes(membership)` intersection (CANONICAL §6.2), and a
+  non-member site is refused (`not_found`). The pivot surface is closed by the **membership cap**,
+  not by site-binding the token. (The original "one token = one site / no tool takes a selector"
+  property was retired; MCP tools now take a `site` selector validated against membership.)
 - **Scope model = `scopes TEXT[]`** with `{read,write,publish}` (D1/D5), **NOT** D4's single `scope site_role` enum. Rationale: D5's tool catalogue maps each tool to a `read|write|publish` scope, and the superset chain (`publish ⊇ write ⊇ read`) is the contract the MCP layer enforces. The `site_role` enum (`owner|editor|viewer`) is the **membership** model and is a different axis — do not conflate token scope with member role. Patch D4 §1.6 to `scopes TEXT[]`. (`owner`-equivalent token power, e.g. delete-site, is intentionally *not* grantable to a token in v1.)
 - **`token_prefix` length = 12 chars** (D5) — fix the value across D4 (which says "~8") and the token-format contract. D4 gap #9 ("confirm prefix length") is hereby resolved: **12**.
 - **Add the `can_create_sites BOOLEAN NOT NULL DEFAULT FALSE` column** to the `site_tokens` DDL — D5 §5.5 relies on it but no DDL declares it. (See P1 gap on `create_site`-over-MCP.)
@@ -285,10 +323,10 @@ cannot make unilaterally.
 | # | Gap (source docs) | Recommended resolution |
 |---|---|---|
 | P0-1 | **Canonical `site.Service` interface** — three incompatible defs (§1.1). | Adopt §1.1 canonical version; author it once in `site-service.md`; make D1/D5 reference it. **Do this first** — everything depends on it. |
-| P0-2 | **`site_tokens` DDL** — three shapes (§1.2). | Adopt §1.2 canonical DDL (`scopes TEXT[]`, `created_by`, `site_id NOT NULL`, `can_create_sites`, prefix=12). One migration. |
+| P0-2 | **token DDL** — three shapes (§1.2). | Adopt the §1.2 canonical token DDL (`scopes TEXT[]`, `can_create_sites`, prefix=12). **[SUPERSEDED]** Shipped as the **per-user `user_tokens`** table (`user_id`, **no `site_id`**) — `site_tokens` was created in `0001` then DROPPED in `0004`; the live DDL is CANONICAL §4. |
 | P0-3 | **OpenAPI spec ownership & drift CI** (D1 §7, D2 §4.1/#11). The single-source-of-truth REST contract `openapi.yaml` does not exist; without it the Go↔Next types can't be generated and the two-language split rots. | **Hand-author `openapi.yaml`** (OpenAPI 3.1) alongside the Go handlers. Backend: `oapi-codegen -generate types` for Go DTOs; Frontend: `openapi-typescript` + `openapi-fetch`. **CI gate:** regenerate both; fail if working tree changes. Decide now: spec is hand-written, types generated *from* it (recommended). (needs user to ratify the toolchain.) |
 | P0-4 | **Roles & permissions capability matrix** (D2 #2, D4 §1.0, §1.10). Enum is fixed (`owner/editor/viewer`) but capabilities aren't. | Define the matrix: **owner** = all incl. delete/rename/members/publish/tokens; **editor** = save/commit/create-branch/request-publish/Monaco+MCP-write, **and direct publish** (small-team default; gate behind a per-site `require_publish_approval` flag if stricter); **viewer** = read files/history/**preview** (yes, viewers see drafts — they're trusted members), no writes. **MCP token scope (`read/write/publish`) is a separate axis** capped by the creating user's role. Put this table in `identifiers.md` or a new `authz.md`. (needs user to confirm "can editors publish directly?" and "do viewers see drafts?".) |
-| P0-5 | **Authz boundary: is `site.Service` authz-aware?** (D3 #13). Confused-deputy risk: an MCP token for site A `WriteFile`-ing site B. | **`site.Service` is NOT authz-aware** for membership; it trusts the `SiteID` it's given. Authorization (session→role, token→site+scope) is enforced **above** it in the API/MCP middleware. The MCP layer's structural guarantee (no tool takes a site selector; always calls with `claims.SiteID`) is what prevents the pivot (D5 §4.1). **However**, `site.Service` MUST still validate paths/branches/baseSHA (defense in depth) and return `ErrForbidden` only for git-level ownership of *operations it owns* (e.g. refusing to delete `published`). Document this boundary explicitly in `site-service.md` §4. |
+| P0-5 | **Authz boundary: is `site.Service` authz-aware?** (D3 #13). Confused-deputy risk: an MCP token writing the wrong site. | **`site.Service` is NOT authz-aware** for membership; it trusts the `SiteID` it's given. Authorization is enforced **above** it in the API/MCP middleware. **[UPDATED]** The original anti-pivot guarantee ("no tool takes a site selector; always calls with `claims.SiteID`") was **retired** when tokens went per-user: MCP tools now **do** take a `site` (handle) selector, and the pivot is prevented instead by the **membership cap** — the MCP layer resolves the named site, reads the token-user's membership role, and caps the call to `token.scopes ∩ role_scopes(membership)` per request; a non-member/unknown site → `not_found` before any `SiteService` touch (CANONICAL §1/§6.2, `mcp.md` §4). `site.Service` MUST still validate paths/branches/baseSHA (defense in depth) and uses `ErrValidation` for git-level operation rules it owns (e.g. refusing to write/delete `published`). Documented in `site-service.md` §15 + CANONICAL §1. |
 | P0-6 | **Hard vs soft delete for sites** (D3 #10, D4 #6, D1 §8.4). Conflicting: D1 has `deleted_at`, D4 hard-deletes, D3 recommends soft. | **Soft-delete:** add `sites.deleted_at timestamptz` (D1 already has it; D4 must add it). Delete = set `deleted_at`, handle stays reserved during grace, repo retained. A reaper job after **30d** `git bundle`s to `/data/backups/{uuid}` then `rm -rf`s. Resolves the divergence (D4 currently hard-deletes — patch it). (needs user to confirm 30d grace.) |
 | P0-7 | **Preview/session cookie isolation** (§1.5, D6 Q1, D1 §8.1.6). | Host-only `__Host-` cookies everywhere; preview = signed preview-grant → host-only `kotoji_preview` (D6 path 2). Ship for v1. **The "separate registrable domain for hosted content" is P1** (below). |
 
@@ -297,7 +335,7 @@ cannot make unilaterally.
 | # | Gap (source docs) | Recommended resolution |
 |---|---|---|
 | P1-1 | **Separate domain for hosted content** (D6 Q1, Q8). Hosted apps on `*.hosting.example.com` can set `Domain=.hosting.example.com` cookies (cookie-tossing) and `connect-src *` enables exfiltration. | Document loudly: **kotoji is for internal/trusted-author tools, NOT public untrusted UGC** (D6 Q8). For prod, **strongly recommend a second registrable domain** (`*.kotoji-usercontent.com`) for served content, separate from the control/auth domain; make it configurable (`KOTOJI_USERCONTENT_DOMAIN`, optional). v1 works on one domain with host-only cookies; two-domain is the hardening upgrade. (needs user: buy a second domain?) |
-| P1-2 | **MCP token management UI** (D2 #3, D5 §8). No screen issues/revokes tokens. | Add a **"Connect AI / MCP" panel** in ProjectDetail → Settings: create (copy-once), list (prefix + last-used + scope + expiry), revoke, and the ready-to-paste connection snippet (D5 §8). REST endpoints: `POST/GET/DELETE /api/sites/{id}/tokens`. Add to D2 inventory. |
+| P1-2 | **MCP token management UI** (D2 #3, D5 §8). No screen issues/revokes tokens. | Add a **"Connect AI / MCP" panel** (copy-once create, list with prefix + last-used + scope + expiry, revoke, ready-to-paste connection snippet). **[UPDATED]** Tokens are **per-user**, so the panel lives on the **per-user Instance Settings page (`/settings`)**, not per-project; REST endpoints are the per-user **`POST/GET/DELETE /api/tokens`** (replacing the per-site `/api/sites/{id}/tokens`). One token covers all the user's projects. |
 | P1-3 | **"Request publish" vs direct publish — mode & surfacing** (D2 #4, D5 §5.7, D1 §3d). Per-project? per-role? global? PR-status reflection undefined. | **Per-site setting `publish_mode ∈ {direct, request}`** (column on `sites`, default `direct` for small teams). `direct` → editor/owner publish immediately. `request` → non-owners get "公開をリクエスト" which opens/updates a GitHub PR via mirror; merge→webhook→pull→publish. PR/pending state reflected via a `publish_requests` view or by reading the mirror PR (defer the GitHub-PR-status polling to P2). Resolves D2 #4. (needs user to confirm per-site vs global.) |
 | P1-4 | **GitHub-driven state & notifications** (D2 #5, D5 §11.8). Merge→webhook→pull→redeploy is async/external; no UI surface. | Add a lightweight **activity/notifications** read from `audit_log` (source=`system`, kind=`webhook`): a per-site "published changed via GitHub" banner + a bell with recent external events. Reconcile optimistic local state by invalidating TanStack queries on a polled `/api/sites/{id}/activity` (or SSE if MCP goes stateful — P1-9). |
 | P1-5 | **Config endpoint for upload limits** (D2 #8, §1.7/§1.8). UI hard-codes limits today. | Add `GET /api/config` returning `{ maxUploadBytes, zipMaxFiles, allowedExtensions, handleMinLen, handleMaxLen, reservedHandles, baseDomain, authModes, publishMode }` (public-safe subset). Frontend fetches it for accurate pre-upload guidance and handle-validation hints. |
@@ -309,7 +347,7 @@ cannot make unilaterally.
 | P1-11 | **Mirror-push failure surfacing channel** (D3 #9, D5 §5.4). | **Response `warnings []string`** on the save/publish result (D5 already does this for MCP) **plus** an `audit_log` row (source=`system`, kind=`mirror_failed`) and a `sites.mirror_status` flag for the dashboard "GitHub sync pending" banner. Three channels, but `warnings[]` is the synchronous one the UI shows immediately. |
 | P1-12 | **Multi-replica horizontal scaling?** (D1 §8.6, D3 #2, D6 implicit). Affects flock vs pg_advisory_lock vs in-proc mutex. | **v1 = single backend replica** (in-process keyed mutex + flock for the control/serve split). Reserve the seam: the lock acquisition is behind an interface so a `pg_advisory_xract_lock(hashtext(uuid))` impl can drop in for HA. The baseSHA optimistic check is the cross-process safety net meanwhile. (needs user to confirm HA is not a v1 goal.) |
 | P1-13 | **i18n library & launch language** (D2 #1). | **`next-intl`** (house standard: tsumo/shop/uma all use it; App-Router-native). **Launch ja-only** with all copy as message keys (so en is a later drop-in, not a refactor). Resolves D2 #1. (needs user to confirm ja-only-at-launch.) |
-| P1-14 | **`create_site` over MCP** (D5 #2). | **Disabled by default** via `site_tokens.can_create_sites=false` (P0-2 adds the column). Expose the capability only behind an explicit dashboard opt-in; the new site's first token is still issued **only in the dashboard** (never minted over MCP, D5 §11.2). (needs user to decide if AI-autonomous site creation is ever desired.) |
+| P1-14 | **`create_site` over MCP** (D5 #2). | **Disabled by default** via `can_create_sites=false`, AND'd with the owning user's `users.can_create_sites` (P0-2 adds the column). **[UPDATED]** The flag now lives on the per-user **`user_tokens.can_create_sites`** (not `site_tokens`). No token is ever minted over MCP; because the token is per-user the SAME token immediately covers the new site (the user is its owner). (needs user to decide if AI-autonomous site creation is ever desired.) |
 | P1-15 | **`Commit` vs `WriteFile` overlap + working-tree diff** (D3 #6, #7). With `WriteFile` committing per-call, is multi-file `Commit` / a staging area real? | **Keep `Commit` for the multi-file batch case** (MCP `write_file(commit:false)` ×N then `save`; Monaco "save all"), implemented as a real staged-then-commit under one lock. Therefore **`GetDiff(to=="")` against the working tree IS meaningful** and stays. If product decides single-file-per-commit only, drop both — but the MCP `save` tool (D5 §5.6) needs the batch path, so **keep it**. |
 | P1-16 | **Clean URLs (`/foo`→`foo.html`) default** (D1 §8.6, D6 §5.2). | **Off by default** (D6 §5.2 `PrettyURLs` config, default off) — predictable behavior; opt-in per site. Resolves the [OPEN]. |
 | P1-17 | **SVG script execution** (D6 Q4). | **Serve `.svg` with per-file `Content-Security-Policy: script-src 'none'`** (recommended, cheap). Add to the data-plane header logic. |
@@ -318,8 +356,8 @@ cannot make unilaterally.
 
 | # | Gap (source docs) | Recommended resolution |
 |---|---|---|
-| P2-1 | Account-wide / multi-site MCP tokens (D5 #1). | Defer. If added, a join table `token_sites` + the content tools take a site arg validated against the allow-list. v1 stays one-token-one-site. |
-| P2-2 | Token verification per-call vs cached (D5 #3). | **Per-call DB lookup** for v1 (instant revoke). Revisit with metrics; if hot, cache `TokenInfo` 30s with a revocation epoch. |
+| P2-1 | Account-wide / multi-site MCP tokens (D5 #1). | **[IMPLEMENTED — not deferred.]** The shipped model went straight to **per-user** tokens (`user_tokens`): one token covers all the owner's memberships, content tools take a `site` arg validated against membership (`token.scopes ∩ role_scopes`). No `token_sites` join table was needed; the "one-token-one-site" v1 was replaced (migration `0004`). |
+| P2-2 | Token verification per-call vs cached (D5 #3). | **Per-call DB lookup** for v1 (instant revoke; membership/role is also re-evaluated per call). Revisit with metrics; if hot, cache `TokenInfo` 30s with a revocation epoch. |
 | P2-3 | Quotas modeled in DB (D4 #2, D1 §8.4). | Add `users.max_sites`, `users.max_repo_bytes` (nullable → instance default) + `sites.repo_bytes` cache (updated post-`git gc`). Enforce `413`/`quota_exceeded`. Own contract when built. |
 | P2-4 | `sites.repo_bytes` / file-count cache (D4 #3, D3 implicit). | Add as part of P2-3; explicitly a git-derived read-through cache. |
 | P2-5 | `site_branch_cache` for cross-site branch queries (D4 #1). | Defer until a real admin/analytics use case. Branches stay git-only. |
@@ -354,9 +392,9 @@ cannot make unilaterally.
 To execute the resolutions above, the docs need these edits (do before/alongside coding):
 
 1. **`site-service.md`** — make it the *sole* home of the canonical `site.Service` interface (§1.1): `uuid.UUID` IDs, `Actor` (+`Via`), `*Input` request structs, `GetDiff`/`GetLog`, `FileContent`, `ConflictError{..., ChangedPaths}`, explicit `SetRemote`/`MirrorPush`/`FetchAndUpdate`; remove `ResolveForServing` from the interface (it's the resolver pkg); add `ServedTree` backing `TreeProvider`; merge `ListFiles` signature (§1.14); `HandleMinLen=3`; reject `{handle}--published` (§1.3); rollback ancestor-only (P2-11); add preview eviction policy (P1-10).
-2. **`architecture.md`** — patch package `siteservice`→`site`, `SiteRef`/`Author`→`uuid.UUID`/`Actor`, `Diff`/`Log`→`GetDiff`/`GetLog`; `access_tokens`→`site_tokens` with §1.2 columns; `published_sha`→`published_commit_sha` + keep `published_at`; `site_members.role` `admin`→`owner`; `visibility` 2-val→3-val enum (§1.4); `via`→`source` enum (§1.12); `HOSTING_BASE_DOMAIN`→`KOTOJI_BASE_DOMAIN`; `SESSION_COOKIE_DOMAIN` default empty/host-only; add `description`, `deleted_at`, reserve `web_root`; fix MB→MiB; add `ZIP_MAX_ENTRY_BYTES`.
-3. **`data-model.md`** — `site_tokens.scope site_role`→`scopes TEXT[]`; `token_prefix` 8→12; add `can_create_sites`, `sites.published_at`, `sites.deleted_at` (soft-delete), `sites.publish_mode`, reserve `sites.web_root`; reconcile delete to soft (§P0-6); align `audit_source` mapping note.
-4. **`mcp.md`** — present the `site.Service` subset as "authoritative in site-service.md"; `WriteRequest`→`WriteFileInput` names; `is_published`→derived; `user_id`→`created_by`; `monaco`/`github` `via` → map to `editor`/`system`; conflict fields → `expected`/`actual`/`changedPaths`; add `create_branch` tool (P1-8); binary upload-only note (P1-7).
+2. **`architecture.md`** — patch package `siteservice`→`site`, `SiteRef`/`Author`→`uuid.UUID`/`Actor`, `Diff`/`Log`→`GetDiff`/`GetLog`; `access_tokens`→the per-user `user_tokens` table (**[UPDATED]** not `site_tokens`; see header note + §1.2); `published_sha`→`published_commit_sha` + keep `published_at`; `site_members.role` `admin`→`owner`; `visibility` 2-val→3-val enum (§1.4); `via`→`source` enum (§1.12); `HOSTING_BASE_DOMAIN`→`KOTOJI_BASE_DOMAIN`; `SESSION_COOKIE_DOMAIN` default empty/host-only; add `description`, `deleted_at`, reserve `web_root`; fix MB→MiB; add `ZIP_MAX_ENTRY_BYTES`.
+3. **`data-model.md`** — `token_prefix` 8→12; add `can_create_sites`, `sites.published_at`, `sites.deleted_at` (soft-delete), `sites.publish_mode`, reserve `sites.web_root`; reconcile delete to soft (§P0-6); align `audit_source` mapping note. **[UPDATED]** the token table is the per-user **`user_tokens`** (`user_id`, no `site_id`, `scopes TEXT[]`) per migration `0004`, not `site_tokens` — see CANONICAL §4.
+4. **`mcp.md`** — present the `site.Service` subset as "authoritative in site-service.md"; `WriteRequest`→`WriteFileInput` names; `is_published`→derived; `monaco`/`github` `via` → map to `editor`/`system`; conflict fields → `expected`/`actual`/`changedPaths`; add `create_branch` tool (P1-8); binary upload-only note (P1-7). **[DONE/UPDATED]** `mcp.md` has been rewritten to the per-user, membership-capped, `site`-selector model (its §3–§4 are the live token-auth contract); the token table there is `user_tokens` (`user_id`, not `created_by`).
 5. **`routing-and-serving.md`** — confirm host-only session cookie (reject `Domain=.hosting…`, §1.5); add SVG `script-src 'none'` (P1-17); fix companion refs (`identifiers.md`, `data-model.md`); document the `KOTOJI_USERCONTENT_DOMAIN` option (P1-1).
 6. **`design.md`** — conflict envelope field names (§1.6); add MCP-token panel + config-endpoint usage (P1-2/P1-5); set i18n = next-intl, ja-only launch (P1-13).
 7. **New files owed:** `contracts/openapi.yaml` (P0-3), `contracts/identifiers.md` (handle/branch/reserved + role-capability matrix), and either extract `contracts/mcp-tools.md` or re-point references to `mcp.md`.
@@ -366,7 +404,8 @@ To execute the resolutions above, the docs need these edits (do before/alongside
 ## 4. Summary — what blocks the first line of code
 
 The **P0** set, in order: **(1) freeze the `site.Service` interface, (2) freeze the
-`site_tokens` + `sites` DDL, (3) stand up `openapi.yaml` + the generation/CI pipeline,
+token + `sites` DDL** *(shipped as the per-user `user_tokens` table, not `site_tokens` — see
+the header note and §1.2)*, **(3) stand up `openapi.yaml` + the generation/CI pipeline,
 (4) write the role-capability matrix, (5) pin the authz boundary, (6) decide soft-delete,
 (7) lock the host-only cookie model.** Items 4 and 6 and the toolchain in 3 want a quick
 user confirmation; the rest I can finalize from the resolutions above. Everything else

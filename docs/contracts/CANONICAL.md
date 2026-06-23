@@ -431,7 +431,7 @@ type Actor struct {
 	Name    string      // display name -> git author.name
 	Email   string      // -> git author.email; synthesized if absent (userID@kotoji.local)
 	Via     WriteSource // "upload"|"editor"|"mcp"|"system" -> Kotoji-Via trailer + audit_log.source
-	TokenID *uuid.UUID  // set when acting via a site_token (MCP/API) -> audit_log.token_id
+	TokenID *uuid.UUID  // set when acting via a user token (MCP/API) -> audit_log.token_id
 }
 
 // WriteSource is the canonical provenance value set (matches audit_source enum, §4).
@@ -956,7 +956,6 @@ Two **orthogonal** axes:
 | Rename handle | ✅ | ❌ | ❌ |
 | Delete site (soft) | ✅ | ❌ | ❌ |
 | Manage members (add/remove/role) | ✅ | ❌ | ❌ |
-| Issue / revoke site tokens | ✅ | ❌ | ❌ |
 | Set GitHub mirror | ✅ | ❌ | ❌ |
 | Edit site settings (visibility, publish_mode, web_root) | ✅ | ❌ | ❌ |
 
@@ -1058,8 +1057,8 @@ The single set of wire names used by **both** REST (`openapi.yaml`) and MCP (`mc
    `*.kotoji-usercontent.com` (a second registrable domain for served content) is documented
    as **FUTURE hardening**, not v1.
 8. **AI-autonomous `create_site` over MCP is OFF by default**; opt-in via
-   `site_tokens.can_create_sites = true` (also requires `users.can_create_sites`). No token is
-   ever minted over MCP; the new site's first token is issued only in the dashboard.
+   `user_tokens.can_create_sites = true` (also requires `users.can_create_sites`). No token is
+   ever minted over MCP; tokens are issued only in the dashboard (per-user account settings).
 
 ---
 

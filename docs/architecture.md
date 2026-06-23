@@ -1,17 +1,16 @@
 # kotoji — Architecture (implementation-level)
 
-> Status: design-locked, pre-alpha. This document turns the [README](../README.md) and the
-> locked Japanese spec (`プロダクト/kotoji/仕様書.md`) into an implementation-ready blueprint:
-> concrete Go package layout, interface signatures, SQL DDL, request flows, deployment
-> topology, the env matrix, the Go↔Next API contract, and an exhaustive gap / 考慮漏れ analysis.
+> Status: SHIPPED & deployed. This document describes the live system: the Go package layout,
+> interface signatures, SQL DDL, request flows, deployment topology, the env matrix, the Go↔Next
+> API contract, and the gap / 考慮漏れ analysis (most items resolved — see [§8](#8-gap-analysis--考慮漏れ)).
 >
-> Companion documents (authored alongside this one):
-> - `docs/contracts/` — OpenAPI spec + MCP tool schemas (the API source of truth).
-> - `docs/siteservice.md` — full `SiteService` interface contract (referenced here).
-> - `docs/db-schema.md` — full DDL + sqlc query catalog (the DDL here is the canonical subset).
+> Companion documents:
+> - `docs/contracts/CANONICAL.md` — **the law** (per-user token model §6, frozen DDL §4, error
+>   taxonomy §3). On any conflict, CANONICAL.md wins and this doc is read for explanation only.
+> - `docs/contracts/openapi.yaml` — the current REST contract (source of truth for `/api/*`).
+> - `docs/contracts/mcp.md` — MCP tool schemas (per-user token + `site` selector model).
 >
-> Everything below is *within* the locked decisions. Where a decision was under-specified, the
-> resolution is called out inline and re-listed in [§8 Gap analysis](#8-gap-analysis--考慮漏れ).
+> Where this doc and CANONICAL.md disagree, CANONICAL.md is authoritative.
 
 ---
 
@@ -25,11 +24,11 @@
 | **branch** | Generalized: `published` (prod), `draft` (default working), `feature-*` (per-user/AI). |
 | **control plane** | Go backend (API/auth/MCP) + Next.js frontend (UI). The "operate" surface. |
 | **data plane** | Go static serving that resolves `{handle}/{branch}` from the `Host` header. The "consume" surface. |
-| **SiteService** | The single Go interface that touches git. The DI boundary. The only writer to `/data/sites`. |
+| **site.Service** | The single Go interface (`internal/site`) that touches git. The DI boundary. The only writer to `/data/sites`. |
 
 **Hard invariants (enforced in code, asserted in tests):**
 
-1. *Nothing* writes to `/data/sites/**` except `SiteService`. The data plane and DB layer are **read-only** w.r.t. git.
+1. *Nothing* writes to `/data/sites/**` except `site.Service`. The data plane and DB layer are **read-only** w.r.t. git.
 2. Every mutation (zip/Monaco/MCP) → a git commit on a branch. No "loose" file writes.
 3. Every write carries a **base commit SHA**; the server rejects on mismatch (optimistic lock).
 4. `published` is *only* advanced by an explicit `publish` action (or a GitHub-merge webhook), never by a save.
@@ -43,12 +42,13 @@
                             INTERNET
                                │
               ┌────────────────┴─────────────────┐
-              │   NPM / Caddy / nginx (proxy)     │   TLS terminates here.
-              │   wildcard cert *.hosting.ex.com  │   Proxy is "dumb": routes by Host only,
-              │   + cert hosting.example.com      │   holds NO authority over {handle}/{branch}.
-              └───┬───────────────────────────┬───┘
+              │   Edge proxy (Traefik / NPM /     │   TLS terminates here.
+              │   Caddy / nginx).                 │   Proxy is "dumb": routes by Host only,
+              │   wildcard *.example.com          │   holds NO authority over {handle}/{branch}.
+              │   + cert example.com              │   See §4.4: the base compose is proxy-LESS;
+              └───┬───────────────────────────┬───┘   the opt-in edge overlay ships Traefik.
                   │                           │
-   Host = hosting.example.com          Host = *.hosting.example.com
+   Host = example.com                  Host = *.example.com
    (the bare control-plane host)       (any per-site / preview subdomain)
                   │                           │
         ┌─────────┴──────────┐                │
@@ -69,7 +69,7 @@
  │  via /api   │      │        └──────────────┼───────────────┘        │
  └─────────────┘      │                       ▼                        │
                       │              ┌──────────────────┐              │
-                      │              │   SiteService    │  ← DI seam   │
+                      │              │   site.Service   │  ← DI seam   │
                       │              │  (git interface) │  ONLY writer │
                       │              └────────┬─────────┘              │
                       │                       │                        │
@@ -81,13 +81,13 @@
                       │   └───────────────────┬──────────────────┘     │
                       └───────────┬───────────┼────────────────────────┘
                                   │           │
-                    ┌─────────────▼──┐   ┌────▼───────────────────────┐
-                    │  PostgreSQL 18 │   │  /data/sites/{uuid}/.git    │
-                    │ users, sites,  │   │  (bare repo, 1 per site)    │
-                    │ sessions,      │   │  + /data/published/{uuid}/  │
-                    │ tokens, audit  │   │    (worktree checkout)      │
-                    │ (metadata only)│   │  + /data/tmp (uploads)      │
-                    └────────────────┘   └─────────────┬───────────────┘
+                    ┌─────────────▼──┐   ┌────▼───────────────────────────┐
+                    │  PostgreSQL 18 │   │  /data/sites/{uuid}/.git        │
+                    │ users, sites,  │   │  (1 repo per site)              │
+                    │ sessions,      │   │  + /data/sites/{uuid}/served/   │
+                    │ tokens, audit  │   │    {branch}/  (RO worktrees)    │
+                    │ (metadata only)│   │  + /data/tmp (uploads)          │
+                    └────────────────┘   └─────────────┬───────────────────┘
                                                         │ mirror push / fetch
                                                         ▼
                                               GitHub remote (backup,
@@ -96,29 +96,30 @@
 
 ### 1.1 Proxy routing rules (the only thing the proxy knows)
 
-The proxy is configured **once** and never again per-site. Two Proxy Hosts:
+The proxy is configured **once** and never again per-site. Two routes (the opt-in Traefik edge
+overlay, `deploy/docker-compose.edge.yml`, encodes exactly these as labels — see §4.4):
 
-**A. `hosting.example.com` (bare control host)** — *path-based* split, all to internal services:
+**A. `example.com` (bare control host)** — *path-based* split, all to internal services:
 
 | Path prefix | Upstream | Notes |
 |---|---|---|
-| `/api/` | backend `:8080` | REST JSON API |
-| `/auth/` | backend `:8080` | OIDC login/callback/logout |
+| `/api/` | backend `:8080` | REST JSON API (incl. `/api/webhooks/github`) |
+| `/auth/` | backend `:8080` | OIDC login/callback/logout + first-run `/auth/setup` |
 | `/mcp` | backend `:8080` | MCP SSE/Streamable HTTP. Long-lived; disable proxy buffering, 7d read timeout. |
 | `/healthz`, `/readyz` | backend `:8080` | liveness/readiness |
 | everything else (`/`, `/_next/`, …) | frontend `:3000` | Next.js standalone server |
 
-**B. `*.hosting.example.com` (wildcard, every site + preview)** — *single* upstream:
+**B. `*.example.com` (wildcard, every site + preview)** — *single* upstream:
 
 | Match | Upstream | Notes |
 |---|---|---|
 | `*` | backend data-plane `:8081` | The Go `serve` mode. It re-parses the `Host` header itself. |
 
-> The proxy passes `Host` unchanged (`proxy_set_header Host $host`). The data plane is the
-> authority for `{handle}` / `{branch}` resolution — see [§3e](#3e-data-plane-get).
+> The proxy passes `Host` unchanged. The data plane is the authority for `{handle}` / `{branch}`
+> resolution — see [§3e](#3e-data-plane-get). The base host derives from `KOTOJI_BASE_DOMAIN`.
 
 > **Path-based fallback** (`/host/{handle}/...` and `/host/{handle}--{branch}/...`) is served by
-> the *same* resolver abstraction (`serve.Resolver`), so a proxy that can't do wildcards still works.
+> the *same* resolver abstraction (`resolve.Resolver`), so a proxy that can't do wildcards still works.
 
 ---
 
@@ -129,167 +130,174 @@ kotoji/
 ├── README.md  LICENSE  .gitignore
 ├── docs/
 │   ├── architecture.md            ← this file
-│   ├── siteservice.md             ← SiteService contract
-│   ├── db-schema.md               ← full DDL + sqlc catalog
 │   └── contracts/
+│       ├── CANONICAL.md           ← the law (token model, frozen DDL, error taxonomy)
 │       ├── openapi.yaml           ← Go↔Next REST contract (source of truth)
-│       └── mcp-tools.md           ← MCP tool JSON schemas
+│       └── mcp.md                 ← MCP tool JSON schemas (per-user token + site selector)
 │
 ├── backend/                       ← Go 1.24+, single module (go.mod: github.com/necorox-com/kotoji/backend)
 │   ├── go.mod  go.sum
 │   ├── sqlc.yaml                  ← sqlc config (engine: postgresql, sql package: pgx/v5)
 │   ├── cmd/
-│   │   ├── kotojid/main.go        ← the server. flag/env RUN_MODE selects sub-servers.
-│   │   └── kotoji-migrate/main.go ← goose wrapper (or use goose CLI directly)
+│   │   └── kotojid/main.go        ← the server. env KOTOJI_RUN_MODE selects sub-servers.
 │   ├── internal/
 │   │   ├── config/                ← typed Config struct + env parsing + validation
-│   │   │   └── config.go
-│   │   ├── app/                   ← composition root: wires DI, builds http.Servers
-│   │   │   └── app.go             ←   constructs SiteService, Stores, Providers, mounts routers
+│   │   │   └── config.go          ←   all vars are KOTOJI_*-prefixed (§6)
+│   │   ├── app/                   ← composition root: wires DI, runs boot migrations, builds http.Servers
+│   │   │   └── app.go             ←   constructs site.Service, db.Store, secretbox, auth, ops; mounts routers
 │   │   ├── api/                   ← REST handlers (control plane). chi router.
 │   │   │   ├── router.go          ←   mounts /api/*; middleware chain
-│   │   │   ├── middleware.go      ←   reqid, slog, recover, CORS, session-auth, csrf
-│   │   │   ├── sites.go files.go branches.go publish.go history.go members.go admin.go me.go
-│   │   │   └── errors.go          ←   typed → JSON error envelope (RFC 7807-ish)
-│   │   ├── auth/                  ← AuthProvider abstraction + session store
+│   │   │   ├── sites.go files.go branches.go publish.go history.go members.go upload.go preview.go
+│   │   │   ├── tokens.go          ←   PER-USER tokens: /api/tokens (list/create/revoke)
+│   │   │   ├── admin.go           ←   /api/admin/* incl. GET|PUT /api/admin/github (instance mirror config)
+│   │   │   ├── authz.go           ←   role→capability gate (CANONICAL §6)
+│   │   │   └── errors.go          ←   typed → JSON error envelope
+│   │   ├── auth/                  ← AuthProvider abstraction + session store + first-run setup
 │   │   │   ├── provider.go        ←   AuthProvider interface
 │   │   │   ├── oidc.go            ←   go-oidc/v3 + x/oauth2 impl (Google default)
-│   │   │   ├── devauth.go         ←   no-auth + admin-password modes
+│   │   │   ├── devauth.go         ←   no-auth (dev) + PasswordProvider (DB-hash-then-env)
+│   │   │   ├── handlers.go        ←   /auth/login|callback|logout, /auth/setup, /api/me, /api/config
+│   │   │   ├── csrf.go            ←   double-submit CSRF guard
 │   │   │   └── session.go         ←   server-side session (Postgres-backed)
-│   │   ├── siteservice/           ← THE DI BOUNDARY (interface lives here)
-│   │   │   ├── service.go         ←   type SiteService interface { ... }
-│   │   │   ├── types.go           ←   DTOs: FileEntry, CommitInfo, DiffEntry, WriteResult...
-│   │   │   ├── errors.go          ←   ErrSHAMismatch, ErrReservedHandle, ErrNotFound...
-│   │   │   └── mock/mock.go       ←   generated/handwritten mock for table-driven tests
-│   │   ├── git/                   ← default SiteService impl (git CLI via os/exec; go-git for reads)
-│   │   │   ├── gitservice.go      ←   implements siteservice.SiteService
-│   │   │   ├── exec.go            ←   safe os/exec wrapper (no shell, arg arrays, ctx, timeout)
-│   │   │   ├── repo.go            ←   per-repo lifecycle (init, worktree, gc)
+│   │   ├── site/                  ← THE DI BOUNDARY: site.Service interface + git impl, ONE package
+│   │   │   ├── service.go         ←   type Service interface { ... } (CANONICAL §1)
+│   │   │   ├── git_service.go     ←   production impl (git CLI via os/exec; go-git for reads)
+│   │   │   ├── git_auth.go        ←   GitHub push/fetch auth: env-injected http.<base>.extraHeader
+│   │   │   ├── mirror.go          ←   remote add / mirror push / fetch
+│   │   │   ├── gitrunner.go       ←   safe os/exec wrapper (no shell, arg arrays, ctx, env)
 │   │   │   ├── lock.go            ←   per-repo keyed mutex (in-proc) + flock (cross-proc)
-│   │   │   └── mirror.go          ←   GitHub remote add / mirror push / fetch
-│   │   ├── serve/                 ← DATA PLANE
-│   │   │   ├── server.go          ←   http.Handler; security headers; read-only file serve
-│   │   │   ├── resolver.go        ←   Resolver interface (Host-based + path-based impls)
-│   │   │   └── publishtree.go     ←   reads /data/published/{uuid} (see §4)
-│   │   ├── mcp/                   ← MCP server (official Go SDK), HTTP/SSE
-│   │   │   ├── server.go          ←   tool registration + transport
-│   │   │   ├── tools.go           ←   list_sites, read_file, write_file, save, publish, ...
-│   │   │   └── auth.go            ←   per-project token scope check
-│   │   ├── store/                 ← DB access (sqlc-generated + thin wrappers)
-│   │   │   ├── db/                ←   sqlc OUTPUT (queries.sql.go, models.go, db.go) — generated
-│   │   │   ├── queries/*.sql      ←   sqlc INPUT (hand-written SQL)
-│   │   │   ├── sites.go users.go sessions.go tokens.go audit.go  ← wrappers w/ domain types
-│   │   │   └── tx.go             ←   pgx pool + tx helper
-│   │   ├── handle/                ← handle validation + reserved words + normalization
-│   │   │   └── handle.go
-│   │   ├── webhook/               ← GitHub webhook receiver (HMAC verify → pull → redeploy)
-│   │   │   └── github.go
-│   │   └── observability/         ← slog setup, request-id, metrics (optional Prometheus)
-│   │       └── log.go
-│   └── migrations/                ← goose .sql files (NNNN_description.sql)
-│       └── 0001_init.sql ...
+│   │   │   ├── handle.go path.go mime.go zip.go errors.go  ← validation, MIME table, zip guards, taxonomy
+│   │   │   ├── fake.go            ←   in-memory Service for table-driven tests of api/mcp/serve
+│   │   │   └── prod.go            ←   NewProductionService composition-root factory
+│   │   ├── resolve/               ← Host → {handle,branch} resolver (data plane)
+│   │   ├── serve/                 ← DATA PLANE http.Handler: security headers, read-only file serve
+│   │   ├── preview/               ← signed preview-grant (host-scoped kotoji_preview cookie)
+│   │   ├── mcpserver/             ← MCP server (official Go SDK), HTTP/SSE
+│   │   │   ├── server.go registry.go ← transport + tool registration
+│   │   │   ├── tools.go           ←   list_sites, read_file, write_file, save, publish, ... (take a `site`)
+│   │   │   ├── verifier.go        ←   bearer token → user + scopes (per-user token)
+│   │   │   └── authz.go           ←   MEMBERSHIP-CAP: effective = token.scopes ∩ roleScopes(membership)
+│   │   ├── db/                    ← DB access (sqlc-generated + thin wrappers)
+│   │   │   ├── gen/               ←   sqlc OUTPUT (queries.sql.go, models.go) — generated
+│   │   │   ├── store.go           ←   *db.Store: pgx pool, WithTx, GitHub config (secretbox), settings
+│   │   │   └── migrations/        ←   goose .sql files (embed.go embeds them)
+│   │   │       └── 0001_init.sql 0002_seed_reserved.sql 0003_instance_settings.sql 0004_user_tokens.sql
+│   │   ├── migrate/               ← boot-time goose runner (advisory-locked)
+│   │   ├── secretbox/             ← AES-256-GCM at-rest encryption for the DB-stored GitHub PAT
+│   │   ├── ops/                   ← background scheduler: soft-delete reaper + git gc
+│   │   ├── ratelimit/             ← per-session / per-IP / per-token limiters
+│   │   ├── openapi/               ← spec-derived Go DTOs (oapi-codegen, types only)
+│   │   ├── webhook/               ← GitHub webhook receiver (HMAC verify → fetch → redeploy)
+│   │   └── observability/         ← slog setup, request-id, recover
 │
 ├── frontend/                      ← Next.js 16 App Router, React 19, TS strict
 │   ├── package.json  tsconfig.json  next.config.ts
-│   ├── postcss.config.mjs         ← @tailwindcss/postcss
-│   ├── app/
-│   │   ├── globals.css            ← @theme tokens + base layer
-│   │   ├── layout.tsx             ← ThemeProvider, QueryProvider, Toaster
-│   │   ├── (auth)/login/page.tsx
-│   │   ├── (app)/
-│   │   │   ├── dashboard/page.tsx
-│   │   │   ├── sites/new/page.tsx
-│   │   │   ├── sites/[handle]/page.tsx        ← project detail (tree+Monaco+branches+publish+history)
-│   │   │   └── admin/page.tsx
-│   ├── components/                ← atomic design: atoms / molecules / organisms / templates
-│   │   └── (see docs/responsive-design.md — companion doc)
-│   ├── lib/
-│   │   ├── api/                   ← GENERATED TS client (from openapi.yaml) — do not hand-edit
-│   │   ├── query.ts              ← TanStack Query setup
-│   │   └── auth.ts              ← /api/me guard helpers
-│   └── public/
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── icon.svg            ← kotoji-tōrō lantern (favicon + brand mark)
+│   │   │   ├── (auth)/login/page.tsx              ← login + first-run setup-form
+│   │   │   ├── (app)/dashboard/page.tsx
+│   │   │   ├── (app)/sites/new/page.tsx
+│   │   │   ├── (app)/sites/[handle]/page.tsx      ← project detail (tree+Monaco+branches+publish+history)
+│   │   │   ├── (app)/sites/[handle]/settings/page.tsx ← per-project settings
+│   │   │   ├── (app)/settings/page.tsx            ← INSTANCE settings: GitHub config + MCP guide + tokens
+│   │   │   └── (app)/admin/page.tsx
+│   │   ├── components/            ← atomic design: atoms / molecules / organisms / templates / ui
+│   │   ├── lib/api/               ← GENERATED TS client (from openapi.yaml) + TanStack Query hooks
+│   │   ├── i18n/  messages/       ← next-intl (ja default + en)
+│   │   └── hooks/
 │
 └── deploy/
-    ├── docker-compose.yml         ← backend, frontend, postgres
-    ├── docker-compose.dev.yml     ← + adminer, live reload, dev-auth on
+    ├── docker-compose.yml         ← backend (KOTOJI_RUN_MODE=all) + frontend + postgres. PROXY-LESS base.
+    ├── docker-compose.dev.yml     ← dev overlay (live reload, dev-auth)
+    ├── docker-compose.edge.yml    ← OPT-IN Traefik v3 edge overlay (turnkey TLS) — see §4.4
     ├── backend.Dockerfile         ← multi-stage; final stage INCLUDES git binary
     ├── frontend.Dockerfile        ← Next.js standalone
     ├── .env.example
-    └── npm/                       ← sample NPM/Caddy/nginx configs for prod & dev notes
+    └── npm/                       ← sample NPM/Caddy/nginx configs (for an existing shared edge)
 ```
 
 ### 2.1 Why this split
 
-- `siteservice` (interface) is *separate* from `git` (impl) so handlers depend on the interface, not the
-  implementation. `siteservice/mock` enables table-driven tests of `api`, `mcp`, and `serve` with **no real git**.
-- `serve` imports `siteservice` (or a narrower read-only sub-interface, see §4) but is wired so it can run
-  in-process or as a sibling binary unchanged.
-- `store/db` is the sqlc generated output and must never be edited by hand; `store/*.go` wrap it with domain types.
+- `site.Service` (the interface in `internal/site`) is the single git boundary; handlers depend on the
+  interface, never the impl. `site.fake` enables table-driven tests of `api`, `mcpserver`, and `serve`
+  with **no real git**.
+- `serve` reads via a narrow read-only path (see §4) and is wired so it can run in-process (`KOTOJI_RUN_MODE=all`)
+  or as a sibling binary (`KOTOJI_RUN_MODE=serve`) unchanged.
+- `db/gen` is the sqlc generated output and must never be edited by hand; `db/store.go` wraps it with domain
+  types and owns the at-rest secret box used to encrypt the GitHub PAT.
 
 ---
 
-## 2.2 The SiteService interface (the contract handlers code against)
+## 2.2 The site.Service interface (the contract handlers code against)
 
-> Full doc in `docs/siteservice.md`; the signature here is canonical. All methods take `ctx` first and
-> return typed errors from `siteservice/errors.go`. **No method exposes a raw file path** — paths are
-> repo-relative, validated, and never reach `os.*` without cleaning (see [§8 path traversal](#83-correctness-gaps)).
+> **The frozen interface is `site.Service` in `internal/site` — see [CANONICAL.md §1](contracts/CANONICAL.md).**
+> What follows is a faithful summary; on any field/signature difference CANONICAL.md wins. All methods take
+> `ctx` first and return typed errors from `site/errors.go` (the taxonomy is CANONICAL §3). **No method
+> exposes a raw file path** — paths are repo-relative, validated, and never reach `os.*` without cleaning
+> (see [§8 path traversal](#83-correctness-gaps)).
 
 ```go
-package siteservice
+package site
 
-// SiteService is the ONLY component that touches git on disk.
-// Every writer (zip upload, Monaco, MCP) funnels through this interface.
-type SiteService interface {
-    // --- lifecycle ---
-    CreateSite(ctx context.Context, in CreateSiteInput) (SiteRef, error)        // git init bare + seed draft
-    InitFromZip(ctx context.Context, ref SiteRef, branch string, zr *zip.Reader, author Author) (CommitInfo, error)
-    DeleteSite(ctx context.Context, ref SiteRef) error                          // archive then rm (soft, §8.4)
+// Service is the ONLY component that touches git on disk. Every writer (zip upload,
+// Monaco editor, MCP tools) and the data-plane read side funnel through this interface.
+type Service interface {
+    // --- site lifecycle (git repo init AND metadata, one tx) ---
+    CreateSite(ctx context.Context, in CreateSiteInput) (Site, error)       // init repo + seed draft + owner row
+    GetSite(ctx context.Context, id uuid.UUID) (Site, error)
+    GetSiteByHandle(ctx context.Context, h Handle) (Site, error)            // CURRENT handle only (old → resolver 301)
+    ListSites(ctx context.Context, ownerID uuid.UUID) ([]Site, error)
+    RenameHandle(ctx context.Context, id uuid.UUID, newHandle Handle) (Site, error)
+    DeleteSite(ctx context.Context, id uuid.UUID, actor Actor) error        // SOFT (deleted_at); reaper later (§8.4)
 
-    // --- read (go-git or git cat-file; never mutate) ---
-    ListBranches(ctx context.Context, ref SiteRef) ([]BranchInfo, error)
-    ListFiles(ctx context.Context, ref SiteRef, branch, dir string) ([]FileEntry, error)
-    ReadFile(ctx context.Context, ref SiteRef, branch, path string) (FileBlob, error) // includes blob SHA + content
-    HeadSHA(ctx context.Context, ref SiteRef, branch string) (string, error)
+    // --- branches ---
+    ListBranches(ctx context.Context, id uuid.UUID) ([]Branch, error)
+    CreateBranch(ctx context.Context, id uuid.UUID, name BranchName, from string) (Branch, error)
+    DeleteBranch(ctx context.Context, id uuid.UUID, name BranchName) error  // refuses published/draft
 
-    // --- write (git CLI; per-repo lock; base SHA enforced) ---
-    WriteFile(ctx context.Context, in WriteFileInput) (WriteResult, error)      // stage one file (in-tree)
-    Commit(ctx context.Context, in CommitInput) (CommitInfo, error)            // "save"
-    Publish(ctx context.Context, ref SiteRef, opts PublishOptions) (CommitInfo, error) // draft→published fast-fwd/merge
-    Rollback(ctx context.Context, ref SiteRef, branch, toSHA string, author Author) (CommitInfo, error)
-    CreateBranch(ctx context.Context, ref SiteRef, name, fromBranch string) (BranchInfo, error)
-    DeleteBranch(ctx context.Context, ref SiteRef, name string) error
+    // --- read (never mutate) ---
+    ListFiles(ctx context.Context, in ListFilesInput) ([]FileEntry, ResolvedRef, error)
+    ReadFile(ctx context.Context, id uuid.UUID, branch BranchName, ref, path string) (FileContent, error)
 
-    // --- history ---
-    Log(ctx context.Context, ref SiteRef, branch string, limit, offset int) ([]CommitInfo, error)
-    Diff(ctx context.Context, ref SiteRef, fromRef, toRef string) ([]DiffEntry, error)
+    // --- write (git CLI; per-repo lock; baseSHA REQUIRED, empty => ErrValidation) ---
+    WriteFile(ctx context.Context, in WriteFileInput) (CommitInfo, error)
+    DeleteFile(ctx context.Context, id uuid.UUID, branch BranchName, path, baseSHA string, actor Actor) (CommitInfo, error)
+    ImportZip(ctx context.Context, id uuid.UUID, branch BranchName, src ZipSource, baseSHA string, actor Actor) (CommitInfo, error)
+    Commit(ctx context.Context, in CommitInput) (CommitInfo, error)         // "save" the staged working set
+    Publish(ctx context.Context, in PublishInput) (CommitInfo, error)       // draft→published fast-fwd/merge
+    Rollback(ctx context.Context, id uuid.UUID, branch BranchName, toSHA, baseSHA string, actor Actor) (CommitInfo, error)
+
+    // --- history / diff ---
+    GetDiff(ctx context.Context, in DiffOptions) (DiffResult, error)
+    GetLog(ctx context.Context, in LogOptions) ([]CommitInfo, error)
 
     // --- github mirror ---
-    SetRemote(ctx context.Context, ref SiteRef, url string) error
-    MirrorPush(ctx context.Context, ref SiteRef, branches ...string) error      // best-effort, async-able
-    FetchAndUpdate(ctx context.Context, ref SiteRef, branch string) (CommitInfo, error) // webhook pull
+    SetRemote(ctx context.Context, id uuid.UUID, url string) error
+    MirrorPush(ctx context.Context, id uuid.UUID, branches ...BranchName) error  // best-effort; never fails the save
+    FetchAndUpdate(ctx context.Context, id uuid.UUID, branch BranchName) (CommitInfo, error) // webhook pull (FF only)
 
-    // --- data-plane support ---
-    OpenTree(ctx context.Context, ref SiteRef, branch string) (TreeFS, error)   // read-only fs.FS over a branch
+    // --- data-plane read side ---
+    ServedTree(ctx context.Context, id uuid.UUID, branch BranchName) (TreeHandle, error)
 }
 
-// SiteRef carries the UUID (storage identity), not the handle.
-type SiteRef struct{ UUID uuid.UUID }
-
-// WriteFileInput — base SHA is REQUIRED for optimistic locking.
-type WriteFileInput struct {
-    Ref      SiteRef
-    Branch   string
-    Path     string      // repo-relative, validated by caller AND re-validated here
-    Content  []byte
-    BaseSHA  string      // branch HEAD the client based its edit on; mismatch → ErrSHAMismatch
-    Author   Author
+// Site identity is the bare uuid.UUID (NOT a SiteRef wrapper). BaseSHA is REQUIRED on
+// every write (empty => ErrValidation, never "force"); a mismatch => ErrConflict.
+type Actor struct {           // git author = real identity for audit
+    UserID uuid.UUID; Name, Email string
+    Via    WriteSource        // upload|editor|mcp|system
+    TokenID *uuid.UUID         // set when acting via a per-user token (MCP/API)
 }
-
-type Author struct{ Name, Email string; UserID uuid.UUID } // git author = real identity for audit
 ```
 
-The default impl `git.GitService` wraps the **git CLI via `os/exec`** (arg arrays, never a shell string) for
-write fidelity, and may use **go-git** for pure reads (`ReadFile`, `ListFiles`, `OpenTree`).
+> **Authz boundary:** `site.Service` is NOT membership-authz-aware — it trusts the `uuid` it is given.
+> Session→role and token→membership+scope checks are enforced *above* it (REST/MCP middleware). An MCP
+> token is **per-user**: the MCP layer resolves the named `site`, reads the user's membership role, and caps
+> the call to `intersection(token.scopes, roleScopes(membership))` before passing the resolved uuid down
+> (CANONICAL §6.2).
+
+The production impl `site.gitService` (built via `site.NewProductionService`) wraps the **git CLI via
+`os/exec`** (arg arrays, never a shell string) for write fidelity, and uses **go-git** for pure reads.
 
 ---
 
@@ -298,40 +306,40 @@ write fidelity, and may use **go-git** for pure reads (`ReadFile`, `ListFiles`, 
 ### 3a. Upload zip → commit → serve
 
 ```
-Browser ──POST /api/sites/{handle}/upload (multipart: file=.zip, branch=draft, baseSHA) ──▶ backend api.sites
-  1. auth middleware: resolve session → user; authz: user can write this site?
-  2. CSRF check (custom header; see §8.1).
-  3. Stream upload to /data/tmp/{rand}.zip with a hard MAX_UPLOAD_BYTES cap on the io.Copy.
-  4. Open as archive/zip; run ZIP GUARDS before extracting (see §8.1):
-        - file count ≤ ZIP_MAX_FILES
-        - per-file declared+actual uncompressed size, running total ≤ ZIP_MAX_TOTAL_BYTES
+Browser ──POST /api/sites/{handle}/branches/{branch}/import (multipart: file=.zip, baseSHA) ──▶ api.upload
+  1. auth middleware: resolve session → user; authz: user can write this site? (role ≥ editor)
+  2. CSRF check (double-submit header; see §8.1).
+  3. Stream upload with a hard KOTOJI_MAX_UPLOAD_BYTES cap on the io.Copy.
+  4. Open as archive/zip; run ZIP GUARDS before extracting (site/zip.go, see §8.1):
+        - file count ≤ KOTOJI_ZIP_MAX_FILES
+        - per-file declared+actual uncompressed size, running total ≤ KOTOJI_ZIP_MAX_TOTAL_BYTES
         - compression ratio guard (zip-bomb)
         - each name: reject absolute, '..', backslash, NUL, symlink entries
-        - extension allowlist (ZIP_ALLOWED_EXT)
-  5. SiteService.InitFromZip(ref, "draft", zipReader, author):
+        - extension allowlist (KOTOJI_ZIP_ALLOWED_EXT)
+  5. Service.ImportZip(id, branch, src, baseSHA, actor):
         - acquire per-repo lock
-        - verify branch HEAD == baseSHA (if site non-empty) → else ErrSHAMismatch
-        - write blobs into a fresh tree (git mktree / git read-tree from clean), commit on draft
+        - verify branch HEAD == baseSHA (empty baseSHA allowed ONLY on the initial seed) → else ErrConflict
+        - write blobs into a fresh tree REPLACING it, commit on the branch
         - release lock
-  6. Best-effort MirrorPush(ref, "draft") (queued; failure does not fail the request — §8.2).
-  7. store.audit.Insert(upload event); return {commitSHA, files[]}.
-Later: visiting {handle}--draft.hosting.example.com → data plane reads draft tree → 200.
+  6. Best-effort MirrorPush(id, branch) (failure does not fail the request — §8.2).
+  7. audit insert (source=upload); return {commit, files[]}.
+Later: visiting {handle}--draft.example.com → data plane reads draft tree → 200.
 ```
 
-### 3b. Monaco save → POST backend → SiteService commit → mirror push
+### 3b. Monaco save → POST backend → site.Service commit → mirror push
 
 ```
-Editor (frontend) holds: handle, branch, path, content, baseSHA (HEAD when file was opened).
-Browser ──PUT /api/sites/{handle}/branches/{branch}/files?path=... (JSON: content, baseSHA) ──▶ api.files
+Editor (frontend) holds: handle, branch, path, content, baseSHA (commit SHA when file was opened).
+Browser ──PUT /api/sites/{handle}/branches/{branch}/file?path=... (JSON: content, baseSHA) ──▶ api.files
   1. auth + authz(write) + CSRF.
-  2. handle→uuid lookup (store.sites). path validated by handle/path rules.
-  3. SiteService.WriteFile{...baseSHA...}  then  SiteService.Commit (or a combined Save):
+  2. handle→uuid lookup (db.Store). path validated by site/path rules.
+  3. Service.WriteFile{...baseSHA...} (Commit=true) or Service.Commit (multi-file "save"):
         - per-repo lock
-        - branch HEAD == baseSHA ? no → return 409 ErrSHAMismatch (client must reload+merge)
+        - branch HEAD == baseSHA ? no → return 409 ErrConflict (client must reload+merge)
         - stage content, commit (author = user identity), get newSHA
         - unlock
-  4. async MirrorPush(ref, branch).  audit insert.
-  5. 200 {commitSHA: newSHA, baseSHA→newSHA}. Frontend updates its baseSHA to newSHA.
+  4. best-effort MirrorPush(id, branch).  audit insert (source=editor).
+  5. 200 {commit: newSHA}. Frontend updates its baseSHA to newSHA.
 ```
 
 > "Save also pushes" = interpretation #1: the **server is the source of truth**; save commits locally and
@@ -340,47 +348,57 @@ Browser ──PUT /api/sites/{handle}/branches/{branch}/files?path=... (JSON: co
 ### 3c. MCP write → commit
 
 ```
-Personal-PC AI (Claude) ──MCP over HTTP/SSE──▶ backend mcp.server (/mcp)
-  1. Transport auth: bearer token in header → store.tokens lookup → scope = {site_uuid, perms}.
-  2. Tool call write_file{handle|uuid, branch, path, content, baseSHA}:
-        - mcp.auth: token scope MUST include this site_uuid + write → else error -32001 (unauthorized).
-        - SAME path: SiteService.WriteFile (base SHA required) → Commit.
-  3. Tool save{...} → Commit. publish{...} → Publish. Identical funnel as Monaco/Upload.
-  4. audit insert (actor=token's user, via=mcp). async MirrorPush.
+Personal-PC AI (Claude) ──MCP over HTTP/SSE──▶ backend mcpserver (/mcp)
+  1. Transport auth: bearer token in header → verifier looks up the PER-USER token
+     (user_tokens, hash + prefix) → {user_id, token.scopes, can_create_sites}. The token is
+     owned by a USER and spans all of that user's memberships (no per-project binding).
+  2. Tool call write_file{site, path, content, base_sha, branch?}:  ('site' = a project HANDLE)
+        - authz.authorizeSite: GetSiteByHandle(site) → 404 if missing; GetRole(user,site) →
+          404 if NOT a member (no existence leak). EFFECTIVE scope = token.scopes ∩ roleScopes(role),
+          re-evaluated PER CALL. 'write' must be in the effective set → else forbidden.
+        - SAME path as Monaco: Service.WriteFile (base_sha required) → Commit.
+  3. save{site,...} → Commit. publish{site,...} → Publish. list_sites returns the user's
+     memberships + effective scope per site. create_site (no 'site') mints a NEW project owned
+     by the user, gated by BOTH token.can_create_sites AND users.can_create_sites; no token is
+     ever minted over MCP.
+  4. audit insert (actor=token's user, token_id set, source=mcp). best-effort MirrorPush.
 ```
 
-MCP tools and REST handlers both call the *same* `SiteService` methods — the funnel invariant.
+MCP tools and REST handlers both call the *same* `site.Service` methods — the funnel invariant. The
+per-user, membership-capped model means removing a membership (or downgrading the role) **instantly**
+limits the token, and a token can never exceed its owner's own access. See CANONICAL §6.2 and `mcp.md`.
 
 ### 3d. Publish (draft → published)
 
 ```
-Browser ──POST /api/sites/{handle}/publish (JSON: fromBranch=draft, baseSHA) ──▶ api.publish
-  1. auth + authz(publish perm — may differ from write; §8.1 private-preview note).
-  2. SiteService.Publish(ref, {From: "draft", BaseSHA: ...}):
+Browser ──POST /api/sites/{handle}/publish (JSON: from=draft, baseSHA) ──▶ api.publish
+  1. auth + authz(publish perm — owner always; editor when publish_mode=direct).
+  2. Service.Publish({From: "draft", BaseSHA: ...}):
         - per-repo lock
         - verify draft HEAD == baseSHA
         - fast-forward published → draft  (or merge if published diverged via GitHub; §8.2)
-        - checkout/refresh /data/published/{uuid} worktree to published HEAD  (see §4)
+        - refresh the served worktree to published HEAD  (see §4)
         - unlock
-  3. store.sites.UpdatePublishState(published_sha, published_at). async MirrorPush(published).
-  4. 200. {handle}.hosting.example.com now serves the new tree.
-Non-engineer variant: "Request publish" → opens/updates a GitHub PR via mirror, does NOT auto-publish.
-  Merge on GitHub → webhook (§3f) advances published.
+  3. update published_commit_sha + published_at. best-effort MirrorPush(published).
+  4. 200. {handle}.example.com now serves the new tree.
+Request-publish variant (publish_mode=request, non-owner): opens/updates a GitHub PR via mirror,
+  does NOT auto-publish. Merge on GitHub → webhook (§3f) advances published.
 ```
 
 ### 3e. Data-plane GET
 
 ```
-Visitor ──GET https://expense-calc--draft.hosting.example.com/reports/q1.html──▶ proxy ──▶ serve :8081
-  1. serve.Resolver.Resolve(Host="expense-calc--draft.hosting.example.com"):
-        - strip the configured base domain (HOSTING_BASE_DOMAIN) → label = "expense-calc--draft"
-        - split on "--": handle="expense-calc", branch="draft"  (no "--" ⇒ branch="published")
+Visitor ──GET https://expense-calc--draft.example.com/reports/q1.html──▶ proxy ──▶ serve :8081
+  1. resolve.Resolver.Resolve(Host="expense-calc--draft.example.com"):
+        - strip the configured base domain (KOTOJI_BASE_DOMAIN) → label = "expense-calc--draft"
+        - split on the FIRST "--": handle="expense-calc", branch="draft"  (no "--" ⇒ branch="published")
         - validate handle (reuse handle validator); reject reserved/invalid → 404 (not 400, no info leak)
-  2. store.sites.LookupByHandle(handle) → uuid, visibility, branch policy.
-  3. AUTHZ: if branch != "published" AND site/preview is private → require a valid preview session/token,
-        else 401/redirect to control-plane login (§8.1 private-preview). published is public-by-config.
-  4. SiteService.OpenTree(uuid, branch) → fs.FS  (served from /data/published/{uuid} for published,
-        or an ephemeral checkout / git-archive cache for preview branches — §4).
+  2. db.Store handle→uuid lookup → uuid, visibility (public|internal|private), branch policy.
+  3. AUTHZ: if branch != "published" AND site is private → require a valid host-scoped preview-grant
+        cookie (internal/preview), else 401/redirect to control-plane login (§8.1). published is
+        public when KOTOJI_PUBLISHED_PUBLIC=true.
+  4. Service.ServedTree(uuid, branch) → an immutable served worktree root  (materialized under
+        /data/sites/{uuid}/served/{branch} for every branch, refreshed lazily if missing/stale — §4).
   5. Path resolution: clean URL path → repo-relative; directory ⇒ append "index.html";
         trailing-slash + index.html rules (§8.3). 404 page if missing.
   6. MIME by extension allowlist; SECURITY HEADERS injected (CSP, nosniff, frame-ancestors, etc. §8.1).
@@ -390,16 +408,23 @@ Visitor ──GET https://expense-calc--draft.hosting.example.com/reports/q1.htm
 ### 3f. GitHub mirror push + webhook redeploy
 
 ```
-Save/Publish ──async──▶ git.MirrorPush ──▶ GitHub remote (per-site repo)   [backup + external diff]
+Save/Publish ──▶ site.MirrorPush ──▶ GitHub remote (per-site repo)   [backup + external diff]
+  Push/fetch AUTH (site/git_auth.go): mirroring is "on" only when ENABLED and a TOKEN is present.
+  The token is resolved PER git call (DB-stored token, decrypted via secretbox, OVERRIDES the env
+  KOTOJI_GITHUB_APP_TOKEN/PAT) so a runtime admin change applies without a restart. It is injected as an
+  `Authorization: Basic base64("x-access-token:<token>")` via git's config-via-ENVIRONMENT
+  (GIT_CONFIG_* → http.https://github.com.extraHeader), scoped to github.com. The token NEVER touches
+  .git/config or argv, so it cannot leak through *GitError.Args or a process listing.
 
 Maintainer merges a PR into `published` on GitHub
   ──▶ GitHub webhook POST /api/webhooks/github (X-Hub-Signature-256)
-  1. webhook.github: verify HMAC with GITHUB_WEBHOOK_SECRET (constant-time). reject else.
-  2. map repo → site uuid (store.sites by github_repo). ignore non-published ref pushes (configurable).
-  3. SiteService.FetchAndUpdate(ref, "published"):
+  1. webhook.github: verify HMAC with the webhook secret (DB github_webhook_secret OR env
+     KOTOJI_GITHUB_WEBHOOK_SECRET), constant-time. reject else. body untrusted until verified.
+  2. map repo → site uuid (by github_repo). ignore non-published ref pushes (configurable).
+  3. Service.FetchAndUpdate(uuid, "published"):
         - per-repo lock; git fetch origin; fast-forward local published → origin/published
-        - refresh /data/published/{uuid} worktree.   (reject non-FF unless FORCE policy set — §8.2)
-  4. store.sites.UpdatePublishState. audit(via=webhook). 200 quickly (do heavy work async if needed).
+        - refresh the served worktree.   (reject non-FF, never force — §8.2)
+  4. update published_commit_sha. audit(source=system). 200 quickly.
 ```
 
 ### 3g. Login OIDC flow
@@ -414,15 +439,41 @@ Browser ──GET /login (frontend)──▶ "Sign in with Google" → href = /a
   3. ──GET /auth/callback──▶ auth.oidc:
         - verify state matches cookie; exchange code (+PKCE) for tokens; verify id_token (iss, aud,
           exp, nonce) via go-oidc verifier; extract email, sub, hd.
-        - ALLOWLIST check: email domain == AUTH_GOOGLE_HD and/or email ∈ AUTH_ALLOWED_EMAILS → else 403.
-        - upsert users row (by oidc_sub); CREATE a NEW server-side session (rotate id → anti-fixation);
-          set opaque session cookie: HttpOnly, Secure, SameSite=Lax, Domain=hosting.example.com.
+        - ALLOWLIST check: email domain == KOTOJI_AUTH_GOOGLE_HD and/or email ∈ KOTOJI_AUTH_ALLOWED_EMAILS → else 403.
+        - upsert users row + user_identities (by provider/subject); CREATE a NEW server-side session (rotate id → anti-fixation);
+          set opaque __Host- session cookie: HttpOnly, Secure, SameSite=Lax, host-only Domain (the bare
+          control host, NEVER the wildcard parent — §8.1 isolation).
         - 302 → next (default /dashboard).
   4. Frontend route guard calls GET /api/me → {user} or 401 → redirect /login.
 ```
 
-> **AuthProvider** abstraction (`auth.provider.go`) lets `oidc.go` (Google default; Keycloak/Authentik/Azure/GitHub
-> via config) and `devauth.go` (no-auth / admin-password) be swapped by `AUTH_MODE`.
+> **AuthProvider** abstraction (`auth/provider.go`) lets `oidc.go` (Google default; any OIDC issuer
+> via config) and `devauth.go` (no-auth dev / single-admin password) be swapped by `KOTOJI_AUTH_MODE`.
+
+**First-run admin setup (password mode).** `KOTOJI_AUTH_ADMIN_PASSWORD` is now **OPTIONAL**. When it is
+empty AND no DB hash exists, the instance is in the *setupRequired* state: `GET /api/config` reports
+`setupRequired:true` and the SPA renders a `/auth/setup` first-run screen. `POST /auth/setup` (live ONLY
+during first run — it 409s once a credential exists) bcrypt-hashes the chosen password into
+`instance_settings('admin_password_hash')`, ensures the admin user row exists, **promotes it to is_admin**,
+and logs the admin straight in. The `PasswordProvider` verifies the **DB hash first, then the env password**.
+Every successful password login (and the setup itself) (re)asserts `is_admin` on that single admin — never
+for oidc/none users, whose powers come solely from the admin screen (`PATCH /api/admin/users/{id}/flags`).
+
+### 3h. Instance Settings page (`/settings`)
+
+A single authenticated page (`frontend/src/app/(app)/settings/page.tsx`), reachable from the avatar menu and
+sidebar, with three sections:
+
+- **(A) GitHub連携 — admin only** (rendered when `me.user.isAdmin`). The instance GitHub mirror config:
+  enable toggle, org, **write-only** PAT, and **write-only** webhook secret, persisted via
+  `GET|PUT /api/admin/github`. The PAT/secret are never echoed back (reduced to "configured" booleans); the
+  PAT is stored AES-256-GCM-encrypted (§6.1 note, `internal/secretbox`). The effective view folds DB-over-env.
+- **(B) MCP / API トークン — everyone.** The user's OWN per-user tokens (`/api/tokens`): issue (show-once
+  plaintext) / list / revoke. A requested `canCreateSites` is capped by the user's own account flag.
+- **(C) MCP 接続ガイド — everyone.** A read-only tutorial for pointing an AI client at this instance's `/mcp`
+  with one of the above tokens.
+
+> **Branding:** the favicon and brand mark are the **kotoji-tōrō** lantern as an SVG (`frontend/src/app/icon.svg`).
 
 ---
 
@@ -430,51 +481,55 @@ Browser ──GET /login (frontend)──▶ "Sign in with Google" → href = /a
 
 ### 4.1 Docker Compose services
 
+The **base `deploy/docker-compose.yml` is proxy-less** (see §4.4): `postgres` + `backend`
+(`KOTOJI_RUN_MODE=all`) + `frontend`. It binds 8080/8081/3000 so it drops cleanly behind any existing
+shared edge (NPM / Caddy / nginx).
+
 ```yaml
 # deploy/docker-compose.yml (essential shape)
 services:
   postgres:
-    image: postgres:18
+    image: postgres:18-alpine
     environment: [POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB=kotoji]
-    volumes: [pgdata:/var/lib/postgresql/data]
-    healthcheck: pg_isready
+    # postgres:18 stores data in a major-version subdir — mount the volume at the PARENT.
+    volumes: [pgdata:/var/lib/postgresql]
+    healthcheck: pg_isready   # gates backend start so boot migrations don't race
 
   backend:
-    build: { context: .., dockerfile: deploy/backend.Dockerfile }   # multi-stage; final image HAS `git`
-    environment: [ ...full env matrix §6... , RUN_MODE=all ]         # all = api+auth+mcp+serve in one process
-    volumes:
-      - sites:/data/sites           # bare repos (SiteService writes; serve reads)
-      - published:/data/published    # published worktrees (serve reads)
-      - uploadtmp:/data/tmp          # zip staging (ephemeral)
+    build: { context: ../backend, dockerfile: ../deploy/backend.Dockerfile }  # multi-stage; final image HAS `git`
+    environment: [ ...full env matrix §6... , KOTOJI_RUN_MODE=all ]   # all = api+auth+mcp+serve in one process
     depends_on: { postgres: { condition: service_healthy } }
-    ports: ["8080", "8081"]         # 8080 control API, 8081 data plane (see RUN_MODE)
+    volumes:
+      - kotojidata:/data        # one volume: sites/ (1 repo per site) + served worktrees + tmp staging
+    ports: ["8080:8080", "8081:8081"]   # 8080 control API, 8081 data plane (see KOTOJI_RUN_MODE)
+    # On boot the backend runs the embedded goose migrations (KOTOJI_AUTO_MIGRATE=true, default).
 
   frontend:
-    build: { context: .., dockerfile: deploy/frontend.Dockerfile }  # Next.js standalone
-    environment: [NEXT_PUBLIC_API_BASE=/ (same-origin via proxy)]
-    # No volume mounts; immutable.
+    build: { context: ../frontend, dockerfile: ../deploy/frontend.Dockerfile }  # Next.js standalone
+    environment: [NEXT_PUBLIC_API_BASE_URL=  (empty ⇒ same-origin /api via proxy)]
+    ports: ["3000:3000"]   # No volume mounts; immutable.
 
-volumes: { pgdata: {}, sites: {}, published: {}, uploadtmp: {} }
+volumes: { pgdata: {}, kotojidata: {} }
 ```
 
-`backend.Dockerfile` final stage: `FROM gcr.io/distroless/base-debian12` *won't* have git; use
-`alpine:3.x` + `apk add --no-cache git` (or `debian:stable-slim` + `apt-get install git`). The
-**git binary must be present in the runtime image** because `git.GitService` shells out for writes.
+`backend.Dockerfile` final stage uses an image that **has the git binary** (alpine + `apk add git`),
+because `site.gitService` shells out for writes. Schema is provisioned at boot by `internal/migrate`
+(goose, advisory-locked — §8.4.7), so a fresh `docker compose up` needs zero manual migration steps;
+set `KOTOJI_AUTO_MIGRATE=false` to manage schema out of band.
 
 ### 4.2 Data plane: same binary or sibling?
 
-**Decision: SAME Go binary, selectable run-mode (`RUN_MODE`), with `serve` runnable standalone too.**
+**Decision: SAME Go binary, selectable run-mode (`KOTOJI_RUN_MODE`), with `serve` runnable standalone too.**
 
-- `RUN_MODE=all` → one process serves `:8080` (control) + `:8081` (data). Simplest self-host (the README
-  `docker compose up` story). The data plane imports a **read-only sub-interface** of `SiteService`
-  (`ReadOnlySiteService { ListFiles, ReadFile, OpenTree, HeadSHA }`) so it *cannot* mutate git even by mistake.
-- `RUN_MODE=control` + `RUN_MODE=serve` → two containers sharing the `sites`/`published` volumes
-  (control RW, serve RO mount). Lets you scale/restart the data plane independently; satisfies the spec's
-  "配信は published を読むだけ／操作プレーンが落ちても公開ツールは生存" durability goal.
+- `KOTOJI_RUN_MODE=all` → one process serves `:8080` (control) + `:8081` (data). Simplest self-host (the
+  `docker compose up` story). The data plane reads via the narrow `ServedTree`/read path so it *cannot*
+  mutate git even by mistake.
+- `KOTOJI_RUN_MODE=control` + `KOTOJI_RUN_MODE=serve` → two containers sharing the `kotojidata` volume
+  (control RW, serve RO). Lets you scale/restart the data plane independently; satisfies the durability goal
+  "配信は published を読むだけ／操作プレーンが落ちても公開ツールは生存".
 
 **Justification:** one codebase → one resolver, one security-header policy, dev/prod parity, no drift. The
-run-mode flag gives the operational split without a second module. The RO sub-interface enforces invariant #1
-at compile time when split.
+run-mode flag gives the operational split without a second module.
 
 ### 4.3 How the data plane reads the tree
 
@@ -482,22 +537,46 @@ Three candidates were weighed:
 
 | Strategy | Pros | Cons | Verdict |
 |---|---|---|---|
-| **(A) Per-published checkout dir** `/data/published/{uuid}` refreshed on publish/webhook | fastest serve (plain file I/O, `http.FileServer`-like, sendfile, ETag by mtime/SHA); survives if git layer is busy; trivial RO mount | extra disk (≈ working tree size, no `.git`); must keep in sync on publish | **CHOSEN for published** |
+| **(A) Per-branch served checkout dir** `/data/sites/{uuid}/served/{branch}` refreshed on publish/webhook/read | fastest serve (plain file I/O, `http.FileServer`-like, sendfile, ETag by mtime/SHA); survives if git layer is busy; trivial RO mount | extra disk (≈ working tree size, no `.git`); must keep in sync on write | **CHOSEN** |
 | **(B) `git archive`/`cat-file` on each request** | zero extra disk; always exactly the branch HEAD | per-request exec/process cost; concurrency vs writes; harder caching/range requests | rejected for hot path |
-| **(C) go-git in-memory tree read** | no checkout dir | re-walks tree per request; memory churn for large sites; no sendfile | used only as a *fallback* |
+| **(C) go-git in-memory tree read** | no checkout dir | re-walks tree per request; memory churn for large sites; no sendfile | rejected |
 
 **Final policy:**
-- **Published** → strategy **(A)**: a checked-out worktree at `/data/published/{uuid}`, refreshed atomically on
-  `Publish`/webhook. Serve = read-only filesystem walk under that dir. Disk cost is bounded and the README's
-  "data plane is just reading the published tree" promise holds literally.
-- **Preview branches** (`draft`, `feature-*`) → strategy **(C)** by default (go-git read of the branch tree,
-  per-request), with an **optional bounded LRU of ephemeral checkouts** under `/data/preview-cache/{uuid}/{branch}`
-  (capped count + TTL eviction) for heavy previews. Previews are lower-traffic, mostly the author's own browser,
-  so per-request tree reads are acceptable and we avoid a checkout per branch per site (which would explode disk).
+- **Every served branch** (`published`, `draft`, `feature-*`) → strategy **(A)**: `ServedTree` materializes a
+  read-only worktree at **`/data/sites/{uuid}/served/{branch}`**, refreshed (lazily, if missing or stale) on
+  read and eagerly on `Publish`/webhook. Serve = read-only filesystem walk under that dir. Disk cost is bounded
+  and the README's "data plane is just reading the tree" promise holds literally. (CANONICAL §1 `ServedTree`.)
+- `published` is materialized under `served/published`; previews (`draft`, `feature-*`) under `served/{branch}`.
+  Deleting a branch drops its `served/{branch}` dir.
 
-**Atomic publish refresh** (avoid serving a half-written tree): check out to a temp dir
-`/data/published/.{uuid}.tmp`, then `rename()` over `/data/published/{uuid}` (atomic on same filesystem).
-The serve layer opens files under a path it re-stats per request, so the swap is invisible.
+**Atomic refresh** (avoid serving a half-written tree): check out to a temp dir, then `rename()`
+over the live `served/{branch}` dir (atomic on same filesystem). The serve layer opens files under a path it
+re-stats per request, so the swap is invisible.
+
+### 4.4 Proxy topology: proxy-less base + opt-in Traefik edge overlay
+
+The **base compose is proxy-less** — it binds the host ports and is meant to sit behind an operator's
+existing shared edge (NPM / Caddy / nginx). `deploy/npm/` ships sample configs for that case.
+
+For a turnkey single-host self-host, an **opt-in overlay** adds Traefik:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d
+```
+
+`deploy/docker-compose.edge.yml` ADDS one **Traefik v3** service and merges routing *labels* onto the
+unchanged backend/frontend services (and `!reset`s their host port bindings, since Traefik fronts
+everything). The labels encode exactly the §1.1 routing, keyed off `KOTOJI_BASE_DOMAIN`:
+
+- `HostRegexp` `^[^.]+\.${KOTOJI_BASE_DOMAIN_REGEX}$` (≥1 label before the bare host) → backend `:8081`
+  (data/serve plane; priority 30). The regexp deliberately never matches the bare control host.
+- `Host(KOTOJI_BASE_DOMAIN) && PathPrefix(/api|/auth|/mcp|/healthz|/readyz)` → backend `:8080` (control; prio 20).
+- `Host(KOTOJI_BASE_DOMAIN)` bare → frontend `:3000` (UI; prio 10, catch-all).
+
+**TLS:** with `KOTOJI_ACME_EMAIL` unset the overlay is HTTP-only (great for localhost/dev). Set it and the
+`letsencrypt` DNS-01 resolver issues a **wildcard** cert for `KOTOJI_BASE_DOMAIN` + `*.KOTOJI_BASE_DOMAIN`
+(required for the per-site hosts) and redirects web→websecure. DNS-01 needs a provider token —
+`KOTOJI_ACME_DNS_PROVIDER` (default `cloudflare`) + the provider token env (e.g. `KOTOJI_CF_DNS_API_TOKEN`).
 
 ---
 
@@ -505,15 +584,15 @@ The serve layer opens files under a path it re-stats per request, so the swap is
 
 ```
 /data/
-├── sites/                          # bare repos — SiteService is the ONLY writer
+├── sites/                          # one repo per site — site.Service is the ONLY writer
 │   └── {uuid}/
-│       └── .git/                   # bare repo (HEAD, refs/heads/{published,draft,feature-*}, objects, config)
-│                                    #   config has remote "origin" = GitHub mirror (when linked)
-├── published/                      # checked-out published worktrees — serve reads, never writes
-│   └── {uuid}/                     # exact contents of refs/heads/published at last publish
-│       └── index.html, ...
-├── preview-cache/                  # OPTIONAL bounded LRU of ephemeral preview checkouts (TTL-evicted)
-│   └── {uuid}/{branch}/...
+│       ├── .git/                   # repo (HEAD, refs/heads/{published,draft,feature-*}, objects, config)
+│       │                            #   config has remote "origin" = GitHub mirror (when linked)
+│       ├── index.html, ...         # the repo's own working tree (writes stage from here)
+│       └── served/                 # materialized read-only worktrees — serve reads, never writes
+│           ├── published/          # contents of refs/heads/published at last publish
+│           │   └── index.html, ...
+│           └── {branch}/...        # per-branch preview worktree (draft, feature-*), refreshed on read
 ├── tmp/                            # zip upload staging; cleaned on success/error & on startup
 │   └── {rand}.zip
 └── backups/                        # OPTIONAL: periodic `git bundle` per repo (see §8.4 operability)
@@ -522,9 +601,9 @@ The serve layer opens files under a path it re-stats per request, so the swap is
 
 Notes:
 - Storage path keys on **uuid**, so handle rename never moves bytes (spec invariant).
-- `/data/sites/{uuid}/.git` is *bare*: no working tree in the repo dir → writes go via `git --work-tree`/index
-  plumbing or a detached temp worktree, keeping the bare repo clean and lock-friendly.
-- Quotas (§8.4) tracked per-uuid: sum of `objects` size + published worktree size.
+- `/data/sites/{uuid}/` is a normal (non-bare) git repo: its working tree is the staging area for writes
+  (the index), and serve never touches it — serve reads only the immutable `served/{branch}` checkouts.
+- Quotas (§8.4) tracked per-uuid: sum of `objects` size + served-worktree size.
 
 ---
 
@@ -535,60 +614,86 @@ Notes:
 
 ### 6.1 Backend (`internal/config`)
 
+> All backend vars are **`KOTOJI_`-prefixed** and parsed into a typed `config.Config` that fails fast in
+> production. The "Req" column: ✓ = required (in prod); `oidc`/`password`/`mirror` = required only when that
+> mode/feature is active.
+
 | Env var | Default | Req | Meaning |
 |---|---|---|---|
-| `RUN_MODE` | `all` | – | `all` \| `control` \| `serve`. Selects which http servers boot. |
-| `CONTROL_ADDR` | `:8080` | – | control plane (api/auth/mcp) listen addr. |
-| `SERVE_ADDR` | `:8081` | – | data plane listen addr. |
-| `HOSTING_BASE_DOMAIN` | `hosting.localhost` | ✓(prod) | base for `{handle}[--{branch}].<base>` parsing. |
-| `CONTROL_BASE_URL` | `http://hosting.localhost:8080` | ✓ | external URL of control host (for OIDC redirect, cookies, links). |
-| `DATABASE_URL` | – | ✓ | pgx DSN `postgres://user:pass@postgres:5432/kotoji?sslmode=...`. |
-| `DB_MAX_CONNS` | `10` | – | pgxpool max. |
-| `DATA_DIR` | `/data` | – | root for `sites/`, `published/`, `tmp/`. |
-| `GIT_BIN` | `git` | – | path to git binary (for os/exec). |
-| `AUTH_MODE` | `oidc` | – | `oidc` \| `password` \| `none`. |
-| `AUTH_OIDC_ISSUER` | `https://accounts.google.com` | oidc | OIDC discovery issuer. |
-| `AUTH_OIDC_CLIENT_ID` | – | oidc | OAuth client id. |
-| `AUTH_OIDC_CLIENT_SECRET` | – | oidc | OAuth client secret. |
-| `AUTH_OIDC_REDIRECT_URL` | `${CONTROL_BASE_URL}/auth/callback` | – | must match IdP config. |
-| `AUTH_GOOGLE_HD` | (empty) | – | restrict to a Google Workspace domain (e.g. `necorox.com`). |
-| `AUTH_ALLOWED_EMAILS` | (empty) | – | comma list allowlist (alt/extra to `hd`). |
-| `AUTH_ADMIN_PASSWORD` | – | password | bcrypt-checked single-admin password (mode=password). |
-| `AUTH_ADMIN_EMAIL` | `admin@kotoji.local` | password | identity for the password admin. |
-| `SESSION_COOKIE_NAME` | `kotoji_session` | – | opaque session id cookie. |
-| `SESSION_TTL` | `720h` | – | session lifetime (30d). |
-| `SESSION_COOKIE_DOMAIN` | (derive from CONTROL_BASE_URL) | – | scope; **must NOT** be `.hosting.example.com` (see §8.1 isolation). |
-| `CSRF_COOKIE_NAME` | `kotoji_csrf` | – | double-submit token cookie. |
-| `MCP_ENABLED` | `true` | – | toggle MCP server. |
-| `MCP_PATH` | `/mcp` | – | mount path. |
-| `MCP_TOKEN_TTL` | `2160h` | – | default project-token lifetime (90d). |
-| `GITHUB_MIRROR_ENABLED` | `false` | – | global toggle for mirror push. |
-| `GITHUB_APP_TOKEN` / `GITHUB_PAT` | – | mirror | credential for push/repo create (prefer a scoped token). |
-| `GITHUB_ORG` | – | mirror | org/owner for created repos. |
-| `GITHUB_WEBHOOK_SECRET` | – | mirror | HMAC secret for `/api/webhooks/github`. |
-| `MAX_UPLOAD_BYTES` | `52428800` (50MB) | – | hard cap on uploaded zip (pre-extract). |
-| `ZIP_MAX_TOTAL_BYTES` | `209715200` (200MB) | – | cap on total *uncompressed* size. |
-| `ZIP_MAX_FILES` | `2000` | – | max entries in a zip. |
-| `ZIP_MAX_RATIO` | `100` | – | zip-bomb: max uncompressed/compressed ratio. |
-| `ZIP_ALLOWED_EXT` | `.html,.htm,.css,.js,.mjs,.json,.svg,.png,.jpg,.jpeg,.gif,.webp,.ico,.woff,.woff2,.ttf,.txt,.md,.map,.xml,.csv,.wasm` | – | extension allowlist. |
-| `SITE_QUOTA_BYTES` | `524288000` (500MB) | – | per-site disk quota. |
-| `USER_SITE_QUOTA` | `50` | – | max sites per non-admin user. |
-| `RATE_LIMIT_API_RPS` | `20` | – | per-session API rate limit. |
-| `RATE_LIMIT_SERVE_RPS` | `100` | – | per-IP data-plane rate limit. |
-| `CORS_ALLOWED_ORIGINS` | `${CONTROL_BASE_URL}` | – | for browser API calls (same-origin in prod via proxy). |
-| `LOG_LEVEL` | `info` | – | slog level. |
-| `LOG_FORMAT` | `json` | – | `json` \| `text`. |
-| `HANDLE_MIN_LEN` / `HANDLE_MAX_LEN` | `2` / `40` | – | handle length bounds. |
-| `PUBLISHED_PUBLIC` | `true` | – | published served without auth (set false for fully-private instance). |
-| `TRUST_PROXY_HEADERS` | `true` | – | trust `X-Forwarded-*` (only behind the known proxy). |
+| `KOTOJI_ENV` | `development` | – | `development` \| `production`. Gates how strict Load is. |
+| `KOTOJI_RUN_MODE` | `all` | – | `all` \| `control` \| `serve`. Selects which http servers boot. |
+| `KOTOJI_CONTROL_ADDR` | `:8080` | – | control plane (api/auth/mcp) listen addr. |
+| `KOTOJI_SERVE_ADDR` | `:8081` | – | data plane listen addr. |
+| `KOTOJI_BASE_DOMAIN` | `hosting.localhost` | ✓(prod) | base for `{handle}[--{branch}].<base>` parsing. |
+| `KOTOJI_CONTROL_BASE_URL` | `http://hosting.localhost:8080` | ✓(prod) | external URL of control host (OIDC redirect, cookies, links). |
+| `KOTOJI_DATABASE_URL` | – | ✓ | pgx DSN `postgres://user:pass@postgres:5432/kotoji?sslmode=...`. |
+| `KOTOJI_DB_MAX_CONNS` | `10` | – | pgxpool max. |
+| `KOTOJI_AUTO_MIGRATE` | `true` | – | run embedded goose migrations on boot (advisory-locked). Set `false` to manage schema out of band. |
+| `KOTOJI_DATA_DIR` | `/data` | – | root for repos, served worktrees, tmp, backups. |
+| `KOTOJI_GIT_BIN` | `git` | – | path to git binary (for os/exec). |
+| `KOTOJI_SECRET_KEY` | (empty) | – | **at-rest key** (hex/base64, ≥32 bytes) for AES-256-GCM encryption of the DB-stored GitHub PAT. Optional: when unset a stable key is *derived* from a server seed (so env-only deploys still decrypt across restarts). |
+| `KOTOJI_AUTH_MODE` | `oidc` | – | `oidc` \| `password` \| `none` (`none` rejected in prod). |
+| `KOTOJI_AUTH_OIDC_ISSUER` | `https://accounts.google.com` | oidc | OIDC discovery issuer. |
+| `KOTOJI_AUTH_OIDC_CLIENT_ID` | – | oidc | OAuth client id. |
+| `KOTOJI_AUTH_OIDC_CLIENT_SECRET` | – | oidc | OAuth client secret. |
+| `KOTOJI_AUTH_OIDC_REDIRECT_URL` | `${CONTROL_BASE_URL}/auth/callback` | – | must match IdP config. |
+| `KOTOJI_AUTH_GOOGLE_HD` | (empty) | oidc* | restrict to a Workspace domain (e.g. `example.com`). *One of HD / ALLOWED_EMAILS required for oidc. |
+| `KOTOJI_AUTH_ALLOWED_EMAILS` | (empty) | oidc* | comma list allowlist (alt/extra to `HD`). |
+| `KOTOJI_AUTH_ADMIN_PASSWORD` | (empty) | **OPTIONAL** | single-admin password (mode=password). **Now optional**: empty ⇒ first-run `/auth/setup` sets it (bcrypt hash in `instance_settings`). When provided, min 8 chars; PasswordProvider checks DB hash then this. |
+| `KOTOJI_AUTH_ADMIN_EMAIL` | `admin@kotoji.local` | – | identity for the password admin. |
+| `KOTOJI_SESSION_COOKIE_NAME` | `kotoji_session` | – | opaque session id cookie (`__Host-` prefix when Secure). |
+| `KOTOJI_SESSION_TTL` | `720h` | – | session lifetime (30d). |
+| `KOTOJI_SESSION_COOKIE_DOMAIN` | (derive from CONTROL_BASE_URL host) | – | scope; **must NOT** be the wildcard parent `.<base>` (see §8.1 isolation). |
+| `KOTOJI_COOKIE_SECURE` | `true` in prod | – | Secure attribute on cookies (off by default in dev/http). |
+| `KOTOJI_CSRF_COOKIE_NAME` | `kotoji_csrf` | – | double-submit token cookie. |
+| `KOTOJI_MCP_ENABLED` | `true` | – | toggle MCP server. |
+| `KOTOJI_MCP_PATH` | `/mcp` | – | mount path. |
+| `KOTOJI_MCP_TOKEN_TTL` | `2160h` | – | default token lifetime (90d). |
+| `KOTOJI_GITHUB_MIRROR_ENABLED` | `false` | – | **env bootstrap** toggle for mirror push (DB `github_mirror_enabled` overrides). |
+| `KOTOJI_GITHUB_APP_TOKEN` / `KOTOJI_GITHUB_PAT` | – | mirror | env credential for push/repo create (the DB-stored, encrypted token overrides). |
+| `KOTOJI_GITHUB_ORG` | – | mirror | org/owner for created repos (DB `github_org` overrides). |
+| `KOTOJI_GITHUB_WEBHOOK_SECRET` | – | mirror | HMAC secret for `/api/webhooks/github` (DB `github_webhook_secret` overrides). |
+| `KOTOJI_MAX_UPLOAD_BYTES` | `52428800` (50MB) | – | hard cap on uploaded zip (pre-extract). |
+| `KOTOJI_ZIP_MAX_TOTAL_BYTES` | `209715200` (200MB) | – | cap on total *uncompressed* size. |
+| `KOTOJI_ZIP_MAX_FILES` | `2000` | – | max entries in a zip. |
+| `KOTOJI_ZIP_MAX_RATIO` | `100` | – | zip-bomb: max uncompressed/compressed ratio. |
+| `KOTOJI_ZIP_ALLOWED_EXT` | `.html,.htm,.css,.js,.mjs,.json,.svg,.png,.jpg,.jpeg,.gif,.webp,.ico,.woff,.woff2,.ttf,.txt,.md,.map,.xml,.csv,.wasm` | – | extension allowlist. |
+| `KOTOJI_SITE_QUOTA_BYTES` | `524288000` (500MB) | – | per-site disk quota. |
+| `KOTOJI_USER_SITE_QUOTA` | `50` | – | max sites per non-admin user. |
+| `KOTOJI_RATE_LIMIT_API_RPS` | `20` | – | per-session API rate limit. |
+| `KOTOJI_RATE_LIMIT_SERVE_RPS` | `100` | – | per-IP data-plane rate limit. |
+| `KOTOJI_SOFT_DELETE_GRACE` | `720h` | – | retention before the reaper bundles+reclaims a soft-deleted site (30d). |
+| `KOTOJI_BACKUP_DIR` | `${DATA_DIR}/backups` | – | where `git bundle` backups are written before disk reclaim. |
+| `KOTOJI_OPS_INTERVAL` | `1h` | – | background ops scheduler tick (reaper + gc). |
+| `KOTOJI_CORS_ALLOWED_ORIGINS` | `${CONTROL_BASE_URL}` | – | for browser API calls (same-origin in prod via proxy). |
+| `KOTOJI_LOG_LEVEL` | `info` | – | slog level. |
+| `KOTOJI_LOG_FORMAT` | `json` | – | `json` \| `text`. |
+| `KOTOJI_HANDLE_MIN_LEN` / `KOTOJI_HANDLE_MAX_LEN` | `2` / `40` | – | resolver handle length bounds (create-time min is 3 per CANONICAL §5.1). |
+| `KOTOJI_PUBLISHED_PUBLIC` | `true` | – | published served without auth (set false for fully-private instance). |
+| `KOTOJI_TRUST_PROXY_HEADERS` | `true` | – | trust `X-Forwarded-*` (only behind the known proxy). |
 
-### 6.2 Frontend (Next.js)
+> **GitHub mirror config is DB-or-env (DB overrides).** The admin saves it via the GUI (instance Settings
+> page → `PUT /api/admin/github`) into `instance_settings`; the PAT is stored AES-256-GCM-encrypted
+> (`internal/secretbox`, key from `KOTOJI_SECRET_KEY` or derived) and never echoed back. The env
+> `KOTOJI_GITHUB_*` vars are only a bootstrap fallback.
+
+### 6.2 Edge overlay (`deploy/docker-compose.edge.yml`, opt-in — §4.4)
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `NEXT_PUBLIC_API_BASE` | `` (same-origin) | base for API calls; empty ⇒ relative `/api`. |
+| `KOTOJI_ACME_EMAIL` | (empty) | Let's Encrypt account email. Empty ⇒ HTTP-only edge (no TLS, no redirect). Set ⇒ DNS-01 wildcard cert + web→websecure redirect. |
+| `KOTOJI_ACME_DNS_PROVIDER` | `cloudflare` | lego DNS-01 provider for the wildcard challenge. |
+| `KOTOJI_CF_DNS_API_TOKEN` | (empty) | Cloudflare DNS API token (when provider=cloudflare). Other providers: pass their token env via your own `.env`. |
+| `KOTOJI_BASE_DOMAIN_REGEX` | `hosting\.localhost` | the base domain with literal dots escaped (Go regexp) for the hosted-site `HostRegexp` router. Set alongside `KOTOJI_BASE_DOMAIN` (e.g. `example\.com`). |
+| `KOTOJI_TRAEFIK_DASHBOARD` | `false` | opt-in insecure local Traefik dashboard. |
+
+### 6.3 Frontend (Next.js)
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `NEXT_PUBLIC_API_BASE_URL` | `` (same-origin) | base for API calls; empty ⇒ relative `/api`. |
 | `NEXT_PUBLIC_APP_NAME` | `kotoji` | branding. |
-| `NEXT_PUBLIC_AUTH_MODE` | `oidc` | hides/shows login button vs dev banner. |
+| `NEXT_PUBLIC_AUTH_MODE` | `oidc` | hides/shows login button vs dev banner; drives the first-run setup form in password mode. |
 | `NEXT_PUBLIC_DEFAULT_THEME` | `system` | next-themes default. |
 | `PORT` | `3000` | Next standalone listen port. |
 
@@ -613,119 +718,42 @@ Flow:
    working tree changes** — i.e. generated artifacts are stale → drift is impossible to merge.
 
 > **The two-language split's main cost is type drift; the OpenAPI-as-source-of-truth + CI staleness gate is the
-> explicit mitigation.** MCP tool schemas live separately in `docs/contracts/mcp-tools.md` and are validated by
-> the Go MCP SDK's own schema registration (Go structs → JSON schema), with a test asserting they match the doc.
+> explicit mitigation.** MCP tool schemas live separately in `docs/contracts/mcp.md` and are validated by the
+> Go MCP SDK's own schema registration (Go structs → JSON schema), with a test asserting they match the doc.
 
-Error envelope (uniform across `/api`):
+Error envelope (uniform across `/api`, mirrored by MCP tool errors — CANONICAL §3):
 ```json
-{ "error": { "code": "sha_mismatch", "message": "base commit is stale", "detail": {"expected":"<sha>","got":"<sha>"} } }
+{ "error": { "code": "conflict", "message": "base commit is stale",
+             "details": {"expected":"<sha>","actual":"<sha>","changedPaths":["index.html"]} } }
 ```
-HTTP status mapping: `400` validation, `401` unauth, `403` forbidden, `404` not found, `409` sha_mismatch/handle_taken,
-`413` upload too large, `422` reserved/invalid handle, `429` rate limited, `500` internal.
+Stable machine `code` enum and HTTP mapping (CANONICAL §3): `unauthenticated`→401, `forbidden`→403,
+`validation`→422, `conflict`/`handle_taken`/`publish_conflict`/`branch_exists`/`nothing_to_commit`→409,
+`not_found`→404, `too_large`/`quota_exceeded`→413, `unsupported_media_type`→415, `rate_limited`→429,
+`internal`→500. (Malformed bodies that never reach the Service → 400 `validation`.)
 
 ---
 
-## 7.1 Canonical SQL DDL (metadata only — never file content)
+## 7.1 SQL DDL (metadata only — never file content)
 
-> Goose migration `0001_init.sql`. sqlc generates type-safe accessors from `store/queries/*.sql`.
-> Postgres 18. UUIDs via `gen_random_uuid()` (pgcrypto/pg builtin). Times `timestamptz`.
+> **The complete, frozen DDL is [CANONICAL.md §4](contracts/CANONICAL.md).** Do not duplicate it here; the
+> migrations under `backend/internal/db/migrations/` are the live artifact, applied at boot by
+> `internal/migrate` (goose, advisory-locked — §8.4.7). sqlc generates type-safe accessors into `db/gen`.
+> Postgres 18. UUIDs via `gen_random_uuid()`. Times `timestamptz`. `citext` for handles/emails.
 
-```sql
--- users: identity from AuthProvider (or the single password-admin)
-CREATE TABLE users (
-    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    oidc_sub      text UNIQUE,                 -- IdP subject; NULL for password-admin
-    email         citext UNIQUE NOT NULL,      -- citext ⇒ case-insensitive uniqueness
-    display_name  text NOT NULL DEFAULT '',
-    is_admin      boolean NOT NULL DEFAULT false,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    last_login_at timestamptz
-);
+The migration chain (the schema as it actually is):
 
--- sites: 1 row = 1 git repo. uuid = storage/git identity (immutable). handle = mutable DNS name.
-CREATE TABLE sites (
-    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),     -- == /data/sites/{id}
-    handle         citext UNIQUE NOT NULL,                         -- DNS-safe; validated in app + below
-    owner_id       uuid NOT NULL REFERENCES users(id),
-    visibility     text NOT NULL DEFAULT 'private'                 -- 'public'|'private' (published exposure)
-                   CHECK (visibility IN ('public','private')),
-    default_branch text NOT NULL DEFAULT 'draft',
-    published_sha  text,                                           -- HEAD of published at last publish (NULL=never)
-    published_at   timestamptz,
-    github_repo    text,                                           -- "org/name" when mirror linked (UNIQUE below)
-    created_at     timestamptz NOT NULL DEFAULT now(),
-    updated_at     timestamptz NOT NULL DEFAULT now(),
-    deleted_at     timestamptz,                                    -- soft delete (§8.4)
-    CONSTRAINT handle_format CHECK (handle ~ '^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$')
-);
-CREATE UNIQUE INDEX sites_github_repo_uniq ON sites (github_repo) WHERE github_repo IS NOT NULL;
-CREATE INDEX sites_owner_idx ON sites (owner_id) WHERE deleted_at IS NULL;
+| Migration | What it establishes |
+|---|---|
+| `0001_init.sql` | The core schema: `users` (with `is_admin` + `can_create_sites`), `user_identities` (provider/subject), `sessions`, `sites` (3-valued `site_visibility` enum public\|internal\|private, `publish_mode`, `web_root`, soft-delete `deleted_at`), `site_members` (`site_role` enum **owner\|editor\|viewer**), `handle_redirects`, `reserved_handles`, `audit_log` (`audit_source` enum upload\|editor\|mcp\|system). |
+| `0002_seed_reserved.sql` | Seeds the reserved-handle blocklist (draft, preview, published, www, api, internal, host, admin, app, static, assets, mcp). |
+| `0003_instance_settings.sql` | `instance_settings(key,value)` — the instance key/value store. Holds the first-run admin-password **bcrypt hash** (`admin_password_hash`) AND the GitHub mirror config: `github_mirror_enabled`, `github_org`, `github_webhook_secret`, and `github_token` (**AES-256-GCM-encrypted** via `internal/secretbox`). |
+| `0004_user_tokens.sql` | Re-architects MCP/API tokens from per-project to **per-user**: DROPS `site_tokens` and creates `user_tokens` (no `site_id` — owned by a `user_id`, carries `scopes` + `can_create_sites`, hash + 12-char prefix). Re-points `audit_log.token_id` at `user_tokens`. Existing per-project tokens are intentionally invalidated; users re-issue under `/api/tokens`. |
 
--- handle history: old handle → current site, for rename redirects (301).
-CREATE TABLE handle_aliases (
-    old_handle  citext PRIMARY KEY,
-    site_id     uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-    created_at  timestamptz NOT NULL DEFAULT now()
-);
-
--- membership / permissions (multi-user). owner is implicit admin of the site.
-CREATE TABLE site_members (
-    site_id  uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-    user_id  uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role     text NOT NULL DEFAULT 'editor'                        -- 'admin'|'editor'|'viewer'
-             CHECK (role IN ('admin','editor','viewer')),
-    PRIMARY KEY (site_id, user_id)
-);
-
--- server-side sessions: cookie holds opaque id; row holds the truth.
-CREATE TABLE sessions (
-    id          text PRIMARY KEY,                                  -- opaque, high-entropy (rotated on login — §8.1)
-    user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    expires_at  timestamptz NOT NULL,
-    last_seen_at timestamptz NOT NULL DEFAULT now(),
-    user_agent  text,
-    ip          inet
-);
-CREATE INDEX sessions_user_idx ON sessions (user_id);
-CREATE INDEX sessions_expiry_idx ON sessions (expires_at);
-
--- MCP / API tokens: per-project scope (spec requirement).
-CREATE TABLE access_tokens (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    site_id     uuid REFERENCES sites(id) ON DELETE CASCADE,       -- NULL ⇒ account-wide (discouraged)
-    name        text NOT NULL,
-    token_hash  bytea NOT NULL,                                    -- sha256 of the secret; secret shown once
-    scopes      text[] NOT NULL DEFAULT '{read}',                  -- {read,write,publish}
-    created_at  timestamptz NOT NULL DEFAULT now(),
-    expires_at  timestamptz,
-    last_used_at timestamptz,
-    revoked_at  timestamptz
-);
-CREATE INDEX tokens_lookup_idx ON access_tokens (token_hash) WHERE revoked_at IS NULL;
-
--- audit log: every mutation (who/what/how). append-only.
-CREATE TABLE audit_log (
-    id         bigserial PRIMARY KEY,
-    at         timestamptz NOT NULL DEFAULT now(),
-    actor_id   uuid REFERENCES users(id),
-    site_id    uuid REFERENCES sites(id),
-    action     text NOT NULL,            -- 'site.create','file.write','save','publish','rollback','token.create'...
-    via        text NOT NULL,            -- 'ui'|'mcp'|'upload'|'webhook'|'admin'
-    branch     text,
-    commit_sha text,
-    ip         inet,
-    detail     jsonb NOT NULL DEFAULT '{}'
-);
-CREATE INDEX audit_site_idx ON audit_log (site_id, at DESC);
-
--- reserved words: seedable from config but stored so admins can extend (spec: 管理者…予約語).
-CREATE TABLE reserved_handles (
-    handle text PRIMARY KEY
-);
--- seeded: draft, preview, published, www, api, internal, host, admin, app, static, assets, mcp
-```
+> **Token model (CANONICAL §6).** A `user_tokens` row is owned by a user and automatically covers ALL of
+> that user's `site_members` memberships. The *effective* scope on a given site is
+> `intersection(token.scopes, roleScopes(membership role))`, **re-evaluated per request** — so removing the
+> membership or downgrading the role instantly limits the token, and a token can never exceed its owner's own
+> access. There is no per-project token binding anymore.
 
 ---
 
@@ -743,8 +771,8 @@ CREATE TABLE reserved_handles (
    include `../`, `..\\`, `a/../../b`, symlink, and unicode-normalization tricks.
 
 2. **Zip bomb (decompression amplification).** A 1KB zip → 10GB on disk/RAM.
-   → Enforce `ZIP_MAX_FILES`, `ZIP_MAX_TOTAL_BYTES` (running sum during extraction, abort on exceed), and
-   `ZIP_MAX_RATIO` (uncompressed/compressed). Read each entry through an `io.LimitedReader` so a *lying* header
+   → Enforce `KOTOJI_ZIP_MAX_FILES`, `KOTOJI_ZIP_MAX_TOTAL_BYTES` (running sum during extraction, abort on
+   exceed), and `KOTOJI_ZIP_MAX_RATIO` (uncompressed/compressed). Read each entry through an `io.LimitedReader` so a *lying* header
    can't blow the budget. Never trust `f.UncompressedSize64` alone.
 
 3. **Extension allowlist vs hosting arbitrary JS.** We intentionally host JS/HTML (that's the product), so the
@@ -771,30 +799,34 @@ CREATE TABLE reserved_handles (
    client-side; gate any server-side fetch (future proxy) behind a destination allowlist + DNS-rebinding-safe IP
    checks. CSP `connect-src` limits where the *page* can talk only as defense-in-depth (and may break tools).
 
-6. **Subdomain cookie / storage isolation.** Each site is its own origin (`a.hosting…` vs `b.hosting…`) so
-   `localStorage`, `IndexedDB`, and Origin-scoped cookies are already isolated by the browser. The danger is a
-   **too-broad session cookie**: if the control-plane session cookie were set on `Domain=.hosting.example.com`,
-   every hosted site could read it.
-   → Session cookie `Domain` is the **bare control host only** (`hosting.example.com`, *no* leading dot), never the
-   wildcard parent. Data-plane responses set `Cache-Control` and never `Set-Cookie`. Document that operators must
-   not host kotoji's control UI on a `*.hosting…` subdomain.
+6. **Subdomain cookie / storage isolation.** Each site is its own origin (`a.example.com` vs `b.example.com`)
+   so `localStorage`, `IndexedDB`, and Origin-scoped cookies are already isolated by the browser. The danger is
+   a **too-broad session cookie**: if the control-plane session cookie were set on `Domain=.example.com`, every
+   hosted site could read it.
+   → The session cookie uses the `__Host-` prefix (host-only by definition, no `Domain`) when Secure; its
+   `Domain` derives from `KOTOJI_CONTROL_BASE_URL`'s host and **must never** be the wildcard parent
+   `.<KOTOJI_BASE_DOMAIN>` (config rejects/derives accordingly). Data-plane responses set `Cache-Control` and
+   never `Set-Cookie`. Operators must not host kotoji's control UI on a `*.<base>` subdomain.
    **[OPEN]** If we ever issue *preview* cookies for private branches, they must be scoped to the exact preview
    host, not the parent — needs a per-host cookie design (below).
 
-7. **Auth on private previews vs public published.** Published is public-by-config (`PUBLISHED_PUBLIC`), but
+7. **Auth on private previews vs public published.** Published is public-by-config (`KOTOJI_PUBLISHED_PUBLIC`), but
    `feature-*`/`draft` previews can leak unreleased content if served openly.
-   → Data plane (§3e step 3): for non-published branches on a private site, require a **preview session**. Two
-   options: (a) reuse the control session — but the cookie is scoped to the control host, not `*.hosting…`, so it
-   won't be sent to the preview origin (good for isolation, bad for SSO). (b) issue a **short-lived, host-scoped,
-   signed preview cookie** when an authenticated user opens a preview link from the dashboard. Recommend (b):
-   `/api/sites/{h}/branches/{b}/preview-grant` mints a cookie scoped to `{h}--{b}.hosting…`. Published stays
-   cookieless. **[OPEN]** confirm preview default = private (recommended) vs public.
+   → **[DONE.]** Data plane (§3e step 3): for non-published branches on a private site, require a **host-scoped,
+   signed preview-grant cookie** (`internal/preview`). `POST /api/sites/{h}/branches/{b}/preview-grant` mints a
+   short-lived `kotoji_preview` cookie scoped to the exact `{h}--{b}.<base>` preview host (no `Domain`, so it is
+   never sent to the control host or sibling sites). Published stays cookieless. The control session is NOT
+   reused for previews (it is host-only to the control host — good isolation).
 
-8. **MCP token scope / leak.** A token leaked from a personal PC could touch all sites if account-wide.
-   → Default tokens are **per-site** (`access_tokens.site_id` set). Store only `sha256(secret)`; show secret once.
-   Enforce scope on *every* tool call (site_uuid ∈ token scope AND required perm ∈ scopes). Support revoke
-   (`revoked_at`), `expires_at`, and `last_used_at` for stale detection. Account-wide tokens allowed but flagged
-   in UI as higher-risk. Rate-limit MCP per token.
+8. **MCP token scope / leak.** A token leaked from a personal PC could touch sites beyond the user's access.
+   → **[DONE — re-architected to per-user, membership-capped.]** Tokens are **per-user** (`user_tokens`, no
+   site binding; the old per-project `site_tokens` was DROPPED in migration 0004). A token automatically
+   covers all the user's memberships, and on every tool call the effective capability is
+   `intersection(token.scopes, roleScopes(membership role))`, re-evaluated live — so a token can **never
+   exceed its owner's own access**, and removing/downgrading the membership limits it instantly. A
+   non-member targeting a site gets `not_found` (no existence leak). Store only `sha256(secret)` + a 12-char
+   prefix; show the secret once. Revoke (`revoked_at`), `expires_at`, `last_used_at` supported; MCP is
+   rate-limited per token. Format: `kotoji_pat_<base62>`, ≥160 bits.
 
 9. **Path traversal in file APIs (read/write).** `?path=../../other-site` or `..%2f` in REST/MCP.
    → All paths are **repo-relative**, validated by `handle.CleanRepoPath`: reject `..`, leading `/`, NUL,
@@ -815,8 +847,9 @@ CREATE TABLE reserved_handles (
     + `nonce` + PKCE prevent login-CSRF and code-injection on the callback.
 
 12. **Webhook spoofing.** `/api/webhooks/github` is unauthenticated by URL.
-    → Verify `X-Hub-Signature-256` HMAC with `GITHUB_WEBHOOK_SECRET` in **constant time**; reject otherwise;
-    rate-limit; ignore events for unknown repos. Treat the body as untrusted until verified.
+    → Verify `X-Hub-Signature-256` HMAC with the webhook secret (DB `github_webhook_secret`, else env
+    `KOTOJI_GITHUB_WEBHOOK_SECRET`) in **constant time**; reject otherwise; rate-limit; ignore events for
+    unknown repos. Treat the body as untrusted until verified.
 
 13. **git CLI command injection.** Building git commands from user input (branch names, paths) via a shell.
     → **Never** use a shell string. `exec.CommandContext("git", args...)` with arg *arrays*; user values are
@@ -825,15 +858,18 @@ CREATE TABLE reserved_handles (
     use `git ... -- <path>`). Set `GIT_TERMINAL_PROMPT=0`, scrub env for the child.
 
 14. **Credentials in git config / logs.** GitHub PAT could land in `remote.origin.url` or slog.
-    → Store mirror creds out-of-band (env / a Postgres secret), inject via `GIT_ASKPASS`/credential helper or an
-    ephemeral header, not in the persisted remote URL. slog redaction for token-shaped values; never log full
-    request bodies of token-creation endpoints.
+    → **[DONE.]** The mirror PAT is stored **out-of-band and encrypted**: in `instance_settings.github_token`,
+    AES-256-GCM-sealed by `internal/secretbox` (key from `KOTOJI_SECRET_KEY` or derived), never echoed by the
+    admin API. It is injected **per git invocation through the ENVIRONMENT** (`GIT_CONFIG_*` →
+    `http.https://github.com.extraHeader: Authorization: Basic …`, scoped to github.com), so it never touches
+    `.git/config`, the remote URL, or argv — and therefore cannot leak through `*GitError.Args` or a process
+    listing (`site/git_auth.go`). Token-creation request bodies are never logged.
 
 ### 8.2 Concurrency & git gaps
 
 1. **Parallel commits to one repo.** Two saves (Monaco + MCP) racing → corrupt index / lost update.
    → **Per-repo keyed mutex** (`git.lock`: `map[uuid]*sync.Mutex` guarded by a sync.Map) for in-process
-   serialization, **plus** an OS `flock` on `/data/sites/{uuid}/.git/kotoji.lock` for the `RUN_MODE=control`
+   serialization, **plus** an OS `flock` on `/data/sites/{uuid}/.git/kotoji.lock` for the `KOTOJI_RUN_MODE=control`
    multi-process case. All write methods acquire before touching the repo, with a `ctx` deadline to avoid deadlock.
 
 2. **Base-SHA race (TOCTOU).** Client sends `baseSHA`, but HEAD advances between check and commit.
@@ -858,17 +894,18 @@ CREATE TABLE reserved_handles (
    it (logged as a warning + audit). Our own `kotoji.lock` flock is released by the OS on process death, so it
    self-heals.
 
-6. **Publish atomicity vs serving.** Refreshing `/data/published/{uuid}` while it's being served → partial reads.
-   → Build into `/data/published/.{uuid}.tmp`, then atomic `rename` over the live dir (§4.3). Serve re-stats per
-   request; the swap is invisible.
+6. **Publish atomicity vs serving.** Refreshing `/data/sites/{uuid}/served/{branch}` while it's being served →
+   partial reads. → Build into a sibling temp dir, then atomic `rename` over the live `served/{branch}` dir
+   (§4.3). Serve re-stats per request; the swap is invisible.
 
 ### 8.3 Correctness gaps
 
-1. **Handle rename redirects.** Old subdomain `old.hosting…` after rename to `new`.
-   → On rename, insert into `handle_aliases(old_handle → site_id)`. Data-plane resolver: if `LookupByHandle`
-   misses, check `handle_aliases`; if hit, `301` to the same path on the current handle's host. Control-plane
-   links always use the live handle. Renaming *to* a handle that's in `handle_aliases` for the **same** site is
-   fine; to one used by another site → `409`.
+1. **Handle rename redirects.** Old subdomain `old.<base>` after rename to `new`.
+   → **[DONE.]** On rename, insert into `handle_redirects(old_handle → site_id)`. Data-plane resolver: if the
+   live handle lookup misses, check `handle_redirects`; if hit, `301` to the same path on the current handle's
+   host (preserving branch+path+query). Control-plane links always use the live handle, and `GetSiteByHandle`
+   404s old handles (confirmed asymmetry). Renaming *back* to a stale redirect of the **same** site deletes
+   that redirect row; to one used by another site → `409`.
 
 2. **Reserved words & case-insensitivity.** `Draft`, `API`, mixed-case collisions, IDN homoglyphs.
    → Handle stored as `citext` (case-insensitive unique). Validator lowercases input first; rejects if in
@@ -910,14 +947,14 @@ CREATE TABLE reserved_handles (
 ### 8.4 Operability gaps
 
 1. **Disk quotas / runaway repos.** git history + assets grow unbounded.
-   → Track per-site size (objects + published worktree) in a periodic job; enforce `SITE_QUOTA_BYTES` on write
-   (reject `413` when exceeded) and `USER_SITE_QUOTA` on create. Run `git gc --auto` after N commits; a scheduled
+   → Track per-site size (objects + published worktree) in a periodic job; enforce `KOTOJI_SITE_QUOTA_BYTES` on
+   write (reject `413` when exceeded) and `KOTOJI_USER_SITE_QUOTA` on create. Run `git gc --auto` after N commits; a scheduled
    `git gc` + `git repack` job reclaims dangling objects from rollbacks/force operations.
 
 2. **GC of dangling / orphaned repos.** A repo dir with no DB row (failed create, manual mess), or soft-deleted
    sites' bytes.
    → Soft delete sets `sites.deleted_at`; a reaper job, after a grace period (e.g. 30d), `git bundle`s the repo to
-   `/data/backups/{uuid}/` then `rm -rf`s `/data/sites/{uuid}` and `/data/published/{uuid}`. A startup
+   `/data/backups/{uuid}/` then `rm -rf`s `/data/sites/{uuid}` (which includes its `served/` worktrees). A startup
    consistency check logs (does not auto-delete) repos on disk with no matching row.
 
 3. **Backups.** Postgres + git both hold state.
@@ -926,11 +963,14 @@ CREATE TABLE reserved_handles (
    runbook (repo bundle → `git clone`, DB rows must match uuids).
 
 4. **Audit log.** Required for "who published/overwrote what" (multi-user + AI writers).
-   → `audit_log` table (§7.1), appended on every mutation with `actor_id`, `via`, `branch`, `commit_sha`, `ip`.
-   Admin UI lists per-site. Append-only (no update/delete grant for the app role).
+   → `audit_log` table (CANONICAL §4), appended on every mutation with `actor_user_id`, `token_id` (when via a
+   per-user token), `source` (upload\|editor\|mcp\|system), `commit_sha`, and a `metadata` jsonb (branch, paths,
+   ip, …). The admin activity feed is `GET /api/admin/sites/{handle}/audit`. Append-only (all FKs ON DELETE SET
+   NULL so the trail outlives referenced rows).
 
 5. **Rate limits.** AI clients can hammer MCP; uploads can DoS.
-   → Per-session API limiter (`RATE_LIMIT_API_RPS`), per-IP data-plane limiter (`RATE_LIMIT_SERVE_RPS`),
+   → Per-session API limiter (`KOTOJI_RATE_LIMIT_API_RPS`), per-IP data-plane limiter
+   (`KOTOJI_RATE_LIMIT_SERVE_RPS`, `internal/ratelimit`),
    per-token MCP limiter, and a concurrency cap on zip extraction (a bounded worker pool) so big uploads can't
    exhaust CPU/disk in parallel.
 
@@ -940,8 +980,10 @@ CREATE TABLE reserved_handles (
    failures). Lock-wait-time is a key early-warning metric for repo contention.
 
 7. **Migrations / startup ordering.** Backend may boot before Postgres is migrated.
-   → Compose `depends_on: healthy`; backend runs `goose up` on boot (idempotent) behind a singleton advisory lock
-   (`pg_advisory_lock`) so multiple backend replicas don't race migrations.
+   → **[DONE.]** Compose `depends_on: { postgres: healthy }`; the composition root runs the embedded goose
+   migrations on boot (idempotent, `KOTOJI_AUTO_MIGRATE=true` default) behind a session-level
+   `pg_advisory_lock` (`internal/migrate`) so rolling restarts / multiple boots don't race migrations. Set
+   `KOTOJI_AUTO_MIGRATE=false` to manage schema out of band.
 
 ### 8.5 Product edge cases
 
@@ -954,7 +996,7 @@ CREATE TABLE reserved_handles (
    injection. **[OPEN]** confirm we ship base-href injection for path-mode or just document the limitation.
 
 2. **Large files.** A 200MB video in a repo bloats git and blows quotas/RAM on read.
-   → Enforce a per-file size cap (`ZIP`/write path) and `SITE_QUOTA_BYTES`; for reads, stream (don't buffer whole
+   → Enforce a per-file size cap (zip/write path) and `KOTOJI_SITE_QUOTA_BYTES`; for reads, stream (don't buffer whole
    file in `ReadFile` for serving — `OpenTree`/`fs.File` streams). Document that kotoji is for *tools*, not media
    hosting; large binaries should live elsewhere. **[OPEN]** whether to integrate git-LFS (recommend: no, out of
    scope for v1).
@@ -978,15 +1020,14 @@ CREATE TABLE reserved_handles (
    → `save` defaults to `sites.default_branch` (`draft`). MCP/REST may override with explicit `branch`. The
    non-engineer UI hides branches and always uses `draft` → publish.
 
-### 8.6 Cross-cutting [OPEN] decisions owed by a human
+### 8.6 Cross-cutting decisions — now resolved (CANONICAL §9 locked the 8)
 
-- **[OPEN]** Default CSP `connect-src` (open `*` vs egress allowlist) — affects whether AI tools that call third-party
-  APIs work out of the box. Recommend `*` default + per-site tightening.
-- **[OPEN]** Preview default visibility (private recommended) and the preview-cookie design (host-scoped grant).
-- **[OPEN]** "Clean URLs" (`/foo` → `foo.html`) on by default?
-- **[OPEN]** Path-mode base-href injection: ship it, or document the limitation only?
-- **[OPEN]** git-LFS / large-media policy (recommend: out of scope v1).
-- **[OPEN]** Multi-replica backend: is horizontal scaling a v1 goal? (affects flock-vs-advisory-lock and the
-  in-proc keyed mutex assumptions — current design supports it but adds the flock requirement).
-- **[OPEN]** Branch ref naming: standardize on `feature-{user}-{slug}` (no slashes) to keep URL↔ref 1:1 — confirm.
+- **[DONE]** Preview default visibility = private; preview-cookie design = host-scoped signed grant
+  (`internal/preview`, §8.1.7).
+- **[DONE]** Branch ref naming standardized on `feature-{user}-{slug}` (no slashes) to keep URL↔ref 1:1
+  (CANONICAL §5.2).
+- **[DONE]** Single backend replica for v1 (CANONICAL decision #4): in-proc per-site keyed mutex + `flock`; the
+  lock seam is interfaced so a `pg_advisory_xact_lock` impl can drop in for future HA.
+- Remaining design-rationale notes (not blockers): default CSP `connect-src` (permissive default + per-site
+  tightening), "clean URLs", path-mode base-href injection, and git-LFS (out of scope v1).
 ```

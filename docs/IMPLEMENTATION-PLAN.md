@@ -1,5 +1,13 @@
 # kotoji — Implementation Plan
 
+> **⚠️ HISTORICAL ARTIFACT (point-in-time).** This is the *original* pre-implementation build
+> plan. kotoji is now an **implemented, deployed MVP**; the binding law is
+> [`contracts/CANONICAL.md`](./contracts/CANONICAL.md) + the live code/migrations under
+> `backend/`. Read this for the build *history* and rationale, not as a current contract — where
+> it disagrees with `CANONICAL.md` or the code, those win. One item below is stale: the token
+> model shipped as per-project `site_tokens` then was **re-architected to per-user `user_tokens`**
+> (migration `0004` DROPPED `site_tokens`; see `data-model.md` §1.6 and CANONICAL §6).
+>
 > **Scope.** The concrete, ordered build plan: exact monorepo folder structure, the Go
 > module + npm dependency lists, and a phased task breakdown with parallelization notes.
 > It assumes the **canonical resolutions** in

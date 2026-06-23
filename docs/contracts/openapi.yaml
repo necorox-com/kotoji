@@ -1142,7 +1142,7 @@ components:
         ownerId: { type: string, format: uuid }
         visibility: { $ref: "#/components/schemas/SiteVisibility" }
         defaultBranch: { $ref: "#/components/schemas/BranchString" }
-        githubRepo: { type: ["string", "null"], example: "necorox-com/expense-calc" }
+        githubRepo: { type: ["string", "null"], example: "acme/expense-calc" }
         publishMode: { $ref: "#/components/schemas/PublishMode" }
         webRoot: { type: string, description: "served subdir; empty = repo root (v1)" }
         hasPublished: { type: boolean, description: "derived: publishedSha is set" }

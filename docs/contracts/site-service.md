@@ -14,7 +14,8 @@ Status: **locked design, implementation-ready**. Package: `internal/site`.
 These are restated from the spec so the contract is self-contained; do not relitigate.
 
 1. **git is the single source of truth.** Postgres holds *metadata only* (uuid↔handle,
-   owner, members, tokens, sessions). The repo at `/data/sites/{uuid}/.git` holds *content
+   owner, members, sessions; access tokens live in the per-user `user_tokens` table —
+   outside this service, see §15). The repo at `/data/sites/{uuid}/.git` holds *content
    and history*. `SiteService` is the only component that opens, reads, or mutates a repo.
 2. **1 site = 1 repo.** Path is keyed by the immutable **UUID**, never the handle, so a
    handle rename moves no files.
@@ -632,7 +633,7 @@ var (
     ErrPublishConflict  = errors.New("site: publish merge conflict") // 409
     ErrBranchExists     = errors.New("site: branch already exists")  // 409
     ErrNothingToCommit  = errors.New("site: nothing to commit")  // 409/204
-    ErrForbidden        = errors.New("site: forbidden")          // 403 (ownership/scope)
+    ErrForbidden        = errors.New("site: forbidden")          // 403 (git-level op rules; membership/scope authz is enforced ABOVE this service — see §15)
     // Zip family:
     ErrZipSlip          = errors.New("site: zip path traversal")     // 400
     ErrZipTooLarge      = errors.New("site: zip too large")          // 413
@@ -849,7 +850,41 @@ the default `go test ./...` fast path; run in CI with `-tags=integration`.
 12. **Worktree disk cost & eviction.** Per-(uuid,branch) serving worktrees double on-disk size and
     grow with branch count. Need an eviction/LRU policy and a cap, or switch to `git archive` +
     in-memory cache for cold branches. Decide the trade-off.
-13. **Per-project MCP token scope enforcement point.** The token→site scope check lives above
-    `Service` (HTTP/MCP middleware) or inside it via `ownerID`/`ErrForbidden`? §4 leaves
-    `ListSites` enforcement "to the caller" — pin down whether `Service` is authz-aware at all, to
-    avoid a confused-deputy gap where an MCP token for site A can `WriteFile` to site B.
+13. **Token/membership authz enforcement point — RESOLVED (see §15).** `Service` is **not**
+    membership-authz-aware: it trusts the `SiteID` it is handed and authz is enforced *above* it
+    in the REST/MCP layer (CANONICAL §1). Tokens are **per-user** (`user_tokens`), not per-site,
+    so the original "MCP token for site A writes to site B" framing no longer applies — the MCP
+    layer resolves the named site, reads the user's membership role, and caps the call to
+    `token.scopes ∩ role_scopes(membership)` before the resolved `SiteID` ever reaches this
+    service (a non-member site → `not_found`). `Service` still does git-level operation guards
+    (path/branch validation, refusing to write `published`) as defense in depth.
+
+---
+
+## 15. Tokens live OUTSIDE this service (per-user, membership-capped)
+
+`SiteService` does **not** own, read, or validate API/MCP tokens, and there is no
+token-related method on the interface. This is a deliberate boundary, restated here because
+earlier drafts of this contract listed "tokens" among the metadata the service stamps.
+
+- **Tokens are per-USER, not per-site.** They live in the `user_tokens` table (CANONICAL §4;
+  established by migration `0004_user_tokens.sql`, which **dropped** the old per-project
+  `site_tokens`). A token is owned by a user, carries one scope set (subset of
+  `{read,write,publish}`) plus `can_create_sites`, and stores **no** site binding.
+- **It auto-covers all of the owner's memberships.** A single token reaches every project the
+  user is a member of; there is no per-project token issuance. The control-plane endpoint is
+  per-user `/api/tokens` (it replaced the old `/api/sites/{handle}/tokens`).
+- **Effective scope is computed above this service, per request.** The REST/MCP layer resolves
+  the named site, reads the user's membership role, and caps the call to
+  `intersection(token.scopes, role_scopes(membership))` — re-evaluated on **every** call, so
+  removing a membership or downgrading a role limits the token instantly with no re-issue, and a
+  token can never exceed its owner's own access. Only after that cap passes does the resolved
+  `SiteID` enter `SiteService`. A non-member (or unknown) site is refused (`not_found`) before
+  any git touch.
+- **`SiteService`'s job is unchanged:** it operates on the `SiteID` it is given and enforces
+  git-level rules (path/branch validation, optimistic lock, refusing to write `published`). The
+  `Actor` it receives may carry a `TokenID` purely for the audit trail (`audit_log.token_id` →
+  `user_tokens`); the service does no scope arithmetic with it.
+
+See `CANONICAL.md` §6 for the role→capability matrix and the token-scope × role capping rule,
+and `mcp.md` §3–§4 for the membership-cap enforcement detail.

@@ -1,5 +1,7 @@
 # kotoji 🎍
 
+*Read this in [日本語](./README.ja.md).*
+
 > **MCP-native, self-hosted hosting for AI-built web tools.**
 
 Give the web tools you (and your AI) build a home. Drop a folder of HTML/CSS/JS, get a clean URL, edit it in the browser, and let your AI read and write it directly over **MCP** — all on your own server, with **git** quietly versioning every change.
@@ -24,10 +26,16 @@ kotoji fills that gap.
 - **Per-project subdomains** — `your-tool.hosting.example.com`, works with any asset path style.
 - **In-browser editing** — Monaco editor with diff view for quick fixes.
 - **MCP-native** — connect Claude (or any MCP client) from your own machine to `list / read / write / publish` your sites directly.
-- **git is the source of truth** — every save is a commit. History, diff and rollback come for free. Optional mirror-push to GitHub.
-- **Draft vs. published** — work safely on branches; promote to production with one action. Each branch gets its own preview URL.
-- **Pluggable auth** — Google OAuth out of the box (OIDC abstraction underneath; bring your own IdP). A no-auth dev mode for quick trials.
-- **Bring-your-own proxy** — the app resolves projects from the `Host` header, so it runs behind Nginx Proxy Manager, Caddy, nginx, or plain `*.localhost` in dev.
+- **Per-user MCP/API tokens that span your projects** — one token belongs to *you* and automatically covers every project you're a member of. The effective scope on each site is `token.scopes ∩ your-role-on-that-site`, re-evaluated per request, so dropping a membership instantly limits the token. Issue, list and revoke them on the Settings page; the MCP tools take a `site` handle selector.
+- **git is the source of truth** — every save is a commit. History, diff and rollback come for free.
+- **Draft vs. published** — work safely on branches; promote to production with one action. Each branch gets its own per-branch preview URL.
+- **GitHub mirror, configured in the GUI** — an admin enables it on the Settings page (org, PAT, webhook secret); the PAT is stored encrypted (AES-256-GCM) at rest. Every publish mirror-pushes to GitHub as off-box backup (env vars can still bootstrap it; the DB config wins).
+- **Instance Settings page** — one `/settings` screen for everyone: an admin GitHub-mirror panel, your own MCP/API token panel, and an MCP connection guide.
+- **First-run admin setup** — in single-admin (`password`) mode you no longer have to bake a password into the environment; leave it empty and a first-run `/auth/setup` screen sets it (stored as a bcrypt hash in the DB). Password / setup users are promoted to instance admin.
+- **Pluggable auth** — Google OAuth out of the box (OIDC abstraction underneath; bring your own IdP), single-admin password mode, or a no-auth dev mode for quick trials.
+- **Boot-time migrations** — embedded, advisory-locked goose migrations run automatically on startup (toggle with `KOTOJI_AUTO_MIGRATE`).
+- **Two deployment modes** — bring your own proxy (the app resolves projects from the `Host` header, so it runs behind Nginx Proxy Manager, Caddy, nginx, Traefik, or plain `*.localhost` in dev), or add the opt-in Traefik turnkey overlay for a self-contained box with automatic wildcard TLS.
+- **kotoji-tōrō branding** — the favicon and brand mark are the kotoji-tōrō lantern as an SVG.
 
 ## Architecture
 
@@ -67,7 +75,7 @@ docker compose up
 
 Then open `http://kotoji.localhost:8080`. Any `*.localhost` subdomain resolves to `127.0.0.1` automatically — no DNS or TLS setup needed locally.
 
-> Detailed setup, configuration and the MCP connection guide live in [`docs/`](./docs) *(coming soon)*.
+> Detailed setup, configuration and the MCP connection guide live in [`docs/`](./docs); the deployment guide is in [`deploy/README.md`](./deploy/README.md).
 
 ## Production
 
@@ -112,7 +120,11 @@ Leave the ACME vars empty and the overlay serves plain **HTTP** — handy for
 
 ## Status
 
-🚧 Early design / pre-alpha. Specification and architecture are locked; implementation is starting.
+✅ Implemented and deployed (MVP). The full stack ships and runs: upload/serve, Monaco
+editing, per-branch previews, draft → publish, the MCP server with per-user
+membership-capped tokens, GUI GitHub-mirror config, first-run admin setup, boot-time
+migrations, and the opt-in Traefik turnkey overlay. Expect rough edges and breaking
+changes while the API surface settles.
 
 ## License
 

@@ -14,8 +14,8 @@ the MCP layer does not implement it; it delegates.
 
 Related contracts:
 - `docs/contracts/site-service.md` — the single git boundary (authoritative for git semantics, SHA model, branch rules).
-- `docs/contracts/api.md` — the REST/OpenAPI control-plane API (token issuance lives here).
-- `docs/contracts/db.md` — `sites`, `site_tokens`, `users` DDL.
+- `docs/contracts/openapi.yaml` — the REST/OpenAPI control-plane API (per-user `/api/tokens` issuance lives here).
+- `docs/contracts/data-model.md` — `sites`, `user_tokens`, `users` DDL.
 
 ---
 
@@ -960,9 +960,11 @@ func addTool[In, Out any](
 
 ## 8. Example client config (end-user's local AI → remote kotoji)
 
-The user issues a project token in the kotoji dashboard
-(`Project ▸ Settings ▸ MCP tokens ▸ New`), copies it once, and configures their
-local client to reach the **remote** MCP endpoint.
+The user issues a personal token in the kotoji dashboard
+(`Settings ▸ MCP / API tokens ▸ New`), copies it once, and configures their
+local client to reach the **remote** MCP endpoint. One token covers ALL the
+user's projects (it auto-spans their memberships), so a single MCP server entry
+is enough — the client picks a project per call via the `site` selector.
 
 ### 8.1 Claude Desktop / Claude Code (remote Streamable HTTP)
 
@@ -981,9 +983,10 @@ local client to reach the **remote** MCP endpoint.
 }
 ```
 
-Each entry is **one project** (token = one site). To manage two sites, add two
-entries with two tokens. This makes the "scoped to one project" model visible in
-the client UI itself.
+A single entry is enough for **all** your projects: the token is per-user and
+auto-covers every project you're a member of. Choose the target project per call
+with the `site` (handle) selector; `list_sites` enumerates the projects this
+token can reach. (Name the entry just `kotoji` rather than per-site.)
 
 ### 8.2 Claude Code CLI one-liner
 
@@ -1018,10 +1021,11 @@ dev site so the connection works with zero setup.
 Keep it short and behavioural:
 
 ```
-This server hosts ONE web project. All tools act on that single project; you
-cannot read or change other projects. To edit safely:
+This server hosts web projects for one user. Every tool takes a `site` (project
+handle); you can only reach projects you're a member of. Call list_sites first to
+see them. To edit safely:
 1. read_file → note the returned `commit`.
-2. write_file with base_sha = that `commit`.
+2. write_file with the same `site` and base_sha = that `commit`.
 3. If you get a `conflict` error, the file changed underneath you: read_file
    again and redo your edit on the new content. Never retry blindly.
 Saving commits and mirrors to backup; it does NOT make the change live.
@@ -1081,13 +1085,17 @@ swap an in-memory bucket for a Postgres/Redis-backed one.
 
 ## 11. Safety guarantees (summary checklist)
 
-1. **One token = one site.** No content tool accepts a site selector; the site is
-   the token's `SiteID`. Cross-project access is structurally impossible, not
-   merely checked.
+1. **Per-user, membership-capped token.** A token is owned by a user and spans all
+   their projects; every content tool takes a `site` selector. The effective scope
+   on a site is `token.scopes ∩ the membership role's scopes`, re-evaluated per
+   request, so a token can **never exceed its owner's own access** and a non-member
+   target returns `not_found` (no existence leak). Removing/downgrading a
+   membership limits the token instantly — no re-issue.
 2. **No credential minting over MCP.** `create_site` (when enabled) returns a
    site but never a token; tokens are issued only in the authenticated dashboard.
-3. **`create_site` off by default** for project tokens (capability flag) —
-   prevents privilege escalation from "edit one project" to "spawn projects".
+3. **`create_site` off by default** (`user_tokens.can_create_sites`, also capped by
+   `users.can_create_sites`) — prevents privilege escalation from "edit my
+   projects" to "spawn projects".
 4. **Optimistic locking everywhere it mutates.** `base_sha` is required on
    `write_file`/`save`/`publish`/`rollback`; the check is atomic under a per-site
    write lock (no TOCTOU).
