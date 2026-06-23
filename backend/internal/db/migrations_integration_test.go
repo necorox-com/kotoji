@@ -18,7 +18,17 @@ import (
 	"github.com/jackc/pgx/v5/stdlib" // database/sql driver for goose
 	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/require"
+
+	migrations "github.com/necorox-com/kotoji/backend/internal/db/migrations"
 )
+
+// embeddedMigrationsDir is the goose dir argument when reading from the embedded
+// FS: the .sql files sit at the embed root, so the directory is ".". Using the
+// embedded FS (the same one production's internal/migrate consumes) makes this
+// test CWD-INDEPENDENT — it no longer depends on the test binary running with
+// its working directory at internal/db just to resolve a relative "migrations"
+// path, so `go test -tags=integration ./...` is stable from any CWD (e.g. CI).
+const embeddedMigrationsDir = "."
 
 // openSQL returns a database/sql handle for goose (goose drives migrations over the
 // stdlib interface, not pgxpool).
@@ -45,9 +55,15 @@ func TestMigrationsUpDownRoundTrip(t *testing.T) {
 
 	require.NoError(t, goose.SetDialect("postgres"))
 
+	// Drive goose off the EMBEDDED migration FS (same source production uses) so
+	// the round-trip does not depend on the process working directory. Without
+	// this, goose's default osFS would resolve the relative "migrations" dir
+	// against CWD and break under `go test -tags=integration ./...` from backend/.
+	goose.SetBaseFS(migrations.FS)
+
 	// Start from a known-clean state, then migrate fully up.
-	require.NoError(t, goose.DownTo(sqlDB, migrationsDir, 0), "reset to baseline")
-	require.NoError(t, goose.Up(sqlDB, migrationsDir), "goose up")
+	require.NoError(t, goose.DownTo(sqlDB, embeddedMigrationsDir, 0), "reset to baseline")
+	require.NoError(t, goose.Up(sqlDB, embeddedMigrationsDir), "goose up")
 
 	// The reserved-handle seed (0002) must have populated the baseline rows.
 	var count int
@@ -82,7 +98,7 @@ func TestMigrationsUpDownRoundTrip(t *testing.T) {
 	require.Equal(t, "h2", v, "upsert must overwrite the existing value")
 
 	// Tear all the way down; every object must drop without error.
-	require.NoError(t, goose.DownTo(sqlDB, migrationsDir, 0), "goose down")
+	require.NoError(t, goose.DownTo(sqlDB, embeddedMigrationsDir, 0), "goose down")
 }
 
 // ensure the pgx stdlib driver is linked (registers "pgx" for database/sql).

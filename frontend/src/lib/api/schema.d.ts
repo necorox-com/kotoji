@@ -648,7 +648,7 @@ export interface components {
             ownerId: string;
             visibility: components["schemas"]["SiteVisibility"];
             defaultBranch: components["schemas"]["BranchString"];
-            /** @example necorox-com/expense-calc */
+            /** @example acme/expense-calc */
             githubRepo?: string | null;
             publishMode: components["schemas"]["PublishMode"];
             /** @description served subdir; empty = repo root (v1) */

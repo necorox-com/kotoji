@@ -10,15 +10,15 @@ import (
 // to a status/code with a single errors.Is switch (statusFor below). FROZEN by
 // CANONICAL §3.
 var (
-	ErrNotFound        = errors.New("site: not found")                // 404
-	ErrValidation      = errors.New("site: validation failed")        // 422 (400 for malformed)
-	ErrReservedHandle  = errors.New("site: reserved handle")          // 422
-	ErrHandleTaken     = errors.New("site: handle already taken")     // 409
-	ErrConflict        = errors.New("site: stale base sha")           // 409 (optimistic lock)
-	ErrPublishConflict = errors.New("site: publish merge conflict")   // 409
-	ErrBranchExists    = errors.New("site: branch already exists")    // 409
-	ErrNothingToCommit = errors.New("site: nothing to commit")        // 409
-	ErrForbidden       = errors.New("site: forbidden")                // 403
+	ErrNotFound        = errors.New("site: not found")              // 404
+	ErrValidation      = errors.New("site: validation failed")      // 422 (400 for malformed)
+	ErrReservedHandle  = errors.New("site: reserved handle")        // 422
+	ErrHandleTaken     = errors.New("site: handle already taken")   // 409
+	ErrConflict        = errors.New("site: stale base sha")         // 409 (optimistic lock)
+	ErrPublishConflict = errors.New("site: publish merge conflict") // 409
+	ErrBranchExists    = errors.New("site: branch already exists")  // 409
+	ErrNothingToCommit = errors.New("site: nothing to commit")      // 409
+	ErrForbidden       = errors.New("site: forbidden")              // 403
 	// Zip family:
 	ErrZipSlip         = errors.New("site: zip path traversal")       // 400
 	ErrZipTooLarge     = errors.New("site: zip too large")            // 413
@@ -60,7 +60,7 @@ type PublishConflictError struct {
 	Paths []string
 }
 
-func (e *PublishConflictError) Error() string { return "site: publish merge conflict" }
+func (e *PublishConflictError) Error() string   { return "site: publish merge conflict" }
 func (e *PublishConflictError) Is(t error) bool { return t == ErrPublishConflict }
 
 // GitError is the raw os/exec failure. errors.Is(err, ErrGit) is true;

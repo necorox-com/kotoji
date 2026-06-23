@@ -23,8 +23,8 @@ func listTree(tree map[string][]byte, dir string, recursive bool) []FileEntry {
 	if dir != "" {
 		prefix = strings.TrimSuffix(dir, "/") + "/"
 	}
-	files := map[string]int64{}    // path -> size for regular files in scope
-	dirs := map[string]struct{}{}  // immediate subdirectory names in scope
+	files := map[string]int64{}   // path -> size for regular files in scope
+	dirs := map[string]struct{}{} // immediate subdirectory names in scope
 
 	for path, content := range tree {
 		if prefix != "" && !strings.HasPrefix(path, prefix) {

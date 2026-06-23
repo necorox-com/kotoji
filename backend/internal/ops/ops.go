@@ -290,9 +290,9 @@ func (o *Ops) GC(ctx context.Context) error {
 
 // ConsistencyResult summarizes the startup check.
 type ConsistencyResult struct {
-	ClearedLocks  []string // repo dirs whose stale flock was cleared
-	OrphanRepos   []string // repo dirs on disk with no live DB row
-	DanglingRows  []string // live DB rows with no repo on disk
+	ClearedLocks []string // repo dirs whose stale flock was cleared
+	OrphanRepos  []string // repo dirs on disk with no live DB row
+	DanglingRows []string // live DB rows with no repo on disk
 }
 
 // Consistency clears stale flocks and LOGS (never auto-deletes) orphan repos and

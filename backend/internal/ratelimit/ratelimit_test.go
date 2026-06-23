@@ -10,7 +10,7 @@ import (
 // fakeClock is an injectable, advanceable clock for deterministic refill math.
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time      { return c.t }
+func (c *fakeClock) now() time.Time          { return c.t }
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 func TestLimiter_Allow_Table(t *testing.T) {
@@ -133,12 +133,12 @@ func TestMiddleware_DeniesWhenExhausted(t *testing.T) {
 
 func TestClientIP(t *testing.T) {
 	tests := []struct {
-		name    string
-		trust   bool
-		xff     string
-		xrip    string
-		remote  string
-		want    string
+		name   string
+		trust  bool
+		xff    string
+		xrip   string
+		remote string
+		want   string
 	}{
 		{name: "xff first hop trusted", trust: true, xff: "1.2.3.4, 5.6.7.8", remote: "10.0.0.1:9999", want: "1.2.3.4"},
 		{name: "xff ignored when untrusted", trust: false, xff: "1.2.3.4", remote: "10.0.0.1:9999", want: "10.0.0.1"},

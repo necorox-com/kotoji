@@ -21,9 +21,9 @@ func TestVerifier_Valid(t *testing.T) {
 	store := newFakeTokenStore()
 	userID, tokenID := uuid.New(), uuid.New()
 	pt := store.seedToken(validPlaintext("aaaa"), userID, tokenID, tokenOpts{
-		scopes:           []string{"read", "write", "publish"},
-		userCanCreate: true,
-		canCreateSites:   true,
+		scopes:         []string{"read", "write", "publish"},
+		userCanCreate:  true,
+		canCreateSites: true,
 	})
 
 	v := NewVerifier(store)
@@ -57,9 +57,9 @@ func TestVerifier_CanCreate_CappedByCreator(t *testing.T) {
 	userID, tokenID := uuid.New(), uuid.New()
 	// Token says it can create, but the creating user cannot → effective false.
 	pt := store.seedToken(validPlaintext("bbbb"), userID, tokenID, tokenOpts{
-		scopes:           []string{"read", "write"},
-		canCreateSites:   true,
-		userCanCreate: false,
+		scopes:         []string{"read", "write"},
+		canCreateSites: true,
+		userCanCreate:  false,
 	})
 	v := NewVerifier(store)
 	v.touch = func(uuid.UUID) {}
@@ -138,7 +138,7 @@ func TestVerifier_InactiveCreator_Rejected(t *testing.T) {
 	userID, tokenID := uuid.New(), uuid.New()
 	// An inactive creating user means the DB query returns no row → 401.
 	pt := store.seedToken(validPlaintext("hhhh"), userID, tokenID, tokenOpts{
-		scopes:          []string{"read"},
+		scopes:       []string{"read"},
 		userInactive: true,
 	})
 	v := NewVerifier(store)

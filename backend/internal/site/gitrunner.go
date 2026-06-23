@@ -46,13 +46,13 @@ func newExecRunner(gitBin string) *execRunner {
 // of the picture. PATH is preserved minimally so git can find its helpers.
 func scrubbedEnv() []string {
 	return []string{
-		"GIT_TERMINAL_PROMPT=0",       // never prompt on the terminal for creds
-		"GIT_ASKPASS=/bin/false",      // and never shell out to an askpass helper
-		"GIT_CONFIG_NOSYSTEM=1",       // ignore /etc/gitconfig (deterministic behavior)
-		"GIT_CONFIG_GLOBAL=/dev/null", // ignore ~/.gitconfig as well
-		"HOME=/nonexistent",           // no home-dir config / credential cache
-		"GIT_FLUSH=1",                 // deterministic flushing for captured output
-		"LC_ALL=C",                    // stable, locale-independent git messages
+		"GIT_TERMINAL_PROMPT=0",             // never prompt on the terminal for creds
+		"GIT_ASKPASS=/bin/false",            // and never shell out to an askpass helper
+		"GIT_CONFIG_NOSYSTEM=1",             // ignore /etc/gitconfig (deterministic behavior)
+		"GIT_CONFIG_GLOBAL=/dev/null",       // ignore ~/.gitconfig as well
+		"HOME=/nonexistent",                 // no home-dir config / credential cache
+		"GIT_FLUSH=1",                       // deterministic flushing for captured output
+		"LC_ALL=C",                          // stable, locale-independent git messages
 		"PATH=/usr/local/bin:/usr/bin:/bin", // git + its subcommands
 	}
 }

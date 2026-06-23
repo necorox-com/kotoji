@@ -75,8 +75,8 @@ func (f *fakeTokenStore) dropAll() {
 
 // tokenOpts configures a seeded token. Zero value = active, non-revoked.
 type tokenOpts struct {
-	scopes        []string
-	expiresAt     *time.Time
+	scopes         []string
+	expiresAt      *time.Time
 	canCreateSites bool // token-level flag
 	userCanCreate  bool // owning-user flag (effective = AND of both)
 	userInactive   bool // when true the row is NOT returned (models the DB filter)

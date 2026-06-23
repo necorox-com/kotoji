@@ -182,7 +182,7 @@ func testContract(t *testing.T, factory serviceFactory) {
 	t.Run("CreateSite_fromZip", func(t *testing.T) {
 		svc := factory(t)
 		zsrc := makeZip(t, map[string]string{
-			"index.html": "<h1>hi</h1>",
+			"index.html":  "<h1>hi</h1>",
 			"css/app.css": "body{}",
 		})
 		s, err := svc.CreateSite(ctx, CreateSiteInput{

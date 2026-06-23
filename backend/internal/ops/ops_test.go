@@ -118,7 +118,7 @@ func TestReap_SelectsOnlyPastGrace(t *testing.T) {
 	o, sitesDir, _ := newTestOps(t, store, git)
 
 	now := time.Unix(1_700_000_000, 0)
-	old := SoftDeletedSite{ID: uuid.New(), Handle: "old", DeletedAt: now.Add(-800 * time.Hour)}   // past 30d grace
+	old := SoftDeletedSite{ID: uuid.New(), Handle: "old", DeletedAt: now.Add(-800 * time.Hour)}     // past 30d grace
 	recent := SoftDeletedSite{ID: uuid.New(), Handle: "recent", DeletedAt: now.Add(-1 * time.Hour)} // within grace
 	// ListSitesPastGrace already filters by cutoff; seed only the past-grace one to
 	// model the store contract (the SQL WHERE clause does the time filter).

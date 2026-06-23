@@ -1,0 +1,229 @@
+# Continuous integration for kotoji (backend Go module + frontend Next.js app).
+#
+# Runs on every push to main and on every pull request, proving a change keeps
+# the stack green. Each job mirrors a command set already validated locally
+# against a clean checkout; no command here is aspirational. The workflow is
+# necorox-agnostic: it uses only ephemeral, throwaway values (a local Postgres
+# service with a disposable password), no secrets, no real hostnames or IPs.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-flight run when a newer commit lands on the same ref, so a force
+# push / rapid re-push does not pile up redundant CI.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: CI only needs to read the repository contents.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # backend: build, vet, formatting, unit tests, and the conformance tag.
+  # ---------------------------------------------------------------------------
+  backend:
+    name: backend (build / vet / fmt / test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Read the exact toolchain (go 1.25.7) from backend/go.mod so CI never
+          # drifts from the module's declared version. setup-go's module cache is
+          # on by default and keyed off the go.sum in this directory.
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt check (fail on unformatted)
+        # gofmt -l lists files that are NOT canonically formatted; any output is a
+        # failure. The committed tree is gofmt-clean (verified locally), so this
+        # stays green until someone commits unformatted Go.
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go test (unit)
+        run: go test ./...
+
+      - name: go test -tags conformance
+        run: go test -tags conformance ./...
+
+  # ---------------------------------------------------------------------------
+  # backend-integration: the -tags=integration suite against a live Postgres.
+  # The migration round-trip test drives goose off the EMBEDDED migration FS, so
+  # it is CWD-independent and runs cleanly via `go test -tags=integration ./...`
+  # straight from backend/ (no working-directory gymnastics needed).
+  # ---------------------------------------------------------------------------
+  backend-integration:
+    name: backend integration (postgres)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          # Disposable, CI-only credentials. The DB name carries the _test suffix
+          # the integration tests document. These never touch any real instance.
+          POSTGRES_USER: kotoji
+          POSTGRES_PASSWORD: kotoji
+          POSTGRES_DB: kotoji_test
+        ports:
+          - 5432:5432
+        # Gate the job's first DB call on Postgres actually being ready. The
+        # citext + pgcrypto extensions the schema needs ship in postgres:18-alpine
+        # and are CREATEd inside migration 0001 as the superuser, so no extra
+        # provisioning step is required.
+        options: >-
+          --health-cmd "pg_isready -U kotoji -d kotoji_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The env var the tests read (os.Getenv("KOTOJI_DATABASE_URL")). sslmode is
+      # disabled because the service container speaks plaintext on localhost.
+      KOTOJI_DATABASE_URL: postgres://kotoji:kotoji@localhost:5432/kotoji_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: go test -tags=integration
+        run: go test -tags=integration ./...
+
+  # ---------------------------------------------------------------------------
+  # frontend: type-check, lint, and production build of the Next.js app.
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: frontend (tsc / lint / build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Node 20 is the floor Next 16 requires (engines.node >=20.9.0). npm's
+          # cache is keyed off the lockfile in this directory.
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: npm ci
+        run: npm ci
+
+      - name: tsc --noEmit
+        # The repo invokes tsc directly (there is no typecheck npm script).
+        run: npx tsc --noEmit
+
+      - name: npm run lint
+        run: npm run lint
+
+      - name: npm run build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # drift: prove the committed generated artifacts are regenerable & current.
+  # Three reproducible generators are gated here:
+  #   1. frontend TS API types (openapi-typescript) from the OpenAPI spec
+  #   2. backend sqlc accessors from queries + migration schema
+  #   3. backend oapi-codegen Go DTOs (the Go openapi types are GENERATED, not
+  #      hand-maintained: a pinned `go run ...oapi-codegen@v2.4.1` consumes a
+  #      3.1->3.0 lowered copy of the spec produced by spec31to30.py). All three
+  #      were verified to regenerate with an empty diff against the committed tree.
+  # ---------------------------------------------------------------------------
+  drift:
+    name: drift (generated artifacts up to date)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set up Python (for spec31to30.py)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML (spec31to30.py dependency)
+        # spec31to30.py round-trips the spec through PyYAML to lower 3.1 nullable
+        # unions for oapi-codegen. Pin it so the intermediate spec is stable.
+        run: pip install "PyYAML==6.0.1"
+
+      - name: Install sqlc
+        # Same generator the repo uses (sqlc.yaml present). Pinned to the version
+        # validated locally so regeneration is byte-reproducible.
+        uses: sqlc-dev/setup-sqlc@v4
+        with:
+          sqlc-version: "1.31.1"
+
+      - name: npm ci (frontend, for openapi-typescript)
+        working-directory: frontend
+        run: npm ci
+
+      - name: Regenerate frontend TS API types
+        # Exact invocation from `make gen-frontend` (run from frontend/).
+        working-directory: frontend
+        run: npx openapi-typescript ../docs/contracts/openapi.yaml -o src/lib/api/schema.d.ts
+
+      - name: Regenerate backend sqlc accessors
+        working-directory: backend
+        run: sqlc generate
+
+      - name: Regenerate backend oapi-codegen Go DTOs
+        # Mirrors internal/openapi/gen.go's go:generate: lower the frozen 3.1 spec
+        # to a 3.0 copy, then feed THAT to the pinned oapi-codegen. The source
+        # docs/contracts/openapi.yaml is never modified.
+        working-directory: backend
+        run: |
+          python3 internal/openapi/spec31to30.py ../docs/contracts/openapi.yaml /tmp/kotoji-openapi-30.yaml
+          go run github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 \
+            -config oapi-codegen.yaml /tmp/kotoji-openapi-30.yaml
+
+      - name: Fail if any generated artifact is stale
+        # A non-empty diff means a committed generated file is out of date with its
+        # source. Regenerate locally (`make gen`) and commit to fix.
+        run: |
+          git diff --exit-code -- \
+            frontend/src/lib/api/schema.d.ts \
+            backend/internal/db/gen \
+            backend/internal/openapi/types.gen.go
