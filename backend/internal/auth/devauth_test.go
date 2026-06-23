@@ -98,3 +98,35 @@ func TestProviderFor(t *testing.T) {
 	_, err = ProviderFor(context.Background(), config.Config{AuthMode: config.AuthMode("bogus")}, nil)
 	require.Error(t, err)
 }
+
+// TestProvidersFor builds the SET of enabled providers (break-glass). The order
+// follows cfg.AuthModes (normalized oidc, password). OIDC discovery is not
+// exercised here (no real issuer); password+none are local and sufficient to
+// prove the set construction wiring.
+func TestProvidersFor(t *testing.T) {
+	// password + none would be invalid (none is exclusive), so exercise the two
+	// local providers via separate single-element sets, then a password-only set.
+	pwOnly, err := ProvidersFor(context.Background(), config.Config{
+		AuthMode:      config.AuthModePassword,
+		AuthModes:     []config.AuthMode{config.AuthModePassword},
+		AdminPassword: "supersecret",
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, pwOnly, 1)
+	require.Equal(t, passwordProviderKey, pwOnly[0].Key())
+
+	noneOnly, err := ProvidersFor(context.Background(), config.Config{
+		AuthMode:   config.AuthModeNone,
+		AuthModes:  []config.AuthMode{config.AuthModeNone},
+		AdminEmail: "a@b.c",
+	}, nil)
+	require.NoError(t, err)
+	require.Len(t, noneOnly, 1)
+	require.Equal(t, devProviderKey, noneOnly[0].Key())
+
+	// An unknown mode in the set surfaces an error.
+	_, err = ProvidersFor(context.Background(), config.Config{
+		AuthModes: []config.AuthMode{config.AuthMode("bogus")},
+	}, nil)
+	require.Error(t, err)
+}

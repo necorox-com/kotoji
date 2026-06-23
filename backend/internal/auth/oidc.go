@@ -69,17 +69,19 @@ type idTokenClaims struct {
 }
 
 // OIDCProvider is the Google/OIDC AuthProvider: issuer discovery + state/nonce +
-// PKCE(S256) + id_token verification + an allowlist gate (hd domain and/or an
-// explicit email list). It satisfies AuthProvider.
+// PKCE(S256) + id_token verification + an allowlist gate (hosted-domain list
+// and/or an explicit email list). It satisfies AuthProvider.
 type OIDCProvider struct {
 	oauth    codeExchanger
 	verifier tokenVerifier
 
-	// allowedDomain restricts logins to a single Google Workspace `hd` domain
-	// ("" disables the domain gate).
-	allowedDomain string
-	// allowedEmails is an explicit allowlist (lowercased); empty disables it.
-	allowedEmails map[string]struct{}
+	// access is the pure, table-testable access-control policy (email allowlist
+	// OR domain allowlist, honoring the verified `hd` claim; fail-closed when both
+	// are empty). It also resolves the is_admin promotion decision.
+	access accessPolicy
+	// hdHint is the single domain (if exactly one is configured) used as the
+	// Google account-chooser `hd` pre-filter. Pure UX; the hard gate is `access`.
+	hdHint string
 }
 
 // compile-time guarantee.
@@ -112,15 +114,20 @@ func NewOIDCProvider(ctx context.Context, cfg config.OIDCConfig) (*OIDCProvider,
 // newOIDCProvider is the DI-friendly constructor: it takes the (interface)
 // dependencies directly so tests build an OIDCProvider with fakes.
 func newOIDCProvider(oauth codeExchanger, verifier tokenVerifier, cfg config.OIDCConfig) *OIDCProvider {
-	allowed := make(map[string]struct{}, len(cfg.AllowedEmails))
-	for _, e := range cfg.AllowedEmails {
-		allowed[strings.ToLower(strings.TrimSpace(e))] = struct{}{}
+	access := newAccessPolicy(cfg.AllowedEmails, cfg.AllowedDomains, cfg.AdminEmails)
+	// hd pre-filter only when exactly one domain is configured (Google's hd param
+	// is a single value; with several we let the account chooser show all).
+	var hdHint string
+	if len(access.domains) == 1 {
+		for d := range access.domains {
+			hdHint = d
+		}
 	}
 	return &OIDCProvider{
-		oauth:         oauth,
-		verifier:      verifier,
-		allowedDomain: strings.ToLower(strings.TrimSpace(cfg.AllowedDomain)),
-		allowedEmails: allowed,
+		oauth:    oauth,
+		verifier: verifier,
+		access:   access,
+		hdHint:   hdHint,
 	}
 }
 
@@ -141,8 +148,8 @@ func (p *OIDCProvider) Start(state, nonce, pkceVerifier string) string {
 	}
 	// hd hint: pre-filter the account chooser to the Workspace domain (the hard
 	// gate is still the post-exchange allowlist check).
-	if p.allowedDomain != "" {
-		opts = append(opts, oauth2.SetAuthURLParam("hd", p.allowedDomain))
+	if p.hdHint != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("hd", p.hdHint))
 	}
 	return p.oauth.AuthCodeURL(state, opts...)
 }
@@ -184,40 +191,17 @@ func (p *OIDCProvider) Exchange(ctx context.Context, code, pkceVerifier, expecte
 		Name:          c.Name,
 		HostedDomain:  strings.ToLower(c.HostedDomain),
 	}
-	if err := p.checkAllowlist(claims); err != nil {
-		return Claims{}, err
+	// Decision #4: the email MUST be verified by the IdP before the allowlist /
+	// domain gate is even consulted (an unverified address is attacker-spoofable).
+	if !claims.EmailVerified {
+		return Claims{}, ErrEmailNotVerified
 	}
+	dec := p.access.decide(claims.Email, claims.HostedDomain)
+	if !dec.Allow {
+		return Claims{}, fmt.Errorf("%w: %s", ErrNotAllowed, claims.Email)
+	}
+	// Admin promotion is carried on the claims so completeLogin can apply it via
+	// the existing PromoteUserAdmin path (decision #3).
+	claims.IsAdmin = dec.Admin
 	return claims, nil
-}
-
-// checkAllowlist enforces the domain and/or email allowlist. The gates are OR'd:
-// a login is permitted if it matches the hd domain OR the explicit email list.
-// With neither configured this returns an error (fail-closed) — config.validate
-// already requires at least one in oidc mode, so this is defense in depth.
-func (p *OIDCProvider) checkAllowlist(c Claims) error {
-	if p.allowedDomain == "" && len(p.allowedEmails) == 0 {
-		return errors.New("auth: no allowlist configured; refusing login")
-	}
-	if p.allowedDomain != "" {
-		// Prefer the verified `hd` claim; fall back to the email's domain part so
-		// a non-Workspace IdP (no hd) can still gate on the address domain.
-		if c.HostedDomain == p.allowedDomain || emailDomain(c.Email) == p.allowedDomain {
-			return nil
-		}
-	}
-	if len(p.allowedEmails) > 0 {
-		if _, ok := p.allowedEmails[c.Email]; ok {
-			return nil
-		}
-	}
-	return fmt.Errorf("auth: %s is not on the allowlist", c.Email)
-}
-
-// emailDomain returns the lowercased domain part of an email, "" if malformed.
-func emailDomain(email string) string {
-	at := strings.LastIndexByte(email, '@')
-	if at < 0 || at == len(email)-1 {
-		return ""
-	}
-	return strings.ToLower(email[at+1:])
 }

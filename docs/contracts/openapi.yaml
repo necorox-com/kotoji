@@ -1074,7 +1074,22 @@ components:
           type: array
           items: { type: string }
         baseDomain: { type: string, example: hosting.example.com }
-        authMode: { $ref: "#/components/schemas/AuthMode" }
+        authMode:
+          allOf:
+            - $ref: "#/components/schemas/AuthMode"
+          description: >
+            LEGACY single representative of the enabled provider set, for
+            back-compat. When several providers are enabled (e.g. oidc +
+            password break-glass) this is the highest-priority one (oidc, then
+            password, then none). New clients should read authProviders.
+        authProviders:
+          type: array
+          description: >
+            The ENABLED auth providers, in normalized order (oidc, password,
+            none). The login page renders one control per entry, so OIDC + the
+            break-glass password can be offered concurrently. A single legacy
+            KOTOJI_AUTH_MODE value yields a one-element array.
+          items: { $ref: "#/components/schemas/AuthMode" }
         defaultPublishMode: { $ref: "#/components/schemas/PublishMode" }
         githubMirrorEnabled:
           type: boolean

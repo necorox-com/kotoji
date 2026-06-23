@@ -116,16 +116,30 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 
 	// Auth is only needed where the control plane runs.
 	if cfg.ServesControl() {
-		// The store backs the password provider's first-run DB credential (the hash
-		// set via /auth/setup takes precedence over the env password). It is unused
-		// by the OIDC/dev providers.
-		provider, perr := auth.ProviderFor(ctx, cfg, store) // OIDC does network discovery
+		// FAIL-CLOSED warning (decision #2). config.validate already refuses to boot
+		// when oidc is enabled with neither an email allowlist NOR a domain allowlist,
+		// so this is belt-and-suspenders: if a future code path (or a hand-built
+		// Config) ever reaches here with both lists empty, log a loud warning that
+		// EVERY OIDC sign-in will be denied at the provider gate (TestOIDC_Allowlist-
+		// NoneConfigured pins the runtime denial). The break-glass password admin is
+		// unaffected.
+		if cfg.OIDCEnabled() && len(cfg.OIDC.AllowedEmails) == 0 && len(cfg.OIDC.AllowedDomains) == 0 {
+			logger.Warn("oidc is enabled with NO allowed emails and NO allowed domains: " +
+				"ALL OIDC sign-ins will be DENIED (fail-closed). Set KOTOJI_OIDC_ALLOWED_EMAILS " +
+				"and/or KOTOJI_OIDC_ALLOWED_DOMAINS to permit accounts.")
+		}
+
+		// Build the SET of enabled providers (decision #1: oidc + password may be
+		// enabled concurrently — break-glass). The store backs the password
+		// provider's first-run DB credential (the hash set via /auth/setup takes
+		// precedence over the env password); it is unused by the OIDC/dev providers.
+		providers, perr := auth.ProvidersFor(ctx, cfg, store) // OIDC does network discovery
 		if perr != nil {
 			store.Close()
 			return nil, perr
 		}
 		// *db.Store satisfies auth.StoreDeps (SessionStore + WithTx).
-		a.auth = auth.New(cfg, store, provider)
+		a.auth = auth.NewWithProviders(cfg, store, providers...)
 
 		// Background operability scheduler (reaper + gc + startup consistency).
 		// Built only on the control plane: the single replica that owns writes also

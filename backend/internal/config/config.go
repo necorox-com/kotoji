@@ -86,14 +86,22 @@ const (
 	defaultOpsInterval      = time.Hour       // background ops scheduler tick
 )
 
-// OIDCConfig holds OIDC provider settings (used when AuthMode == oidc).
+// OIDCConfig holds OIDC provider settings (used when the oidc provider is enabled).
 type OIDCConfig struct {
-	Issuer        string
-	ClientID      string
-	ClientSecret  string
-	RedirectURL   string
-	AllowedDomain string   // restrict to a Google Workspace domain (hd hint)
-	AllowedEmails []string // explicit email allowlist (alt/extra to AllowedDomain)
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	RedirectURL  string
+	// AllowedDomains is the set of hosted domains a verified email may belong to
+	// (matched against the email domain part and, when present, the Google `hd`
+	// claim). Lowercased at parse. Empty disables the domain gate.
+	AllowedDomains []string
+	// AllowedEmails is an explicit, case-insensitive exact-email allowlist.
+	// Lowercasing is applied by the provider at gate time. Empty disables it.
+	AllowedEmails []string
+	// AdminEmails are verified OIDC emails promoted to is_admin on upsert/login.
+	// Empty means no OIDC user is auto-promoted.
+	AdminEmails []string
 }
 
 // GitHubMirror holds the optional GitHub mirror/backup settings.
@@ -135,9 +143,20 @@ type Config struct {
 	DataDir string
 	GitBin  string
 
-	AuthMode      AuthMode
+	// AuthMode is the LEGACY single-mode value, retained for back-compat on the
+	// /api/me + /api/config `authMode` field and the older single-provider call
+	// sites. It is the representative of the enabled set (see AuthModes): "none"
+	// when none is enabled, else "oidc" if oidc is enabled (the primary human
+	// path), else "password". New code should branch on AuthModes / the Enabled*
+	// helpers, never on this single value.
+	AuthMode AuthMode
+	// AuthModes is the SET of enabled auth providers parsed from KOTOJI_AUTH_MODE
+	// (a comma-list, e.g. "oidc,password"). A single legacy value parses to a
+	// one-element set. "none" is exclusive (cannot be combined). Order is
+	// normalized (oidc, password, none) so it is stable for the public config.
+	AuthModes     []AuthMode
 	OIDC          OIDCConfig
-	AdminPassword string // bcrypt-checked single-admin password (mode=password)
+	AdminPassword string // bcrypt-checked single-admin password (password provider)
 	AdminEmail    string
 
 	SessionCookieName   string
@@ -194,6 +213,49 @@ func (c Config) ServesData() bool { return c.Mode == RunModeAll || c.Mode == Run
 
 // IsProduction reports whether the environment is production.
 func (c Config) IsProduction() bool { return c.Env == EnvProduction }
+
+// AuthModeEnabled reports whether the given provider mode is in the enabled set.
+// BACK-COMPAT: a Config built by hand (e.g. in tests) that sets only the legacy
+// single AuthMode field — never populating AuthModes — is treated as a one-element
+// set of that legacy value, so the Enabled* helpers stay correct without forcing
+// every caller through config.Load.
+func (c Config) AuthModeEnabled(m AuthMode) bool {
+	modes := c.AuthModes
+	if len(modes) == 0 && c.AuthMode != "" {
+		modes = []AuthMode{c.AuthMode}
+	}
+	for _, em := range modes {
+		if em == m {
+			return true
+		}
+	}
+	return false
+}
+
+// OIDCEnabled reports whether the OIDC provider is in the enabled set.
+func (c Config) OIDCEnabled() bool { return c.AuthModeEnabled(AuthModeOIDC) }
+
+// PasswordEnabled reports whether the password (break-glass) provider is enabled.
+func (c Config) PasswordEnabled() bool { return c.AuthModeEnabled(AuthModePassword) }
+
+// NoAuthEnabled reports whether the dev no-auth provider is enabled.
+func (c Config) NoAuthEnabled() bool { return c.AuthModeEnabled(AuthModeNone) }
+
+// AuthModeStrings returns the enabled provider modes as wire strings, in the
+// normalized (oidc, password, none) order — the value exposed as authProviders
+// in the public config so the login page renders each enabled provider. It uses
+// the same legacy-AuthMode fallback as AuthModeEnabled (see there).
+func (c Config) AuthModeStrings() []string {
+	modes := c.AuthModes
+	if len(modes) == 0 && c.AuthMode != "" {
+		modes = []AuthMode{c.AuthMode}
+	}
+	out := make([]string, 0, len(modes))
+	for _, m := range modes {
+		out = append(out, string(m))
+	}
+	return out
+}
 
 // getenv is the indirection seam: tests inject a map-backed lookup so they
 // never touch the real process environment.
@@ -264,21 +326,35 @@ func load(get getenv) (Config, error) {
 	c.GitBin = getString(get, "KOTOJI_GIT_BIN", defaultGitBin)
 
 	// --- auth ---
-	authMode := strings.ToLower(getString(get, "KOTOJI_AUTH_MODE", string(AuthModeOIDC)))
-	switch AuthMode(authMode) {
-	case AuthModeOIDC, AuthModePassword, AuthModeNone:
-		c.AuthMode = AuthMode(authMode)
-	default:
-		return Config{}, fmt.Errorf("KOTOJI_AUTH_MODE: invalid value %q (want oidc|password|none)", authMode)
+	// KOTOJI_AUTH_MODE is a comma-SET of enabled providers (e.g. "oidc,password"
+	// for OIDC + break-glass password). A single legacy value ("oidc"/"password"/
+	// "none") parses to a one-element set unchanged. "none" is exclusive.
+	modes, primary, err := parseAuthModes(getString(get, "KOTOJI_AUTH_MODE", string(AuthModeOIDC)))
+	if err != nil {
+		return Config{}, err
 	}
+	c.AuthModes = modes
+	c.AuthMode = primary // legacy representative (back-compat for authMode field)
 
+	// AllowedDomains: the new KOTOJI_OIDC_ALLOWED_DOMAINS list, OR'd with the
+	// legacy single KOTOJI_AUTH_GOOGLE_HD (hd hint) so an existing single-domain
+	// config keeps working without rename. Deduped + lowercased by lowerCSV.
+	domains := getCSV(get, "KOTOJI_OIDC_ALLOWED_DOMAINS")
+	if hd := strings.TrimSpace(getString(get, "KOTOJI_AUTH_GOOGLE_HD", "")); hd != "" {
+		domains = append(domains, hd)
+	}
 	c.OIDC = OIDCConfig{
-		Issuer:        getString(get, "KOTOJI_AUTH_OIDC_ISSUER", defaultOIDCIssuer),
-		ClientID:      getString(get, "KOTOJI_AUTH_OIDC_CLIENT_ID", ""),
-		ClientSecret:  getString(get, "KOTOJI_AUTH_OIDC_CLIENT_SECRET", ""),
-		RedirectURL:   getString(get, "KOTOJI_AUTH_OIDC_REDIRECT_URL", defaultRedirect(c.ControlBaseURL)),
-		AllowedDomain: getString(get, "KOTOJI_AUTH_GOOGLE_HD", ""),
-		AllowedEmails: getCSV(get, "KOTOJI_AUTH_ALLOWED_EMAILS"),
+		// Issuer/client/secret/redirect: accept the new KOTOJI_OIDC_* names
+		// (decisions) AND the legacy KOTOJI_AUTH_OIDC_* names already in the wild.
+		Issuer:       firstNonEmpty(getString(get, "KOTOJI_OIDC_ISSUER", ""), getString(get, "KOTOJI_AUTH_OIDC_ISSUER", defaultOIDCIssuer)),
+		ClientID:     firstNonEmpty(getString(get, "KOTOJI_OIDC_CLIENT_ID", ""), getString(get, "KOTOJI_AUTH_OIDC_CLIENT_ID", "")),
+		ClientSecret: firstNonEmpty(getString(get, "KOTOJI_OIDC_CLIENT_SECRET", ""), getString(get, "KOTOJI_AUTH_OIDC_CLIENT_SECRET", "")),
+		RedirectURL:  firstNonEmpty(getString(get, "KOTOJI_OIDC_REDIRECT_URL", ""), getString(get, "KOTOJI_AUTH_OIDC_REDIRECT_URL", defaultRedirect(c.ControlBaseURL))),
+		// AllowedEmails: the new KOTOJI_OIDC_ALLOWED_EMAILS preferred, with the
+		// legacy KOTOJI_AUTH_ALLOWED_EMAILS as the fallback name.
+		AllowedDomains: lowerCSV(domains),
+		AllowedEmails:  lowerCSV(firstNonEmptyCSV(getCSV(get, "KOTOJI_OIDC_ALLOWED_EMAILS"), getCSV(get, "KOTOJI_AUTH_ALLOWED_EMAILS"))),
+		AdminEmails:    lowerCSV(getCSV(get, "KOTOJI_OIDC_ADMIN_EMAILS")),
 	}
 	c.AdminPassword = getString(get, "KOTOJI_AUTH_ADMIN_PASSWORD", "")
 	c.AdminEmail = getString(get, "KOTOJI_AUTH_ADMIN_EMAIL", "admin@kotoji.local")
@@ -408,31 +484,35 @@ func (c Config) validate(prod bool) error {
 		if c.ControlBaseURL == "" || c.ControlBaseURL == defaultControlBaseURL {
 			errs = append(errs, errors.New("KOTOJI_CONTROL_BASE_URL must be set to a real URL in production"))
 		}
-		// Disallow the dev-only no-auth mode on a production control plane.
-		if c.ServesControl() && c.AuthMode == AuthModeNone {
+		// Disallow the dev-only no-auth mode on a production control plane. It is
+		// exclusive so this also rejects any "none,oidc" style combination.
+		if c.ServesControl() && c.NoAuthEnabled() {
 			errs = append(errs, errors.New("KOTOJI_AUTH_MODE=none is not allowed in production"))
 		}
 	}
 
-	// Auth-mode-specific requirements (enforced whenever the control plane runs,
-	// in any environment — these are correctness requirements, not hardening).
+	// Auth-provider-specific requirements (enforced whenever the control plane
+	// runs, in any environment — these are correctness requirements, not
+	// hardening). Each ENABLED provider is validated independently so oidc +
+	// password can coexist (break-glass).
 	if c.ServesControl() {
-		switch c.AuthMode {
-		case AuthModeOIDC:
+		if c.OIDCEnabled() {
 			if c.OIDC.Issuer == "" {
-				errs = append(errs, errors.New("KOTOJI_AUTH_OIDC_ISSUER is required when AUTH_MODE=oidc"))
+				errs = append(errs, errors.New("KOTOJI_AUTH_OIDC_ISSUER is required when oidc is enabled"))
 			}
 			if c.OIDC.ClientID == "" {
-				errs = append(errs, errors.New("KOTOJI_AUTH_OIDC_CLIENT_ID is required when AUTH_MODE=oidc"))
+				errs = append(errs, errors.New("KOTOJI_AUTH_OIDC_CLIENT_ID is required when oidc is enabled"))
 			}
 			if c.OIDC.ClientSecret == "" {
-				errs = append(errs, errors.New("KOTOJI_AUTH_OIDC_CLIENT_SECRET is required when AUTH_MODE=oidc"))
+				errs = append(errs, errors.New("KOTOJI_AUTH_OIDC_CLIENT_SECRET is required when oidc is enabled"))
 			}
-			// At least one allowlist gate must exist or any Google account could log in.
-			if c.OIDC.AllowedDomain == "" && len(c.OIDC.AllowedEmails) == 0 {
-				errs = append(errs, errors.New("KOTOJI_AUTH_GOOGLE_HD or KOTOJI_AUTH_ALLOWED_EMAILS must be set when AUTH_MODE=oidc"))
+			// FAIL-CLOSED: with neither an email allowlist nor a domain allowlist,
+			// ANY Google account could sign in. We require at least one gate.
+			if len(c.OIDC.AllowedDomains) == 0 && len(c.OIDC.AllowedEmails) == 0 {
+				errs = append(errs, errors.New("KOTOJI_OIDC_ALLOWED_EMAILS or KOTOJI_OIDC_ALLOWED_DOMAINS must be set when oidc is enabled (fail-closed: empty allowlists deny all sign-ins)"))
 			}
-		case AuthModePassword:
+		}
+		if c.PasswordEnabled() {
 			// The env password is OPTIONAL: when empty, the instance enters the
 			// first-run "setup required" state and the admin sets the password via
 			// the GUI (stored hashed in the DB). When provided, it must meet the
@@ -440,9 +520,8 @@ func (c Config) validate(prod bool) error {
 			if c.AdminPassword != "" && len(c.AdminPassword) < AdminPasswordMinLen {
 				errs = append(errs, fmt.Errorf("KOTOJI_AUTH_ADMIN_PASSWORD must be at least %d characters", AdminPasswordMinLen))
 			}
-		case AuthModeNone:
-			// Allowed in development only (guarded above for production).
 		}
+		// AuthModeNone needs no provider config (guarded for production above).
 	}
 
 	// GitHub mirror, when enabled, needs credentials and a webhook secret.
@@ -530,6 +609,79 @@ func getCSV(get getenv, key string) []string {
 		return nil
 	}
 	return splitCSV(v)
+}
+
+// parseAuthModes parses KOTOJI_AUTH_MODE as a comma-set of enabled providers. It
+// accepts a single legacy value ("oidc"/"password"/"none") unchanged or a comma
+// list ("oidc,password"). Rules: every entry must be one of {oidc,password,none};
+// duplicates collapse; "none" is EXCLUSIVE (it cannot be combined with any other
+// provider). The returned set is normalized to a stable order (oidc, password,
+// none) and the second return value is the LEGACY representative (oidc wins, then
+// password, then none) carried on Config.AuthMode for back-compat.
+func parseAuthModes(raw string) ([]AuthMode, AuthMode, error) {
+	parts := splitCSV(strings.ToLower(raw))
+	if len(parts) == 0 {
+		return nil, "", fmt.Errorf("KOTOJI_AUTH_MODE: empty (want oidc|password|none or a comma list)")
+	}
+	seen := map[AuthMode]bool{}
+	for _, p := range parts {
+		m := AuthMode(p)
+		switch m {
+		case AuthModeOIDC, AuthModePassword, AuthModeNone:
+			seen[m] = true
+		default:
+			return nil, "", fmt.Errorf("KOTOJI_AUTH_MODE: invalid value %q (want oidc|password|none)", p)
+		}
+	}
+	// "none" is exclusive: disabling auth alongside a real provider is a
+	// configuration mistake we refuse rather than silently resolve.
+	if seen[AuthModeNone] && len(seen) > 1 {
+		return nil, "", fmt.Errorf("KOTOJI_AUTH_MODE: %q is exclusive and cannot be combined with other providers", AuthModeNone)
+	}
+
+	// Normalize to a stable order so the public config / set comparisons are
+	// deterministic regardless of how the operator ordered the env value.
+	var modes []AuthMode
+	for _, m := range []AuthMode{AuthModeOIDC, AuthModePassword, AuthModeNone} {
+		if seen[m] {
+			modes = append(modes, m)
+		}
+	}
+	return modes, modes[0], nil // modes[0] is the highest-priority representative
+}
+
+// lowerCSV lowercases + trims every entry, dropping empties and duplicates while
+// preserving first-seen order. Used to normalize the OIDC email/domain lists.
+func lowerCSV(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// firstNonEmptyCSV returns the first non-empty CSV slice (preferred name first,
+// legacy fallback second) so a renamed env var keeps its old name working.
+func firstNonEmptyCSV(preferred, fallback []string) []string {
+	if len(preferred) > 0 {
+		return preferred
+	}
+	return fallback
 }
 
 // splitCSV trims and drops empty fields from a comma-separated string.

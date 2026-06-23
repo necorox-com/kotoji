@@ -54,7 +54,7 @@ func tokenWithID(idToken string) *oauth2.Token {
 
 func TestOIDC_Start(t *testing.T) {
 	ex := &fakeExchanger{authURL: "https://idp/auth"}
-	p := newOIDCProvider(ex, &fakeVerifier{}, config.OIDCConfig{AllowedDomain: "corp.com"})
+	p := newOIDCProvider(ex, &fakeVerifier{}, config.OIDCConfig{AllowedDomains: []string{"corp.com"}})
 
 	url := p.Start("the-state", "the-nonce", "the-verifier")
 	require.Equal(t, "https://idp/auth", url)
@@ -75,7 +75,7 @@ func TestOIDC_Exchange(t *testing.T) {
 	}{
 		{
 			name:     "domain allowlist accepts matching hd",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: tokenWithID("idtok")},
 			verify: &fakeVerifier{out: verifiedToken{
 				Nonce:  nonce,
@@ -84,7 +84,7 @@ func TestOIDC_Exchange(t *testing.T) {
 		},
 		{
 			name:     "domain allowlist accepts via email domain fallback",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: tokenWithID("idtok")},
 			verify: &fakeVerifier{out: verifiedToken{
 				Nonce:  nonce,
@@ -102,17 +102,36 @@ func TestOIDC_Exchange(t *testing.T) {
 		},
 		{
 			name:     "allowlist rejects non-matching domain",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: tokenWithID("idtok")},
 			verify: &fakeVerifier{out: verifiedToken{
 				Nonce:  nonce,
 				Claims: idTokenClaims{Subject: "s3", Email: "intruder@evil.com", EmailVerified: true, HostedDomain: "evil.com"},
 			}},
-			wantErr: "not on the allowlist",
+			wantErr: "not allowed",
+		},
+		{
+			name:     "unverified email rejected before allowlist (decision #4)",
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
+			exchange: &fakeExchanger{token: tokenWithID("idtok")},
+			verify: &fakeVerifier{out: verifiedToken{
+				Nonce:  nonce,
+				Claims: idTokenClaims{Subject: "s5", Email: "a@corp.com", EmailVerified: false, HostedDomain: "corp.com"},
+			}},
+			wantErr: "email not verified",
+		},
+		{
+			name:     "multi-domain allowlist accepts second domain",
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com", "partner.io"}},
+			exchange: &fakeExchanger{token: tokenWithID("idtok")},
+			verify: &fakeVerifier{out: verifiedToken{
+				Nonce:  nonce,
+				Claims: idTokenClaims{Subject: "s6", Email: "p@partner.io", EmailVerified: true},
+			}},
 		},
 		{
 			name:     "nonce mismatch rejected",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: tokenWithID("idtok")},
 			verify: &fakeVerifier{out: verifiedToken{
 				Nonce:  "WRONG",
@@ -122,28 +141,28 @@ func TestOIDC_Exchange(t *testing.T) {
 		},
 		{
 			name:     "missing id_token rejected",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: &oauth2.Token{AccessToken: "at"}},
 			verify:   &fakeVerifier{},
 			wantErr:  "missing id_token",
 		},
 		{
 			name:     "code exchange failure propagates",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{err: errors.New("boom")},
 			verify:   &fakeVerifier{},
 			wantErr:  "code exchange",
 		},
 		{
 			name:     "verify failure propagates",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: tokenWithID("idtok")},
 			verify:   &fakeVerifier{err: errors.New("bad sig")},
 			wantErr:  "id_token verify",
 		},
 		{
 			name:     "missing sub/email rejected",
-			cfg:      config.OIDCConfig{AllowedDomain: "corp.com"},
+			cfg:      config.OIDCConfig{AllowedDomains: []string{"corp.com"}},
 			exchange: &fakeExchanger{token: tokenWithID("idtok")},
 			verify: &fakeVerifier{out: verifiedToken{
 				Nonce:  nonce,
@@ -171,15 +190,39 @@ func TestOIDC_Exchange(t *testing.T) {
 }
 
 func TestOIDC_AllowlistNoneConfigured(t *testing.T) {
-	// Defense in depth: with neither gate, checkAllowlist fails closed.
+	// Defense in depth: with neither gate AND a verified email, the access policy
+	// fails closed (decision #2). config.validate rejects this at boot, so this is
+	// the belt-and-suspenders check at the provider seam.
 	p := newOIDCProvider(
 		&fakeExchanger{token: tokenWithID("idtok")},
-		&fakeVerifier{out: verifiedToken{Nonce: "n", Claims: idTokenClaims{Subject: "s", Email: "a@b.com"}}},
+		&fakeVerifier{out: verifiedToken{Nonce: "n", Claims: idTokenClaims{Subject: "s", Email: "a@b.com", EmailVerified: true}}},
 		config.OIDCConfig{},
 	)
 	_, err := p.Exchange(context.Background(), "code", "verifier", "n")
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "no allowlist")
+	require.ErrorIs(t, err, ErrNotAllowed)
+}
+
+// TestOIDC_AdminEmailPromotion: a verified email in AdminEmails yields
+// claims.IsAdmin=true; a non-listed allowed email yields false.
+func TestOIDC_AdminEmailPromotion(t *testing.T) {
+	cfg := config.OIDCConfig{
+		AllowedDomains: []string{"corp.com"},
+		AdminEmails:    []string{"boss@corp.com"},
+	}
+	mk := func(email string) *OIDCProvider {
+		return newOIDCProvider(
+			&fakeExchanger{token: tokenWithID("idtok")},
+			&fakeVerifier{out: verifiedToken{Nonce: "n", Claims: idTokenClaims{Subject: "s", Email: email, EmailVerified: true, HostedDomain: "corp.com"}}},
+			cfg,
+		)
+	}
+	admin, err := mk("boss@corp.com").Exchange(context.Background(), "c", "v", "n")
+	require.NoError(t, err)
+	require.True(t, admin.IsAdmin)
+
+	normal, err := mk("worker@corp.com").Exchange(context.Background(), "c", "v", "n")
+	require.NoError(t, err)
+	require.False(t, normal.IsAdmin)
 }
 
 func lower(s string) string {

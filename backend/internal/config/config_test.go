@@ -125,7 +125,9 @@ func TestLoad_ProductionOIDCRequiresCreds(t *testing.T) {
 	msg := err.Error()
 	assert.Contains(t, msg, "KOTOJI_AUTH_OIDC_CLIENT_ID")
 	assert.Contains(t, msg, "KOTOJI_AUTH_OIDC_CLIENT_SECRET")
-	assert.Contains(t, msg, "KOTOJI_AUTH_GOOGLE_HD")
+	// Fail-closed: with neither allowlist configured, oidc refuses to boot.
+	assert.Contains(t, msg, "KOTOJI_OIDC_ALLOWED_EMAILS")
+	assert.Contains(t, msg, "KOTOJI_OIDC_ALLOWED_DOMAINS")
 }
 
 func TestLoad_ProductionOIDCHappyPath(t *testing.T) {
@@ -188,4 +190,100 @@ func TestLoad_DeriveHostInvalidURL(t *testing.T) {
 	_, err := LoadFromMap(env)
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "KOTOJI_CONTROL_BASE_URL"))
+}
+
+// TestParseAuthModes covers the pure set parser: legacy single values, comma
+// lists, normalization, dedup, the exclusive "none", and invalid entries.
+func TestParseAuthModes(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		wantModes []AuthMode
+		wantPrim  AuthMode
+		wantErr   bool
+	}{
+		{name: "legacy single oidc", raw: "oidc", wantModes: []AuthMode{AuthModeOIDC}, wantPrim: AuthModeOIDC},
+		{name: "legacy single password", raw: "password", wantModes: []AuthMode{AuthModePassword}, wantPrim: AuthModePassword},
+		{name: "legacy single none", raw: "none", wantModes: []AuthMode{AuthModeNone}, wantPrim: AuthModeNone},
+		{name: "set oidc+password", raw: "oidc,password", wantModes: []AuthMode{AuthModeOIDC, AuthModePassword}, wantPrim: AuthModeOIDC},
+		{name: "set reorders to normalized order", raw: "password,oidc", wantModes: []AuthMode{AuthModeOIDC, AuthModePassword}, wantPrim: AuthModeOIDC},
+		{name: "set dedups + trims + uppercases", raw: " OIDC , oidc , Password ", wantModes: []AuthMode{AuthModeOIDC, AuthModePassword}, wantPrim: AuthModeOIDC},
+		{name: "none exclusive with oidc -> error", raw: "none,oidc", wantErr: true},
+		{name: "invalid entry -> error", raw: "oidc,magic", wantErr: true},
+		{name: "empty -> error", raw: "  ", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			modes, prim, err := parseAuthModes(tc.raw)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantModes, modes)
+			assert.Equal(t, tc.wantPrim, prim)
+		})
+	}
+}
+
+// TestLoad_AuthModeSet_OIDCAndPassword is the headline break-glass config: oidc +
+// password enabled together, validated independently, with the legacy authMode
+// representative resolving to oidc (the primary human path).
+func TestLoad_AuthModeSet_OIDCAndPassword(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "oidc,password"
+	env["KOTOJI_AUTH_OIDC_CLIENT_ID"] = "client-123"
+	env["KOTOJI_AUTH_OIDC_CLIENT_SECRET"] = "secret-xyz"
+	env["KOTOJI_OIDC_ALLOWED_DOMAINS"] = "necorox.com"
+	env["KOTOJI_AUTH_ADMIN_PASSWORD"] = "break-glass-pw-1234"
+
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.True(t, cfg.OIDCEnabled())
+	assert.True(t, cfg.PasswordEnabled())
+	assert.False(t, cfg.NoAuthEnabled())
+	assert.Equal(t, AuthModeOIDC, cfg.AuthMode, "legacy representative is oidc when both are enabled")
+	assert.Equal(t, []string{"oidc", "password"}, cfg.AuthModeStrings())
+}
+
+// TestLoad_AuthModeSet_OIDCWithoutAllowlistFailsClosed: oidc enabled (even
+// alongside password) with empty allowlists is rejected at boot.
+func TestLoad_AuthModeSet_OIDCWithoutAllowlistFailsClosed(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "oidc,password"
+	env["KOTOJI_AUTH_OIDC_CLIENT_ID"] = "client-123"
+	env["KOTOJI_AUTH_OIDC_CLIENT_SECRET"] = "secret-xyz"
+	env["KOTOJI_AUTH_ADMIN_PASSWORD"] = "break-glass-pw-1234"
+	// No ALLOWED_EMAILS / ALLOWED_DOMAINS -> fail-closed.
+	_, err := LoadFromMap(env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fail-closed")
+}
+
+// TestLoad_OIDCAllowlists_Parsed checks the new env vars parse + normalize and
+// that the legacy GOOGLE_HD folds into AllowedDomains.
+func TestLoad_OIDCAllowlists_Parsed(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "oidc"
+	env["KOTOJI_AUTH_OIDC_CLIENT_ID"] = "client-123"
+	env["KOTOJI_AUTH_OIDC_CLIENT_SECRET"] = "secret-xyz"
+	env["KOTOJI_OIDC_ALLOWED_EMAILS"] = " Alice@Corp.com , bob@corp.com "
+	env["KOTOJI_OIDC_ALLOWED_DOMAINS"] = " Partner.io ,necorox.com"
+	env["KOTOJI_AUTH_GOOGLE_HD"] = "Legacy.com" // folds into AllowedDomains
+	env["KOTOJI_OIDC_ADMIN_EMAILS"] = "Alice@Corp.com"
+
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alice@corp.com", "bob@corp.com"}, cfg.OIDC.AllowedEmails)
+	assert.Equal(t, []string{"partner.io", "necorox.com", "legacy.com"}, cfg.OIDC.AllowedDomains)
+	assert.Equal(t, []string{"alice@corp.com"}, cfg.OIDC.AdminEmails)
+}
+
+// TestLoad_NoneExclusive: "none,password" is rejected by Load (exclusive).
+func TestLoad_NoneExclusive(t *testing.T) {
+	env := devBase()
+	env["KOTOJI_AUTH_MODE"] = "none,password"
+	_, err := LoadFromMap(env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exclusive")
 }

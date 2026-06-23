@@ -31,6 +31,11 @@ type Claims struct {
 	Name string
 	// HostedDomain is the Google `hd` claim (Workspace domain), "" if absent.
 	HostedDomain string
+	// IsAdmin is the provider-resolved instance-admin decision. The OIDC provider
+	// sets it from the KOTOJI_OIDC_ADMIN_EMAILS allowlist (decision #3); the
+	// password/dev providers leave it false (their admin status is governed by the
+	// single-admin promotion path in completeLogin, not this flag).
+	IsAdmin bool
 }
 
 // AuthProvider abstracts the login handshake so the OIDC, dev, and

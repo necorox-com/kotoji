@@ -39,11 +39,25 @@ const loginStateCookie = "kotoji_login"
 // stateNonceBytes is the entropy of the login state and nonce (256 bits each).
 const stateNonceBytes = 32
 
-// Auth is the assembled auth surface: provider + sessions + CSRF + handlers. It
-// is constructed once at composition and exposes RegisterRoutes + Middleware.
+// Auth is the assembled auth surface: provider SET + sessions + CSRF + handlers.
+// It is constructed once at composition and exposes RegisterRoutes + Middleware.
+//
+// MULTI-PROVIDER (break-glass): several providers can be enabled at once (e.g.
+// OIDC for humans + the single-admin password as emergency access). providers is
+// keyed by the auth-mode string ("oidc"/"password"/"none"); the login handlers
+// pick the right one per path (interactive GET redirect vs. password POST) so one
+// provider never disables the other.
 type Auth struct {
-	cfg      config.Config
-	provider AuthProvider
+	cfg config.Config
+	// providers is the set of ENABLED providers keyed by auth-mode string. At
+	// most one is interactive (oidc); at most one is the non-interactive
+	// password/dev provider.
+	providers map[string]AuthProvider
+	// interactive is the cached interactive provider (oidc), nil when not enabled.
+	// password is the non-interactive credential provider (password or dev).
+	interactive AuthProvider
+	password    AuthProvider
+
 	sessions *SessionManager
 	csrf     *CSRF
 	upserter UserUpserter
@@ -71,18 +85,45 @@ type UpsertLoginInput struct {
 	AvatarURL   *string
 }
 
-// New assembles the Auth surface. provider is chosen by the caller per
-// config.AuthMode (use ProviderFor). store backs sessions and the login upsert.
+// New assembles the Auth surface from a SINGLE provider. It is the back-compat
+// constructor (legacy single-mode + every existing unit test): the provider is
+// categorized by Interactive() so the right login path finds it. For the
+// multi-provider (break-glass) wiring use NewWithProviders.
 func New(cfg config.Config, store StoreDeps, provider AuthProvider) *Auth {
-	return &Auth{
-		cfg:      cfg,
-		provider: provider,
-		sessions: NewSessionManager(store, cfg.SessionCookieName, cfg.SessionTTL, cfg.CookieSecure),
-		csrf:     NewCSRF(cfg.CSRFCookieName, cfg.CookieSecure),
-		upserter: &storeUpserter{store: store},
-		store:    store,
-		signKey:  deriveSignKey(cfg),
+	return NewWithProviders(cfg, store, provider)
+}
+
+// NewWithProviders assembles the Auth surface from the SET of enabled providers
+// (decision #1: OIDC + password may be enabled concurrently). Providers are
+// categorized by Interactive(): the (single) interactive one drives the GET
+// /auth/login redirect + /auth/callback, the (single) non-interactive one drives
+// POST /auth/login. Passing them in any order is fine. store backs sessions and
+// the login upsert.
+func NewWithProviders(cfg config.Config, store StoreDeps, providers ...AuthProvider) *Auth {
+	a := &Auth{
+		cfg:       cfg,
+		providers: make(map[string]AuthProvider, len(providers)),
+		sessions:  NewSessionManager(store, cfg.SessionCookieName, cfg.SessionTTL, cfg.CookieSecure),
+		csrf:      NewCSRF(cfg.CSRFCookieName, cfg.CookieSecure),
+		upserter:  &storeUpserter{store: store},
+		store:     store,
+		signKey:   deriveSignKey(cfg),
 	}
+	for _, p := range providers {
+		if p == nil {
+			continue
+		}
+		a.providers[p.Key()] = p
+		// Categorize for the two login paths. The interactive provider (oidc) owns
+		// the redirect handshake; the non-interactive one (password/dev) owns the
+		// credential POST / instant-login. At most one of each is expected.
+		if p.Interactive() {
+			a.interactive = p
+		} else {
+			a.password = p
+		}
+	}
+	return a
 }
 
 // StoreDeps is the union of persistence the Auth surface needs. *db.Store
@@ -215,20 +256,29 @@ func (a *Auth) sign(msg string) string {
 
 // ---- handlers ----
 
-// LoginStart begins login. For an interactive provider (OIDC) it mints
-// state+nonce+PKCE, stores them in the signed cookie, and 302s to the IdP. For a
-// non-interactive provider (dev no-auth) it logs the user straight in.
+// LoginStart begins login. The GET path serves the INTERACTIVE providers: OIDC
+// (mint state+nonce+PKCE, store the signed cookie, 302 to the IdP) and the dev
+// no-auth instant login. The password break-glass provider has no GET handshake
+// (it uses POST /auth/login), so when only password is enabled this returns a 400
+// telling the caller to POST — and importantly it does NOT disable the password
+// path. An optional `?provider=` selects among enabled providers; it defaults to
+// the interactive provider (the primary human path) when present.
 func (a *Auth) LoginStart(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.URL.Query().Get("next"))
 
-	if !a.provider.Interactive() {
-		// Dev no-auth: instant login. (Password mode uses POST /auth/login.)
-		if a.cfg.AuthMode == config.AuthModeNone {
-			a.completeLogin(w, r, "", "", "", next)
-			return
-		}
-		// Password mode has no GET handshake; tell the caller to POST credentials.
-		writeError(w, r, http.StatusBadRequest, codeValidation, "password mode: POST /auth/login with a password")
+	// Resolve which provider this GET should drive. Default order: the interactive
+	// (oidc) provider, else the non-interactive dev provider for instant login.
+	prov := a.selectStartProvider(r.URL.Query().Get("provider"))
+	if prov == nil {
+		// No GET-capable provider is enabled (only password). Tell the caller to
+		// POST credentials; this never affects the still-mounted POST path.
+		writeError(w, r, http.StatusBadRequest, codeValidation, "this provider uses POST /auth/login with a credential")
+		return
+	}
+
+	if !prov.Interactive() {
+		// Dev no-auth (AUTH_MODE=none): instant login, no IdP redirect.
+		a.completeLogin(w, r, prov, "", "", "", next)
 		return
 	}
 
@@ -259,13 +309,48 @@ func (a *Auth) LoginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, a.provider.Start(state, nonce, verifier), http.StatusFound)
+	http.Redirect(w, r, prov.Start(state, nonce, verifier), http.StatusFound)
 }
 
-// LoginPassword handles the non-interactive password/dev submit (POST). The
-// password is read from the form/JSON body and verified by the provider.
+// selectStartProvider resolves which provider the GET /auth/login path drives. An
+// explicit `?provider=` key selects that enabled provider IF it is GET-capable
+// (interactive oidc or the dev no-auth provider); otherwise it falls back to the
+// default order: the interactive provider first (the primary human path), then the
+// dev no-auth provider. It returns nil when no GET-capable provider is enabled
+// (only the password break-glass provider) so the caller can 400 without
+// disabling the still-mounted POST path.
+func (a *Auth) selectStartProvider(requested string) AuthProvider {
+	if requested != "" {
+		if p, ok := a.providers[requested]; ok && a.getCapable(p) {
+			return p
+		}
+	}
+	if a.interactive != nil {
+		return a.interactive
+	}
+	// The dev no-auth provider is non-interactive but GET-capable (instant login).
+	if a.password != nil && a.password.Key() == devProviderKey {
+		return a.password
+	}
+	return nil
+}
+
+// getCapable reports whether a provider can be driven by GET /auth/login: the
+// interactive (oidc) one, or the dev no-auth instant-login provider. The password
+// provider is NOT (it needs the credential POST).
+func (a *Auth) getCapable(p AuthProvider) bool {
+	return p.Interactive() || p.Key() == devProviderKey
+}
+
+// LoginPassword handles the non-interactive credential submit (POST), i.e. the
+// password break-glass provider (and the dev provider's POST form). The password
+// is read from the form/JSON body and verified by that provider. It coexists with
+// the OIDC GET flow: enabling OIDC never disables this path.
 func (a *Auth) LoginPassword(w http.ResponseWriter, r *http.Request) {
-	if a.provider.Interactive() {
+	prov := a.password
+	if prov == nil {
+		// No non-interactive provider is enabled (oidc-only instance). The caller
+		// must use the redirect flow; this does not affect GET /auth/login.
 		writeError(w, r, http.StatusBadRequest, codeValidation, "this instance uses redirect-based login")
 		return
 	}
@@ -292,12 +377,17 @@ func (a *Auth) LoginPassword(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a.completeLogin(w, r, password, "", "", next)
+	a.completeLogin(w, r, prov, password, "", "", next)
 }
 
 // Callback completes the interactive (OIDC) login: verify the state cookie,
-// exchange the code, then materialize the session.
+// exchange the code, then materialize the session. It drives the interactive
+// provider; with no interactive provider enabled it 403s (no open callback).
 func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
+	if a.interactive == nil {
+		writeError(w, r, http.StatusForbidden, codeForbidden, "no redirect-based login is enabled")
+		return
+	}
 	q := r.URL.Query()
 	code := q.Get("code")
 	state := q.Get("state")
@@ -317,17 +407,19 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.completeLogin(w, r, code, ls.Verifier, ls.Nonce, ls.Next)
+	a.completeLogin(w, r, a.interactive, code, ls.Verifier, ls.Nonce, ls.Next)
 }
 
-// completeLogin is the shared tail of every login path: provider.Exchange ->
-// allowlist (inside the provider) -> upsert user+identity -> rotate session id ->
-// set cookies -> redirect. credential is the code (OIDC) or password (password
-// mode), ignored by the dev provider.
-func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, credential, verifier, nonce, next string) {
-	claims, err := a.provider.Exchange(r.Context(), credential, verifier, nonce)
+// completeLogin is the shared tail of every login path: prov.Exchange ->
+// access gate (inside the provider) -> upsert user+identity -> admin promotion ->
+// rotate session id -> set cookies -> redirect. credential is the code (OIDC) or
+// password (break-glass), ignored by the dev provider. prov is the specific
+// provider this path used, so the identity is linked under the right key and the
+// admin decision uses the right signal.
+func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, prov AuthProvider, credential, verifier, nonce, next string) {
+	claims, err := prov.Exchange(r.Context(), credential, verifier, nonce)
 	if err != nil {
-		// Distinguish a bad password (401) from an allowlist/verify reject (403).
+		// Distinguish a bad password (401) from an access/verify reject (403).
 		if errors.Is(err, ErrBadPassword) {
 			writeError(w, r, http.StatusUnauthorized, codeUnauthenticated, "invalid credentials")
 			return
@@ -338,7 +430,7 @@ func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, credential,
 
 	var avatar *string // OIDC profile may carry a picture; left nil here (least data)
 	user, err := a.upserter.UpsertLogin(r.Context(), UpsertLoginInput{
-		Provider:    a.provider.Key(),
+		Provider:    prov.Key(),
 		Subject:     claims.Subject,
 		Email:       claims.Email,
 		DisplayName: claims.Name,
@@ -349,10 +441,7 @@ func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, credential,
 		return
 	}
 
-	// PASSWORD mode: the single admin IS the instance admin (LOCKED decision), so
-	// every successful password login (re)asserts is_admin on that user. Never for
-	// oidc/none — promoteAdminIfPassword no-ops outside password mode.
-	a.promoteAdminIfPassword(r.Context(), user.ID)
+	a.applyAdmin(r.Context(), prov, user.ID, claims)
 
 	if !a.establishSession(w, r, user.ID) {
 		return // establishSession already wrote the error envelope
@@ -360,17 +449,26 @@ func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, credential,
 	http.Redirect(w, r, next, http.StatusFound)
 }
 
-// promoteAdminIfPassword sets is_admin=true on userID, but ONLY in single-admin
-// PASSWORD mode (the admin IS the instance admin). It is a no-op for oidc/none so
-// IdP-provisioned users are governed solely by the admin screen. A promotion
-// failure is logged-by-omission (best-effort): it must not break the login it
-// rides on, and the next login retries it. The gate is the auth MODE (config),
-// not the provider key, so it is correct even if a future provider reuses keys.
-func (a *Auth) promoteAdminIfPassword(ctx context.Context, userID uuid.UUID) {
-	if a.cfg.AuthMode != config.AuthModePassword {
-		return
+// applyAdmin promotes the user to is_admin when the login warrants it, reusing
+// the existing PromoteUserAdmin path for BOTH cases:
+//
+//   - PASSWORD provider: the single admin IS the instance admin (decision #1), so
+//     every successful break-glass login (re)asserts is_admin on that user.
+//   - OIDC provider: the verified email is in KOTOJI_OIDC_ADMIN_EMAILS (decision
+//     #3); the provider already resolved this into claims.IsAdmin.
+//
+// For the dev provider and non-admin OIDC users this is a no-op. A promotion
+// failure is best-effort (logged-by-omission): it must not break the login it
+// rides on, and the next login retries it.
+func (a *Auth) applyAdmin(ctx context.Context, prov AuthProvider, userID uuid.UUID, claims Claims) {
+	switch prov.Key() {
+	case passwordProviderKey:
+		_ = a.store.PromoteUserAdmin(ctx, userID)
+	case oidcProviderKey:
+		if claims.IsAdmin {
+			_ = a.store.PromoteUserAdmin(ctx, userID)
+		}
 	}
-	_ = a.store.PromoteUserAdmin(ctx, userID)
 }
 
 // establishSession rotates a fresh server-side session for userID, sets the
@@ -464,8 +562,10 @@ func (a *Auth) Setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// First-run admin IS the instance admin: promote so /settings + the admin API
-	// are reachable immediately after setup (PASSWORD mode only, by construction).
-	a.promoteAdminIfPassword(r.Context(), user.ID)
+	// are reachable immediately after setup. Setup is only reachable when the
+	// password break-glass provider is enabled and unconfigured (setupRequired),
+	// so promoting unconditionally here is correct by construction.
+	_ = a.store.PromoteUserAdmin(r.Context(), user.ID)
 	if err := a.store.SetAdminPasswordHash(r.Context(), string(hash)); err != nil {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "could not set the password")
 		return
@@ -522,16 +622,21 @@ func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
 // No auth required (security: [] in the spec).
 func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, instanceConfigJSON{
-		MaxUploadBytes:     a.cfg.Zip.MaxUploadBytes,
-		ZipMaxFiles:        a.cfg.Zip.MaxFiles,
-		ZipMaxTotalBytes:   a.cfg.Zip.MaxTotalBytes,
-		ZipMaxRatio:        a.cfg.Zip.MaxRatio,
-		AllowedExtensions:  a.cfg.Zip.AllowedExt,
-		HandleMinLen:       a.cfg.HandleMinLen,
-		HandleMaxLen:       a.cfg.HandleMaxLen,
-		ReservedHandles:    reservedHandles(),
-		BaseDomain:         a.cfg.BaseDomain,
+		MaxUploadBytes:    a.cfg.Zip.MaxUploadBytes,
+		ZipMaxFiles:       a.cfg.Zip.MaxFiles,
+		ZipMaxTotalBytes:  a.cfg.Zip.MaxTotalBytes,
+		ZipMaxRatio:       a.cfg.Zip.MaxRatio,
+		AllowedExtensions: a.cfg.Zip.AllowedExt,
+		HandleMinLen:      a.cfg.HandleMinLen,
+		HandleMaxLen:      a.cfg.HandleMaxLen,
+		ReservedHandles:   reservedHandles(),
+		BaseDomain:        a.cfg.BaseDomain,
+		// AuthMode is the LEGACY single representative (back-compat). AuthProviders
+		// is the full ENABLED set so the login page renders EACH provider (e.g.
+		// ["oidc","password"] for the break-glass config). Existing clients that
+		// only read authMode keep working unchanged.
 		AuthMode:           string(a.cfg.AuthMode),
+		AuthProviders:      a.cfg.AuthModeStrings(),
 		DefaultPublishMode: "direct",
 		// The instance can mirror only when the feature is enabled AND a push token
 		// is configured; the GUI keys per-site linking/sync controls off this so a
@@ -568,12 +673,13 @@ func (a *Auth) githubMirrorEnabled(ctx context.Context) bool {
 }
 
 // setupRequired reports whether the instance is in the first-run "set the admin
-// password" state: AUTH_MODE=password AND no env password AND no DB-stored hash.
-// For oidc/none modes it is always false (those modes have no setup screen). A
-// store read error is treated as "not required" (fail closed: do NOT advertise an
-// open setup endpoint on a DB blip — a real first-run instance reads cleanly).
+// password" state: the password provider is ENABLED (it may be enabled alongside
+// oidc — break-glass) AND no env password AND no DB-stored hash. When password is
+// not enabled it is always false (no setup screen). A store read error is treated
+// as "not required" (fail closed: do NOT advertise an open setup endpoint on a DB
+// blip — a real first-run instance reads cleanly).
 func (a *Auth) setupRequired(ctx context.Context) bool {
-	if a.cfg.AuthMode != config.AuthModePassword {
+	if !a.cfg.PasswordEnabled() {
 		return false
 	}
 	if a.cfg.AdminPassword != "" {
@@ -610,16 +716,19 @@ type userJSON struct {
 }
 
 type instanceConfigJSON struct {
-	MaxUploadBytes      int64    `json:"maxUploadBytes"`
-	ZipMaxFiles         int      `json:"zipMaxFiles"`
-	ZipMaxTotalBytes    int64    `json:"zipMaxTotalBytes"`
-	ZipMaxRatio         int      `json:"zipMaxRatio"`
-	AllowedExtensions   []string `json:"allowedExtensions"`
-	HandleMinLen        int      `json:"handleMinLen"`
-	HandleMaxLen        int      `json:"handleMaxLen"`
-	ReservedHandles     []string `json:"reservedHandles"`
-	BaseDomain          string   `json:"baseDomain"`
+	MaxUploadBytes    int64    `json:"maxUploadBytes"`
+	ZipMaxFiles       int      `json:"zipMaxFiles"`
+	ZipMaxTotalBytes  int64    `json:"zipMaxTotalBytes"`
+	ZipMaxRatio       int      `json:"zipMaxRatio"`
+	AllowedExtensions []string `json:"allowedExtensions"`
+	HandleMinLen      int      `json:"handleMinLen"`
+	HandleMaxLen      int      `json:"handleMaxLen"`
+	ReservedHandles   []string `json:"reservedHandles"`
+	BaseDomain        string   `json:"baseDomain"`
+	// AuthMode is the legacy single representative; AuthProviders is the full
+	// enabled set ("oidc"/"password"/"none") the login page renders.
 	AuthMode            string   `json:"authMode"`
+	AuthProviders       []string `json:"authProviders"`
 	DefaultPublishMode  string   `json:"defaultPublishMode"`
 	GithubMirrorEnabled bool     `json:"githubMirrorEnabled"`
 	SetupRequired       bool     `json:"setupRequired"`
@@ -726,13 +835,36 @@ func deriveSignKey(cfg config.Config) []byte {
 	return sum[:]
 }
 
-// ProviderFor builds the AuthProvider matching cfg.AuthMode. OIDC performs
-// discovery (network) so it takes a ctx; dev/password are local. The composition
-// root calls this once and passes the result to New. store supplies the DB-backed
-// admin-password hash to the password provider (first-run setup); it is unused by
-// the OIDC/dev providers and may be nil for those modes.
+// ProviderFor builds the single AuthProvider matching cfg.AuthMode (the LEGACY
+// representative). It is retained for back-compat / single-provider callers and
+// is implemented in terms of buildProvider. New composition code should call
+// ProvidersFor to build the full enabled set.
 func ProviderFor(ctx context.Context, cfg config.Config, store AdminHashStore) (AuthProvider, error) {
-	switch cfg.AuthMode {
+	return buildProvider(ctx, cfg.AuthMode, cfg, store)
+}
+
+// ProvidersFor builds the SET of enabled AuthProviders from cfg.AuthModes
+// (decision #1: oidc + password may be enabled concurrently). OIDC performs
+// discovery (network) so it takes a ctx; dev/password are local. The composition
+// root calls this once and passes the slice to NewWithProviders. store supplies
+// the DB-backed admin-password hash to the password provider (first-run setup);
+// it is unused by the OIDC/dev providers. Returns the providers in cfg.AuthModes
+// order (normalized: oidc, password, none).
+func ProvidersFor(ctx context.Context, cfg config.Config, store AdminHashStore) ([]AuthProvider, error) {
+	providers := make([]AuthProvider, 0, len(cfg.AuthModes))
+	for _, m := range cfg.AuthModes {
+		p, err := buildProvider(ctx, m, cfg, store)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	return providers, nil
+}
+
+// buildProvider constructs one provider for the given mode.
+func buildProvider(ctx context.Context, mode config.AuthMode, cfg config.Config, store AdminHashStore) (AuthProvider, error) {
+	switch mode {
 	case config.AuthModeOIDC:
 		return NewOIDCProvider(ctx, cfg.OIDC)
 	case config.AuthModePassword:
@@ -740,6 +872,6 @@ func ProviderFor(ctx context.Context, cfg config.Config, store AdminHashStore) (
 	case config.AuthModeNone:
 		return NewDevProvider(cfg), nil
 	default:
-		return nil, fmt.Errorf("auth: unknown auth mode %q", cfg.AuthMode)
+		return nil, fmt.Errorf("auth: unknown auth mode %q", mode)
 	}
 }

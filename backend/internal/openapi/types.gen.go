@@ -328,8 +328,13 @@ type HandleString = string
 
 // InstanceConfig defines model for InstanceConfig.
 type InstanceConfig struct {
-	AllowedExtensions  []string    `json:"allowedExtensions"`
-	AuthMode           AuthMode    `json:"authMode"`
+	AllowedExtensions []string `json:"allowedExtensions"`
+
+	// AuthMode LEGACY single representative of the enabled provider set, for back-compat. When several providers are enabled (e.g. oidc + password break-glass) this is the highest-priority one (oidc, then password, then none). New clients should read authProviders.
+	AuthMode AuthMode `json:"authMode"`
+
+	// AuthProviders The ENABLED auth providers, in normalized order (oidc, password, none). The login page renders one control per entry, so OIDC + the break-glass password can be offered concurrently. A single legacy KOTOJI_AUTH_MODE value yields a one-element array.
+	AuthProviders      *[]AuthMode `json:"authProviders,omitempty"`
 	BaseDomain         string      `json:"baseDomain"`
 	DefaultPublishMode PublishMode `json:"defaultPublishMode"`
 
