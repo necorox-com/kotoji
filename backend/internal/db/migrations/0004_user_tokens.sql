@@ -60,6 +60,13 @@ CREATE INDEX idx_user_tokens_prefix  ON user_tokens (token_prefix) WHERE revoked
 -- Token-management UI: list a user's own tokens.
 CREATE INDEX idx_user_tokens_user_id ON user_tokens (user_id);
 
+-- Existing audit rows still carry token_id values that referenced the now-dropped
+-- site_tokens; user_tokens starts empty, so EVERY non-null token_id is orphaned.
+-- NULL them before re-adding the FK (ADD CONSTRAINT validates existing rows, so a
+-- dangling reference would abort the migration). The trail keeps actor_user_id +
+-- metadata; only the (invalidated) token linkage is cleared.
+UPDATE audit_log SET token_id = NULL WHERE token_id IS NOT NULL;
+
 -- Re-point audit_log.token_id at the new table (ON DELETE SET NULL preserves the
 -- trail when a token is hard-deleted; revocation is soft so this rarely fires).
 ALTER TABLE audit_log
