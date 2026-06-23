@@ -21,12 +21,18 @@ export const queryKeys = {
   // Instance GitHub mirror config (admin-only; secret-safe view).
   adminGitHub: () => ["admin", "github"] as const,
 
+  // -------- tokens (per-user, account-level) --------
+  // The current user's MCP/API tokens (membership-capped; span all the user's
+  // projects). Owned by the user, not a site, so this lives at the top level
+  // (CANONICAL §6: tokens are per-user, not per-project).
+  tokens: () => ["tokens"] as const,
+
   // -------- sites --------
   sites: () => ["sites"] as const,
 
   /**
    * Per-site scoped keys. `.all` is the broad prefix to invalidate everything
-   * about one site (detail, files, branches, history, members, tokens).
+   * about one site (detail, files, branches, history, members).
    */
   site: (handle: string) => {
     const root = ["site", handle] as const;
@@ -51,7 +57,6 @@ export const queryKeys = {
       diff: (from: string, to = "") => [...root, "diff", from, to] as const,
 
       members: () => [...root, "members"] as const,
-      tokens: () => [...root, "tokens"] as const,
     };
   },
 } as const;

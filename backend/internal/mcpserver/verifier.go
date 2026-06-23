@@ -3,11 +3,16 @@
 // control plane only (never the data plane) and speaks Streamable HTTP via the
 // official Go SDK (github.com/modelcontextprotocol/go-sdk).
 //
-// The headline security property (CANONICAL §6, mcp.md §4): every token is bound
-// to exactly one site, and NO content tool accepts a site selector — the site is
-// always claims.SiteID. Cross-project access is therefore structurally
-// impossible, not merely checked. Scope enforcement (read ⊂ write ⊂ publish) and
-// in-site path/extension confinement live in the registry guard (registry.go).
+// The headline security property (CANONICAL §6, mcp.md §4): a token is OWNED BY A
+// USER, carries one scope set, and automatically covers every project the user is
+// a member of. Content tools DO take a site selector (a handle), but every call
+// is MEMBERSHIP-CAPPED: the site is resolved, the user's membership role is read,
+// and the EFFECTIVE scope is intersection(token.scopes, roleScopes(role)) — so a
+// token can only ever act within its user's own memberships and never exceed the
+// user's access. Non-membership 404s (no existence leak). This membership-capped
+// authorization REPLACES the old "no site selector / one token = one site" pin.
+// Scope enforcement (read ⊂ write ⊂ publish), the role intersection, and in-site
+// path/extension confinement all live in the registry guard (registry.go).
 package mcpserver
 
 import (
@@ -32,7 +37,7 @@ import (
 // us scan logs/repos for leaked tokens (CANONICAL §8, mcp.md §3.1).
 const tokenPrefix = "kotoji_pat_"
 
-// prefixLen is the number of leading plaintext chars stored in site_tokens.token_prefix
+// prefixLen is the number of leading plaintext chars stored in user_tokens.token_prefix
 // (DB CHECK enforces exactly 12). Used to narrow the indexed prefix lookup.
 const prefixLen = 12
 
@@ -44,7 +49,7 @@ const prefixLen = 12
 var noExpiry = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // claimsKey is the map key under TokenInfo.Extra where we stash the typed kotoji
-// claims so tool handlers can recover (SiteID, UserID, TokenID, CanCreateSites).
+// claims so tool handlers can recover (UserID, TokenID, Scopes, CanCreateSites).
 const claimsKey = "kotoji.claims"
 
 // errUnauthenticated is returned to a tool handler when the verified principal is
@@ -52,12 +57,13 @@ const claimsKey = "kotoji.claims"
 // but tools fail closed to a forbidden/unauthenticated result rather than panic.
 var errUnauthenticated = errors.New("mcpserver: unauthenticated")
 
-// TokenInfo is the typed principal a verified PAT resolves to. It pins the one
-// site the token may ever address and carries the creating user + capability flag.
+// TokenInfo is the typed principal a verified PAT resolves to. It carries the
+// owning user, the token id, the token's scope set, and the create-site flag. It
+// does NOT carry a site: a token spans ALL of the user's memberships, and the
+// per-site effective scope is resolved at call time (membership-capped, registry.go).
 // (Named per the task contract; distinct from the SDK's auth.TokenInfo.)
 type TokenInfo struct {
-	SiteID         uuid.UUID
-	UserID         uuid.UUID // the human the token acts as (site_tokens.created_by)
+	UserID         uuid.UUID // the human the token acts as (user_tokens.user_id)
 	TokenID        uuid.UUID
 	Scopes         []string // subset of {read,write,publish}
 	CanCreateSites bool     // gates create_site (CANONICAL §6.2 / decision #8)
@@ -68,12 +74,12 @@ type TokenInfo struct {
 // inject a fake. We depend on this interface — not the concrete Store — to keep
 // the verifier unit-testable without a database (DI per project conventions).
 type tokenQuerier interface {
-	// GetTokenByPrefix returns ACTIVE tokens (not revoked, not expired, creator
+	// GetUserTokenByPrefix returns ACTIVE tokens (not revoked, not expired, owner
 	// active) sharing token_prefix. The prefix is NOT unique by design; the
 	// verifier constant-time compares token_hash to select the exact row.
-	GetTokenByPrefix(ctx context.Context, tokenPrefix string) ([]gen.GetTokenByPrefixRow, error)
-	// TouchToken bumps last_used_at; called best-effort, never blocks the request.
-	TouchToken(ctx context.Context, id uuid.UUID) error
+	GetUserTokenByPrefix(ctx context.Context, tokenPrefix string) ([]gen.GetUserTokenByPrefixRow, error)
+	// TouchUserToken bumps last_used_at; called best-effort, never blocks the request.
+	TouchUserToken(ctx context.Context, id uuid.UUID) error
 }
 
 // compile-time guarantee: the real generated querier (and thus *db.Store) is a
@@ -115,9 +121,9 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 	}
 
 	// 2. Narrow by the indexed 12-char prefix among ACTIVE tokens. The DB query
-	// already filters revoked/expired/inactive-creator, but we re-check below so
+	// already filters revoked/expired/inactive-owner, but we re-check below so
 	// the contract holds even if the query is swapped.
-	rows, err := v.q.GetTokenByPrefix(ctx, token[:prefixLen])
+	rows, err := v.q.GetUserTokenByPrefix(ctx, token[:prefixLen])
 	if err != nil {
 		// Infrastructure error: NOT ErrInvalidToken → 500.
 		return nil, fmt.Errorf("mcpserver: token lookup: %w", err)
@@ -127,7 +133,7 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 	// Prefix is non-unique by design, so iterate; subtle.ConstantTimeCompare
 	// avoids leaking which candidate matched via timing.
 	sum := sha256.Sum256([]byte(token))
-	var match *gen.GetTokenByPrefixRow
+	var match *gen.GetUserTokenByPrefixRow
 	for i := range rows {
 		if subtle.ConstantTimeCompare(rows[i].TokenHash, sum[:]) == 1 {
 			match = &rows[i]
@@ -148,9 +154,9 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 		}
 		exp = match.ExpiresAt.Time
 	}
-	// Capability is the AND of the token flag and the creating user's flag
-	// (CANONICAL §6.2 / decision #8): a token can never exceed its creator.
-	canCreate := match.CanCreateSites && match.CreatorCanCreateSites
+	// Capability is the AND of the token flag and the owning user's flag
+	// (CANONICAL §6.2 / decision #8): a token can never exceed its owner.
+	canCreate := match.CanCreateSites && match.UserCanCreateSites
 
 	// 5. Best-effort last_used_at bump; never blocks/fails the request.
 	v.touch(match.ID)
@@ -158,11 +164,10 @@ func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*
 	return &auth.TokenInfo{
 		Scopes:     match.Scopes,
 		Expiration: exp,
-		UserID:     match.CreatedBy.String(),
+		UserID:     match.UserID.String(),
 		Extra: map[string]any{
 			claimsKey: TokenInfo{
-				SiteID:         match.SiteID,
-				UserID:         match.CreatedBy,
+				UserID:         match.UserID,
 				TokenID:        match.ID,
 				Scopes:         match.Scopes,
 				CanCreateSites: canCreate,
@@ -178,7 +183,7 @@ func (v *Verifier) touchAsync(id uuid.UUID) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		// Error is intentionally ignored: last_used_at is best-effort telemetry.
-		_ = v.q.TouchToken(ctx, id)
+		_ = v.q.TouchUserToken(ctx, id)
 	}()
 }
 

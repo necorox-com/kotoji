@@ -28,12 +28,18 @@ type Querier interface {
 	// and the SiteService git-init (Phase 2). The handle is pre-validated + collision-checked
 	// (sites/redirects/reserved) by the app before this call; the DB UNIQUE is the final guard.
 	CreateSite(ctx context.Context, arg CreateSiteParams) (Site, error)
-	// tokens.sql — per-site MCP/API tokens (hash-only storage).
-	// Columns match the 0001_init `site_tokens` DDL. Plaintext is shown once at create
-	// and never persisted; only token_hash (sha256, 32 bytes) + a 12-char prefix are stored.
-	// Issue a token. scopes is a subset of {read,write,publish}; can_create_sites gates the
-	// MCP create_site capability (default FALSE). Returns everything EXCEPT the hash.
-	CreateToken(ctx context.Context, arg CreateTokenParams) (CreateTokenRow, error)
+	// tokens.sql — per-USER MCP/API tokens (hash-only storage).
+	// Columns match the 0004 `user_tokens` DDL. A token is owned by a user and carries
+	// ONE scope set; it automatically covers all of that user's memberships. The
+	// effective scope on a given site is computed at call time (intersection with the
+	// membership role's scopes), so this table never stores a site binding. Plaintext
+	// is shown once at create and never persisted; only token_hash (sha256, 32 bytes)
+	// + a 12-char prefix are stored.
+	// Issue a token for a user. scopes is a subset of {read,write,publish};
+	// can_create_sites gates the MCP create_site capability (default FALSE, and
+	// additionally capped by users.can_create_sites at call time). Returns everything
+	// EXCEPT the hash.
+	CreateUserToken(ctx context.Context, arg CreateUserTokenParams) (CreateUserTokenRow, error)
 	// Janitor (system). Index on expires_at keeps this cheap.
 	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	// Remove one setting by key (idempotent: no-op when absent). Used to CLEAR a
@@ -72,17 +78,19 @@ type Querier interface {
 	// Resolver fallback: a former handle -> the current site row (data plane issues 301).
 	// Joins through handle_redirects; the target site must still be live.
 	GetSiteByRedirect(ctx context.Context, oldHandle string) (Site, error)
-	// Exact lookup by full hash (defense-in-depth / admin tooling). Active tokens only.
-	GetTokenByHash(ctx context.Context, tokenHash []byte) (GetTokenByHashRow, error)
-	// AUTH-BY-TOKEN HOT PATH (MCP/API). Narrow by indexed prefix among ACTIVE tokens; the
-	// caller then constant-time compares token_hash to pick the exact row (prefix is not
-	// unique by design). Joins the creating user so scope-capping can read their role/flags.
-	GetTokenByPrefix(ctx context.Context, tokenPrefix string) ([]GetTokenByPrefixRow, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	// LOGIN HOT PATH: (provider, subject) -> the active user row. Match on the stable
 	// OIDC `sub`, never email. Inactive (soft-disabled) users are rejected.
 	GetUserByIdentity(ctx context.Context, arg GetUserByIdentityParams) (User, error)
+	// Exact lookup by full hash (defense-in-depth / admin tooling). Active tokens only.
+	GetUserTokenByHash(ctx context.Context, tokenHash []byte) (GetUserTokenByHashRow, error)
+	// AUTH-BY-TOKEN HOT PATH (MCP/API). Narrow by indexed prefix among ACTIVE tokens; the
+	// caller then constant-time compares token_hash to pick the exact row (prefix is not
+	// unique by design). Joins the owning user so capability-capping can read their flags;
+	// per-site role capping happens later (GetRole at call time) since a token now spans
+	// ALL of the user's memberships.
+	GetUserTokenByPrefix(ctx context.Context, tokenPrefix string) ([]GetUserTokenByPrefixRow, error)
 	// One-shot collision check across live handles, redirects, and reserved words.
 	// Returns TRUE if the candidate handle is unavailable for any reason. Columns are
 	// table-qualified so the analyzer can resolve `handle` unambiguously across the UNION.
@@ -126,8 +134,8 @@ type Querier interface {
 	// activity first, with the viewer's effective role. An owner member row is maintained
 	// at create time so a single membership join suffices.
 	ListSitesForUser(ctx context.Context, arg ListSitesForUserParams) ([]ListSitesForUserRow, error)
-	// Token management UI. NEVER returns the hash.
-	ListTokensForSite(ctx context.Context, siteID uuid.UUID) ([]ListTokensForSiteRow, error)
+	// Token-management UI: a user's own tokens. NEVER returns the hash.
+	ListUserTokens(ctx context.Context, userID uuid.UUID) ([]ListUserTokensRow, error)
 	// Promote a user to instance admin (is_admin=true) WITHOUT touching
 	// can_create_sites. Used in PASSWORD mode only: the single admin IS the instance
 	// admin, so first-run setup and every password login promote that user. NEVER
@@ -138,8 +146,8 @@ type Querier interface {
 	RemoveReserved(ctx context.Context, handle string) error
 	// Step of the atomic rename (the redirect INSERT is InsertRedirect in the same tx).
 	RenameHandle(ctx context.Context, arg RenameHandleParams) error
-	// Soft revoke (instant). Scoped to the site to prevent cross-site revocation.
-	RevokeToken(ctx context.Context, arg RevokeTokenParams) error
+	// Soft revoke (instant). Scoped to the owner to prevent cross-user revocation.
+	RevokeUserToken(ctx context.Context, arg RevokeUserTokenParams) error
 	// Upsert one setting value (insert or overwrite). The updated_at trigger stamps
 	// the time on UPDATE; the INSERT default covers first write.
 	SetInstanceSetting(ctx context.Context, arg SetInstanceSettingParams) error
@@ -157,7 +165,7 @@ type Querier interface {
 	// Throttled by the caller (only when last_seen_at is stale enough).
 	TouchSession(ctx context.Context, id string) error
 	// Throttled last_used_at update; never on every call.
-	TouchToken(ctx context.Context, id uuid.UUID) error
+	TouchUserToken(ctx context.Context, id uuid.UUID) error
 	// Change an existing member's role (owner-only action enforced above the Store).
 	UpdateMemberRole(ctx context.Context, arg UpdateMemberRoleParams) error
 	// Owner-only settings edit (visibility, publish_mode, web_root, description).

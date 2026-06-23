@@ -56,15 +56,20 @@ func TestMigrationsUpDownRoundTrip(t *testing.T) {
 	require.Equal(t, len(ReservedHandlesBaseline), count,
 		"reserved_handles row count must match the Go baseline after 0002")
 
-	// Core tables must exist and be queryable.
+	// Core tables must exist and be queryable. After 0004 the token table is the
+	// per-user user_tokens; the per-project site_tokens is dropped.
 	for _, tbl := range []string{
 		"users", "user_identities", "sessions", "sites", "site_members",
-		"site_tokens", "handle_redirects", "reserved_handles", "audit_log",
+		"user_tokens", "handle_redirects", "reserved_handles", "audit_log",
 		"instance_settings",
 	} {
 		_, err := sqlDB.Exec("SELECT 1 FROM " + tbl + " LIMIT 0")
 		require.NoErrorf(t, err, "table %s must exist after up", tbl)
 	}
+
+	// The per-project site_tokens table must be GONE after the 0004 swap.
+	_, err0 := sqlDB.Exec("SELECT 1 FROM site_tokens LIMIT 0")
+	require.Error(t, err0, "site_tokens must NOT exist after the 0004 migration")
 
 	// The instance_settings key/value upsert round-trips (first-run admin hash path).
 	_, err := sqlDB.Exec(`INSERT INTO instance_settings (key, value) VALUES ('admin_password_hash', 'h1')`)

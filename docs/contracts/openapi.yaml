@@ -27,7 +27,7 @@ tags:
   - name: members
     description: Per-site membership and roles
   - name: tokens
-    description: Per-site MCP/API tokens
+    description: Per-user MCP/API tokens (membership-capped, span all the user's projects)
   - name: branches
     description: Git branches
   - name: files
@@ -360,13 +360,16 @@ paths:
         "409": { $ref: "#/components/responses/Conflict" }
 
   # ===================================================================== tokens
-  /api/sites/{handle}/tokens:
-    parameters:
-      - $ref: "#/components/parameters/Handle"
+  # Per-USER MCP/API tokens. A token is owned by the current user, carries ONE
+  # scope set + can_create_sites, and automatically covers every project the user
+  # is a member of. The EFFECTIVE scope on a given site is re-evaluated on every
+  # MCP request as intersection(token.scopes, the membership role's scopes), so a
+  # token can never exceed its user's own access (membership-capped authorization).
+  /api/tokens:
     get:
       tags: [tokens]
       operationId: listTokens
-      summary: List site tokens (never returns the secret or hash)
+      summary: List the current user's tokens (never returns the secret or hash)
       responses:
         "200":
           description: Tokens
@@ -380,12 +383,10 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/TokenSummary" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
     post:
       tags: [tokens]
       operationId: createToken
-      summary: Issue a site token (owner only; plaintext returned ONCE)
+      summary: Issue a token for the current user (plaintext returned ONCE)
       requestBody:
         required: true
         content:
@@ -399,21 +400,18 @@ paths:
               schema: { $ref: "#/components/schemas/CreatedToken" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "404": { $ref: "#/components/responses/NotFound" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
 
-  /api/sites/{handle}/tokens/{tokenId}:
+  /api/tokens/{tokenId}:
     parameters:
-      - $ref: "#/components/parameters/Handle"
       - $ref: "#/components/parameters/TokenId"
     delete:
       tags: [tokens]
       operationId: revokeToken
-      summary: Revoke a site token (owner only)
+      summary: Revoke one of the current user's own tokens
       responses:
         "204": { description: Revoked }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
   # ===================================================================== branches
@@ -1198,6 +1196,9 @@ components:
         createdAt: { type: string, format: date-time }
 
     # ---------- tokens ----------
+    # A token is owned by the current user and automatically covers all of that
+    # user's project memberships; the effective scope per site is the intersection
+    # of these scopes with the membership role's scopes, computed on every request.
     TokenSummary:
       type: object
       required: [id, name, tokenPrefix, scopes, canCreateSites, createdAt]
@@ -1208,7 +1209,7 @@ components:
         scopes:
           type: array
           items: { $ref: "#/components/schemas/TokenScope" }
-        canCreateSites: { type: boolean }
+        canCreateSites: { type: boolean, description: "may create sites via MCP; capped by users.can_create_sites" }
         createdAt: { type: string, format: date-time }
         lastUsedAt: { type: ["string", "null"], format: date-time }
         expiresAt: { type: ["string", "null"], format: date-time }
@@ -1222,7 +1223,7 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/TokenScope" }
-        canCreateSites: { type: boolean, default: false }
+        canCreateSites: { type: boolean, default: false, description: "request create-site capability; capped to false unless users.can_create_sites" }
         expiresAt: { type: ["string", "null"], format: date-time }
     CreatedToken:
       allOf:

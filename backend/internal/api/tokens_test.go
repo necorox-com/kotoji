@@ -9,12 +9,11 @@ import (
 )
 
 func TestTokens(t *testing.T) {
-	t.Run("owner issues a token; plaintext shown once with correct prefix", func(t *testing.T) {
+	t.Run("user issues a token; plaintext shown once with correct prefix", func(t *testing.T) {
 		e := newTestEnv(t)
-		owner := e.newUser()
-		e.createSite("tok-site", owner)
+		user := e.newUser()
 
-		rec := e.request(http.MethodPost, "/api/sites/tok-site/tokens").as(owner).
+		rec := e.request(http.MethodPost, "/api/tokens").as(user).
 			json(openapi.CreateTokenRequest{Name: "laptop", Scopes: []openapi.TokenScope{openapi.Read, openapi.Write}}).do()
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
@@ -34,46 +33,85 @@ func TestTokens(t *testing.T) {
 
 	t.Run("invalid scope is 422", func(t *testing.T) {
 		e := newTestEnv(t)
-		owner := e.newUser()
-		e.createSite("tok-bad-site", owner)
-		rec := e.request(http.MethodPost, "/api/sites/tok-bad-site/tokens").as(owner).
+		user := e.newUser()
+		rec := e.request(http.MethodPost, "/api/tokens").as(user).
 			json(openapi.CreateTokenRequest{Name: "x", Scopes: []openapi.TokenScope{"admin"}}).do()
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want 422", rec.Code)
 		}
 	})
 
-	t.Run("editor cannot issue tokens (403)", func(t *testing.T) {
+	t.Run("canCreateSites is capped by the user's account flag", func(t *testing.T) {
 		e := newTestEnv(t)
-		owner := e.newUser()
-		st := e.createSite("tok-deny-site", owner)
-		editor := e.newUser()
-		e.store.setRole(st.ID, editor.rec.ID, "editor")
-		rec := e.request(http.MethodPost, "/api/sites/tok-deny-site/tokens").as(editor).
-			json(openapi.CreateTokenRequest{Name: "x", Scopes: []openapi.TokenScope{openapi.Read}}).do()
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("status = %d, want 403", rec.Code)
+		// A user who is NOT allowed to create sites requests canCreateSites=true.
+		user := e.newUser(withNoCreate)
+		want := true
+		rec := e.request(http.MethodPost, "/api/tokens").as(user).
+			json(openapi.CreateTokenRequest{Name: "ci", Scopes: []openapi.TokenScope{openapi.Read}, CanCreateSites: &want}).do()
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var got openapi.CreatedToken
+		decodeBody(t, rec, &got)
+		if got.CanCreateSites {
+			t.Fatalf("canCreateSites = true, want false (capped by users.can_create_sites)")
 		}
 	})
 
-	t.Run("list never returns the secret, then revoke is idempotent 204", func(t *testing.T) {
+	t.Run("canCreateSites granted when the user is allowed", func(t *testing.T) {
+		e := newTestEnv(t)
+		user := e.newUser() // default CanCreateSites=true
+		want := true
+		rec := e.request(http.MethodPost, "/api/tokens").as(user).
+			json(openapi.CreateTokenRequest{Name: "ci", Scopes: []openapi.TokenScope{openapi.Write}, CanCreateSites: &want}).do()
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 (body=%s)", rec.Code, rec.Body.String())
+		}
+		var got openapi.CreatedToken
+		decodeBody(t, rec, &got)
+		if !got.CanCreateSites {
+			t.Fatalf("canCreateSites = false, want true (user is create-capable)")
+		}
+	})
+
+	t.Run("list returns only the caller's own tokens, never the secret; revoke is idempotent 204", func(t *testing.T) {
 		e := newTestEnv(t)
 		owner := e.newUser()
-		e.createSite("tok-life-site", owner)
-		crec := e.request(http.MethodPost, "/api/sites/tok-life-site/tokens").as(owner).
+		other := e.newUser()
+
+		crec := e.request(http.MethodPost, "/api/tokens").as(owner).
 			json(openapi.CreateTokenRequest{Name: "ci", Scopes: []openapi.TokenScope{openapi.Publish}}).do()
 		var created openapi.CreatedToken
 		decodeBody(t, crec, &created)
 
-		lrec := e.request(http.MethodGet, "/api/sites/tok-life-site/tokens").as(owner).do()
+		// owner sees exactly one token; the secret is never echoed.
+		lrec := e.request(http.MethodGet, "/api/tokens").as(owner).do()
 		if lrec.Code != http.StatusOK {
 			t.Fatalf("list status = %d", lrec.Code)
 		}
 		if strings.Contains(lrec.Body.String(), created.Token) {
 			t.Fatalf("token list leaked the plaintext secret")
 		}
+		var owned struct {
+			Tokens []openapi.TokenSummary `json:"tokens"`
+		}
+		decodeBody(t, lrec, &owned)
+		if len(owned.Tokens) != 1 {
+			t.Fatalf("owner token count = %d, want 1", len(owned.Tokens))
+		}
 
-		rrec := e.request(http.MethodDelete, "/api/sites/tok-life-site/tokens/"+created.Id.String()).as(owner).do()
+		// A DIFFERENT user's list does NOT include owner's token (per-user scoping).
+		orec := e.request(http.MethodGet, "/api/tokens").as(other).do()
+		var others struct {
+			Tokens []openapi.TokenSummary `json:"tokens"`
+		}
+		decodeBody(t, orec, &others)
+		if len(others.Tokens) != 0 {
+			t.Fatalf("other user saw %d tokens, want 0 (cross-user leak)", len(others.Tokens))
+		}
+
+		// owner revokes their own token -> 204; idempotent.
+		rrec := e.request(http.MethodDelete, "/api/tokens/"+created.Id.String()).as(owner).do()
 		if rrec.Code != http.StatusNoContent {
 			t.Fatalf("revoke status = %d", rrec.Code)
 		}

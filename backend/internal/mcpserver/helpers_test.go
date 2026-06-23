@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -35,20 +38,20 @@ func reqFor(c TokenInfo) *mcp.CallToolRequest {
 type fakeTokenStore struct {
 	mu sync.Mutex
 	// rows keyed by the 12-char prefix; the slice models the non-unique-prefix case.
-	rows map[string][]gen.GetTokenByPrefixRow
-	// prefixErr, when set, is returned from GetTokenByPrefix (DB-error path).
+	rows map[string][]gen.GetUserTokenByPrefixRow
+	// prefixErr, when set, is returned from GetUserTokenByPrefix (DB-error path).
 	prefixErr error
-	// touched counts TouchToken calls (async last_used_at bump assertions).
+	// touched counts TouchUserToken calls (async last_used_at bump assertions).
 	touched int64
-	// touchErr makes TouchToken fail (must never affect the request).
+	// touchErr makes TouchUserToken fail (must never affect the request).
 	touchErr error
 }
 
 func newFakeTokenStore() *fakeTokenStore {
-	return &fakeTokenStore{rows: make(map[string][]gen.GetTokenByPrefixRow)}
+	return &fakeTokenStore{rows: make(map[string][]gen.GetUserTokenByPrefixRow)}
 }
 
-func (f *fakeTokenStore) GetTokenByPrefix(_ context.Context, prefix string) ([]gen.GetTokenByPrefixRow, error) {
+func (f *fakeTokenStore) GetUserTokenByPrefix(_ context.Context, prefix string) ([]gen.GetUserTokenByPrefixRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.prefixErr != nil {
@@ -57,7 +60,7 @@ func (f *fakeTokenStore) GetTokenByPrefix(_ context.Context, prefix string) ([]g
 	return f.rows[prefix], nil
 }
 
-func (f *fakeTokenStore) TouchToken(_ context.Context, _ uuid.UUID) error {
+func (f *fakeTokenStore) TouchUserToken(_ context.Context, _ uuid.UUID) error {
 	atomic.AddInt64(&f.touched, 1)
 	return f.touchErr
 }
@@ -67,42 +70,42 @@ func (f *fakeTokenStore) TouchToken(_ context.Context, _ uuid.UUID) error {
 func (f *fakeTokenStore) dropAll() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.rows = make(map[string][]gen.GetTokenByPrefixRow)
+	f.rows = make(map[string][]gen.GetUserTokenByPrefixRow)
 }
 
 // tokenOpts configures a seeded token. Zero value = active, non-revoked.
 type tokenOpts struct {
-	scopes           []string
-	expiresAt        *time.Time
-	canCreateSites   bool // token-level flag
-	creatorCanCreate bool // creating-user flag (effective = AND of both)
-	creatorInactive  bool // when true the row is NOT returned (models the DB filter)
-	revoked          bool // when true the row is NOT returned (models the DB filter)
+	scopes        []string
+	expiresAt     *time.Time
+	canCreateSites bool // token-level flag
+	userCanCreate  bool // owning-user flag (effective = AND of both)
+	userInactive   bool // when true the row is NOT returned (models the DB filter)
+	revoked        bool // when true the row is NOT returned (models the DB filter)
 }
 
-// seedToken creates a token with the given plaintext, site and options, storing
-// its sha256 hash + prefix exactly as production does. Returns the plaintext.
-func (f *fakeTokenStore) seedToken(plaintext string, siteID, userID, tokenID uuid.UUID, o tokenOpts) string {
+// seedToken creates a token with the given plaintext, owner and options, storing
+// its sha256 hash + prefix exactly as production does. A token is now per-USER (no
+// site binding). Returns the plaintext.
+func (f *fakeTokenStore) seedToken(plaintext string, userID, tokenID uuid.UUID, o tokenOpts) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	// The real GetTokenByPrefix query excludes revoked tokens AND tokens whose
-	// creating user is inactive; model both by NOT storing the row in those cases.
-	if o.revoked || o.creatorInactive {
+	// The real GetUserTokenByPrefix query excludes revoked tokens AND tokens whose
+	// owning user is inactive; model both by NOT storing the row in those cases.
+	if o.revoked || o.userInactive {
 		return plaintext
 	}
 	sum := sha256.Sum256([]byte(plaintext))
-	row := gen.GetTokenByPrefixRow{
-		ID:                    tokenID,
-		SiteID:                siteID,
-		CreatedBy:             userID,
-		Name:                  "test",
-		TokenPrefix:           plaintext[:prefixLen],
-		TokenHash:             sum[:],
-		Scopes:                o.scopes,
-		CanCreateSites:        o.canCreateSites,
-		ExpiresAt:             timestamptz(o.expiresAt),
-		CreatorActive:         true,
-		CreatorCanCreateSites: o.creatorCanCreate,
+	row := gen.GetUserTokenByPrefixRow{
+		ID:                 tokenID,
+		UserID:             userID,
+		Name:               "test",
+		TokenPrefix:        plaintext[:prefixLen],
+		TokenHash:          sum[:],
+		Scopes:             o.scopes,
+		CanCreateSites:     o.canCreateSites,
+		ExpiresAt:          timestamptz(o.expiresAt),
+		UserActive:         true,
+		UserCanCreateSites: o.userCanCreate,
 	}
 	pfx := plaintext[:prefixLen]
 	f.rows[pfx] = append(f.rows[pfx], row)
@@ -124,22 +127,116 @@ func scopeChain(top scope) []string {
 	}
 }
 
-// newTestRegistry builds a registry over a FakeService for direct handler tests
-// (bypassing the SDK transport). Limits use a permissive deterministic limiter
-// unless overridden.
-func newTestRegistry(svc site.Service) *registry {
-	return &registry{
-		svc:    svc,
-		limits: DefaultLimits(),
-		log:    nil,
-		cfg:    Deps{BaseDomain: "hosting.test", Scheme: "https"},
+// fakeMembers is an in-memory membershipQuerier for handler/authz tests: per-site
+// roles, a membership list per user, and a user table for the create-site gate.
+type fakeMembers struct {
+	mu sync.Mutex
+	// roles keyed by (siteID|userID) -> role; absence => no membership (pgx.ErrNoRows).
+	roles map[string]gen.SiteRole
+	// siteRows keyed by siteID -> the row template used to build a list result.
+	siteRows map[uuid.UUID]gen.ListSitesForUserRow
+	// users by id (account flags for create_site).
+	users map[uuid.UUID]gen.User
+	// roleErr, when set, is returned from GetRole (infra-error path).
+	roleErr error
+}
+
+func newFakeMembers() *fakeMembers {
+	return &fakeMembers{
+		roles:    map[string]gen.SiteRole{},
+		siteRows: map[uuid.UUID]gen.ListSitesForUserRow{},
+		users:    map[uuid.UUID]gen.User{},
 	}
 }
 
-// claims builds a TokenInfo principal pinned to siteID with the given scope chain.
-func claims(siteID, userID uuid.UUID, top scope, canCreate bool) TokenInfo {
+func memberKey(siteID, userID uuid.UUID) string { return siteID.String() + "|" + userID.String() }
+
+// grant records a user's role on a site (and a site row for list_sites). The site
+// metadata (handle, default branch) is taken from the FakeService site so URLs and
+// the list result line up with the seeded site.
+func (m *fakeMembers) grant(s site.Site, userID uuid.UUID, role gen.SiteRole) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.roles[memberKey(s.ID, userID)] = role
+	m.siteRows[s.ID] = gen.ListSitesForUserRow{
+		ID:            s.ID,
+		Handle:        string(s.Handle),
+		OwnerID:       s.OwnerID,
+		DefaultBranch: string(s.DefaultBranch),
+		UpdatedAt:     pgtype.Timestamptz{Time: s.UpdatedAt, Valid: true},
+	}
+}
+
+// addUser registers a user's account flags (for the create_site gate).
+func (m *fakeMembers) addUser(u gen.User) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.users[u.ID] = u
+}
+
+func (m *fakeMembers) GetRole(_ context.Context, arg gen.GetRoleParams) (gen.SiteRole, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.roleErr != nil {
+		return "", m.roleErr
+	}
+	role, ok := m.roles[memberKey(arg.SiteID, arg.UserID)]
+	if !ok {
+		return "", pgx.ErrNoRows
+	}
+	return role, nil
+}
+
+func (m *fakeMembers) ListSitesForUser(_ context.Context, arg gen.ListSitesForUserParams) ([]gen.ListSitesForUserRow, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []gen.ListSitesForUserRow{}
+	for key, role := range m.roles {
+		// key is "siteID|userID"; only this user's memberships.
+		var sid, uid uuid.UUID
+		parts := strings.SplitN(key, "|", 2)
+		sid, _ = uuid.Parse(parts[0])
+		uid, _ = uuid.Parse(parts[1])
+		if uid != arg.UserID {
+			continue
+		}
+		row := m.siteRows[sid]
+		row.Role = role
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+func (m *fakeMembers) GetUserByID(_ context.Context, id uuid.UUID) (gen.User, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[id]
+	if !ok {
+		return gen.User{}, pgx.ErrNoRows
+	}
+	return u, nil
+}
+
+// newTestRegistry builds a registry over a FakeService for direct handler tests
+// (bypassing the SDK transport). Limits use a permissive deterministic limiter
+// unless overridden. A fresh fakeMembers is attached; tests grant roles via it.
+func newTestRegistry(svc site.Service) *registry {
+	return &registry{
+		svc:     svc,
+		members: newFakeMembers(),
+		limits:  DefaultLimits(),
+		log:     nil,
+		cfg:     Deps{BaseDomain: "hosting.test", Scheme: "https"},
+	}
+}
+
+// fakeMembersOf returns the registry's membership fake (set by newTestRegistry).
+func fakeMembersOf(r *registry) *fakeMembers { return r.members.(*fakeMembers) }
+
+// claims builds a TokenInfo principal for userID with the given scope chain. A
+// token is per-USER now (no site binding); the site is supplied per call.
+func claims(userID uuid.UUID, top scope, canCreate bool) TokenInfo {
 	return TokenInfo{
-		SiteID:         siteID,
 		UserID:         userID,
 		TokenID:        uuid.New(),
 		Scopes:         scopeChain(top),
@@ -164,6 +261,21 @@ func seedSite(t testingTB, svc *site.FakeService, owner uuid.UUID, handle string
 	}
 	_ = files
 	return s, ref.SHA
+}
+
+// seedSiteR creates a site in the registry's FakeService AND grants `owner` the
+// owner role on it (plus registers the owner as a create-capable user), so the
+// membership-cap authz lets the owner act on it. Returns the site + draft tip SHA.
+// This is the per-USER-token replacement for the old "token == site" seeding: a
+// content tool call must now BOTH name the site AND have a membership on it.
+func seedSiteR(t testingTB, r *registry, owner uuid.UUID, handle string) (site.Site, string) {
+	t.Helper()
+	fake := r.svc.(*site.FakeService)
+	s, base := seedSite(t, fake, owner, handle)
+	m := fakeMembersOf(r)
+	m.grant(s, owner, gen.SiteRoleOwner)
+	m.addUser(gen.User{ID: owner, CanCreateSites: true, IsActive: true})
+	return s, base
 }
 
 // testingTB is the subset of testing.TB the helpers need (keeps the helper file

@@ -36,21 +36,26 @@ export {
 export { UploadDropzone, type UploadDropzoneProps } from "./upload-dropzone";
 
 // Project-management cluster (design.md §3.3): branch bar, publish, history,
-// members, create-site, MCP tokens.
+// members, create-site. (MCP tokens are now PER-USER — see AccountTokenPanel on
+// the account /settings page, not here.)
 export { BranchBar, type BranchBarProps } from "./branch-bar";
 export { PublishPanel, type PublishPanelProps } from "./publish-panel";
 export { HistoryTimeline, type HistoryTimelineProps } from "./history-timeline";
 export { MemberTable, type MemberTableProps } from "./member-table";
 export { CreateSiteForm, type CreateSiteFormProps } from "./create-site-form";
-export { McpTokenPanel, type McpTokenPanelProps } from "./mcp-token-panel";
 export { GitHubSection, type GitHubSectionProps } from "./github-section";
 
-// Instance Settings cluster (/settings): instance-wide GitHub mirror config
-// (admin-only) + the MCP connection guide (everyone).
+// Instance / account Settings cluster (/settings): instance-wide GitHub mirror
+// config (admin-only), the per-user MCP/API token panel (everyone), and the MCP
+// connection guide (everyone).
 export {
   GitHubAdminSection,
   type GitHubAdminSectionProps,
 } from "./github-admin-section";
+export {
+  AccountTokenPanel,
+  type AccountTokenPanelProps,
+} from "./account-token-panel";
 export {
   McpGuideSection,
   type McpGuideSectionProps,

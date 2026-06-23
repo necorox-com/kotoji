@@ -8,11 +8,13 @@
  *
  * Two orthogonal axes exist in the contract; this module covers the per-site
  * ROLE axis (owner | editor | viewer). The token-SCOPE axis is enforced
- * server-side and surfaced separately in McpTokenPanel (scope chips).
+ * server-side: under the re-architected model (CANONICAL §6) a per-user token's
+ * EFFECTIVE scope on a site is intersection(token scopes, the user's membership-
+ * role scopes), so there is NO per-site "manage tokens" capability — token
+ * issuance is account-level (AccountTokenPanel on /settings).
  *
  * Pure data + functions (no React) so it is unit-testable and reusable by any
- * organism. Imported by BranchBar, PublishPanel, HistoryTimeline, MemberTable,
- * McpTokenPanel.
+ * organism. Imported by BranchBar, PublishPanel, HistoryTimeline, MemberTable.
  */
 
 import type { PublishMode, SiteRole } from "./types";
@@ -25,7 +27,6 @@ export type Capability =
   | "rename" // rename handle
   | "deleteSite" // soft-delete the site
   | "manageMembers" // add/remove/role members
-  | "manageTokens" // issue / revoke site tokens
   | "manageSettings"; // visibility / publish_mode / web_root / GitHub mirror
 
 /**
@@ -41,7 +42,6 @@ const ROLE_CAPS: Record<SiteRole, Record<Capability, boolean>> = {
     rename: true,
     deleteSite: true,
     manageMembers: true,
-    manageTokens: true,
     manageSettings: true,
   },
   editor: {
@@ -51,7 +51,6 @@ const ROLE_CAPS: Record<SiteRole, Record<Capability, boolean>> = {
     rename: false,
     deleteSite: false,
     manageMembers: false,
-    manageTokens: false,
     manageSettings: false,
   },
   viewer: {
@@ -61,7 +60,6 @@ const ROLE_CAPS: Record<SiteRole, Record<Capability, boolean>> = {
     rename: false,
     deleteSite: false,
     manageMembers: false,
-    manageTokens: false,
     manageSettings: false,
   },
 };

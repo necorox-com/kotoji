@@ -4,16 +4,19 @@
  * McpGuideSection (organism) — the "MCP 接続ガイド / Connect via MCP" tutorial on
  * the /settings page. Shown to EVERYONE (any authenticated user), not just
  * admins. It is read-only documentation: how to point an AI client (Claude Code
- * / Claude Desktop) at this instance's MCP endpoint using a per-project token.
+ * / Claude Desktop) at this instance's MCP endpoint using ONE per-user token.
+ *
+ * Under the re-architected token model (CANONICAL §6) a token is owned by the
+ * USER and automatically covers EVERY project they're a member of, so a single
+ * token works across all your projects; the MCP tools now take a `site` (project
+ * handle) selector. This guide therefore points at the account-level "MCP / API
+ * トークン" section right above it (same /settings page).
  *
  * The MCP endpoint URL is rendered DYNAMICALLY from the live origin
  * (`${location.origin}/mcp`) so the copy snippets are correct on any deployment
  * without baked-in config. We read the origin only AFTER mount (via the
  * useMounted idiom — same as UserMenu) to avoid an SSR/hydration mismatch; a
  * neutral placeholder shows during the server render.
- *
- * Per-project tokens are minted on a project's Settings → MCP tokens (the
- * McpTokenPanel); this guide links there rather than duplicating that flow.
  */
 
 import { useSyncExternalStore } from "react";
@@ -37,9 +40,14 @@ import {
 const ORIGIN_PLACEHOLDER = "https://kotoji.example.com";
 
 // The MCP tools a connected client can call (mcp.md surface). Listed verbatim so
-// users know exactly what their AI assistant can do once connected.
+// users know exactly what their AI assistant can do once connected. Every tool
+// except list_sites/create_site takes a `site` (project handle) selector; the
+// token's user must be a member of that project (membership-capped). `list_sites`
+// returns the projects you can act on (with effective scope per site);
+// `create_site` is gated by the token's + the user's can_create_sites.
 const MCP_TOOLS = [
   "list_sites",
+  "create_site",
   "list_files",
   "read_file",
   "write_file",
@@ -48,6 +56,7 @@ const MCP_TOOLS = [
   "get_diff",
   "get_log",
   "rollback",
+  "create_branch",
 ] as const;
 
 /** useMounted — true only after client mount (codebase idiom; UserMenu §4.4). */
@@ -123,7 +132,7 @@ export function McpGuideSection({ className }: McpGuideSectionProps) {
           <CopyableUrl value={endpoint} className="max-w-md" />
         </section>
 
-        {/* 2. Per-project token — link to the project Settings → MCP tokens. */}
+        {/* 2. One per-user token — points at the account token section above. */}
         <section className="space-y-2" aria-labelledby="mcp-guide-token">
           <h3
             id="mcp-guide-token"
@@ -134,7 +143,7 @@ export function McpGuideSection({ className }: McpGuideSectionProps) {
           <p className="text-sm text-muted-foreground">
             {t.rich("mcpTokenBody", {
               link: (chunks) => (
-                <Link href="/dashboard" variant="inline">
+                <Link href="#tokens-heading" variant="inline">
                   {chunks}
                 </Link>
               ),

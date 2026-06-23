@@ -188,6 +188,7 @@ type CreateSiteRequest struct {
 
 // CreateTokenRequest defines model for CreateTokenRequest.
 type CreateTokenRequest struct {
+	// CanCreateSites request create-site capability; capped to false unless users.can_create_sites
 	CanCreateSites *bool        `json:"canCreateSites,omitempty"`
 	ExpiresAt      *time.Time   `json:"expiresAt"`
 	Name           string       `json:"name"`
@@ -196,6 +197,7 @@ type CreateTokenRequest struct {
 
 // CreatedToken defines model for CreatedToken.
 type CreatedToken struct {
+	// CanCreateSites may create sites via MCP; capped by users.can_create_sites
 	CanCreateSites bool               `json:"canCreateSites"`
 	CreatedAt      time.Time          `json:"createdAt"`
 	ExpiresAt      *time.Time         `json:"expiresAt"`
@@ -310,10 +312,9 @@ type GitHubAdminConfig struct {
 // GitHubAdminConfigUpdate Partial update of the instance GitHub mirror config. All fields optional; absent fields are unchanged. The token is write-only (empty/absent keeps the stored one; clearToken removes it).
 type GitHubAdminConfigUpdate struct {
 	// ClearToken When true, remove the stored token (reverts to the env token if any).
-	ClearToken *bool `json:"clearToken,omitempty"`
-
-	Enabled *bool   `json:"enabled,omitempty"`
-	Org     *string `json:"org,omitempty"`
+	ClearToken *bool   `json:"clearToken,omitempty"`
+	Enabled    *bool   `json:"enabled,omitempty"`
+	Org        *string `json:"org,omitempty"`
 
 	// Token New push PAT/app token (write-only; stored encrypted at rest). Empty/absent keeps the existing token.
 	Token *string `json:"token,omitempty"`
@@ -508,6 +509,7 @@ type TokenScope string
 
 // TokenSummary defines model for TokenSummary.
 type TokenSummary struct {
+	// CanCreateSites may create sites via MCP; capped by users.can_create_sites
 	CanCreateSites bool               `json:"canCreateSites"`
 	CreatedAt      time.Time          `json:"createdAt"`
 	ExpiresAt      *time.Time         `json:"expiresAt"`
@@ -713,6 +715,9 @@ type AuthLoginParams struct {
 	// Next Post-login redirect target (validated server-side).
 	Next *string `form:"next,omitempty" json:"next,omitempty"`
 }
+
+// AdminPutGitHubJSONRequestBody defines body for AdminPutGitHub for application/json ContentType.
+type AdminPutGitHubJSONRequestBody = GitHubAdminConfigUpdate
 
 // CreateSiteJSONRequestBody defines body for CreateSite for application/json ContentType.
 type CreateSiteJSONRequestBody = CreateSiteRequest

@@ -208,19 +208,17 @@ export interface paths {
         patch: operations["updateMemberRole"];
         trace?: never;
     };
-    "/api/sites/{handle}/tokens": {
+    "/api/tokens": {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                handle: components["parameters"]["Handle"];
-            };
+            path?: never;
             cookie?: never;
         };
-        /** List site tokens (never returns the secret or hash) */
+        /** List the current user's tokens (never returns the secret or hash) */
         get: operations["listTokens"];
         put?: never;
-        /** Issue a site token (owner only; plaintext returned ONCE) */
+        /** Issue a token for the current user (plaintext returned ONCE) */
         post: operations["createToken"];
         delete?: never;
         options?: never;
@@ -228,12 +226,11 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/sites/{handle}/tokens/{tokenId}": {
+    "/api/tokens/{tokenId}": {
         parameters: {
             query?: never;
             header?: never;
             path: {
-                handle: components["parameters"]["Handle"];
                 tokenId: components["parameters"]["TokenId"];
             };
             cookie?: never;
@@ -241,7 +238,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Revoke a site token (owner only) */
+        /** Revoke one of the current user's own tokens */
         delete: operations["revokeToken"];
         options?: never;
         head?: never;
@@ -716,6 +713,7 @@ export interface components {
             /** @description first 12 chars of the plaintext */
             tokenPrefix: string;
             scopes: components["schemas"]["TokenScope"][];
+            /** @description may create sites via MCP; capped by users.can_create_sites */
             canCreateSites: boolean;
             /** Format: date-time */
             createdAt: string;
@@ -729,7 +727,10 @@ export interface components {
         CreateTokenRequest: {
             name: string;
             scopes: components["schemas"]["TokenScope"][];
-            /** @default false */
+            /**
+             * @description request create-site capability; capped to false unless users.can_create_sites
+             * @default false
+             */
             canCreateSites: boolean;
             /** Format: date-time */
             expiresAt?: string | null;
@@ -1409,9 +1410,7 @@ export interface operations {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                handle: components["parameters"]["Handle"];
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
@@ -1428,17 +1427,13 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
         };
     };
     createToken: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                handle: components["parameters"]["Handle"];
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody: {
@@ -1458,7 +1453,6 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
-            404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationFailed"];
         };
     };
@@ -1467,7 +1461,6 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                handle: components["parameters"]["Handle"];
                 tokenId: components["parameters"]["TokenId"];
             };
             cookie?: never;
@@ -1482,7 +1475,6 @@ export interface operations {
                 content?: never;
             };
             401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };

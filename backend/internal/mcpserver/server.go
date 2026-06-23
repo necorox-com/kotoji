@@ -20,13 +20,16 @@ const (
 )
 
 // mcpInstructions is the model-facing guidance shipped on connect (mcp.md §9).
-// It is deliberately short and behavioural: one project, the optimistic-lock
+// It is deliberately short and behavioural: pick a project, the optimistic-lock
 // loop, and the static-only constraint.
-const mcpInstructions = `This server hosts ONE web project. All tools act on that single project; you
-cannot read or change other projects. To edit safely:
-1. read_file -> note the returned "commit".
-2. write_file with base_sha = that "commit".
-3. If you get a "conflict" error, the file changed underneath you: read_file
+const mcpInstructions = `This server hosts the web projects you are a member of. Every content tool takes
+a "site" (the project handle); you can only act on projects you belong to, and only
+within the scope your role on each project allows (a token can never exceed your own
+access). To work:
+1. list_sites -> see your projects and your effective scope on each.
+2. read_file (site, path) -> note the returned "commit".
+3. write_file (site, ..., base_sha = that "commit").
+4. If you get a "conflict" error, the file changed underneath you: read_file
    again and redo your edit on the new content. Never retry blindly.
 Saving commits and mirrors to backup; it does NOT make the change live.
 Use "publish" to make the working branch live (this is the "go live" action).
@@ -41,6 +44,11 @@ type Deps struct {
 	// Tokens is the token query surface for the verifier (internal/db.Store
 	// satisfies it). REQUIRED.
 	Tokens tokenQuerier
+	// Members is the membership-authz surface the guard uses to cap a token to its
+	// user's memberships: per-site role (GetRole), the user's membership list
+	// (list_sites), and the user's account flags (create_site gate). internal/db.Store
+	// satisfies it. REQUIRED (a nil Members fails every authz check closed).
+	Members membershipQuerier
 	// Limits bundles size caps + the rate Limiter. Zero value => spec defaults.
 	Limits Limits
 	// BaseDomain is the hosted-content base (e.g. "hosting.example.com") used to
@@ -57,8 +65,9 @@ type Deps struct {
 
 // FromConfig builds Deps from a parsed config.Config + the wired dependencies,
 // filling the URL/CORS/limit fields from config. The Integration phase may use
-// this or construct Deps directly.
-func FromConfig(cfg config.Config, svc site.Service, tokens tokenQuerier, log *slog.Logger) Deps {
+// this or construct Deps directly. tokens AND members are both satisfied by the
+// one *db.Store the composition root holds.
+func FromConfig(cfg config.Config, svc site.Service, tokens tokenQuerier, members membershipQuerier, log *slog.Logger) Deps {
 	scheme := "https"
 	if !cfg.IsProduction() {
 		scheme = "http"
@@ -66,6 +75,7 @@ func FromConfig(cfg config.Config, svc site.Service, tokens tokenQuerier, log *s
 	return Deps{
 		Service:     svc,
 		Tokens:      tokens,
+		Members:     members,
 		Limits:      DefaultLimits(),
 		BaseDomain:  cfg.BaseDomain,
 		Scheme:      scheme,
@@ -107,10 +117,11 @@ func New(d Deps) http.Handler {
 	})
 
 	reg := &registry{
-		svc:    d.Service,
-		limits: limits,
-		log:    d.Logger,
-		cfg:    d,
+		svc:     d.Service,
+		members: d.Members,
+		limits:  limits,
+		log:     d.Logger,
+		cfg:     d,
 	}
 	reg.registerAll(s)
 

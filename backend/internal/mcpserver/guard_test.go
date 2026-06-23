@@ -12,10 +12,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
-// toolSpec is the static catalogue used by the matrix + pivot tests: tool name,
+// toolSpec is the static catalogue used by the matrix + selector tests: tool name,
 // the scope it requires, its rate class, and a zero-value arg struct for
 // reflection. It mirrors registerAll exactly.
 type toolSpec struct {
@@ -41,112 +42,67 @@ func toolSpecs() []toolSpec {
 	}
 }
 
-// ---- PIVOT TEST: no tool arg struct may carry a site selector ----
+// ---- SELECTOR TEST: content tools MUST carry a `site` selector ----
 
-func TestPivot_NoToolTakesSiteSelector(t *testing.T) {
-	// Any field whose name or json tag hints at a cross-project selector breaks the
-	// "one token = one site" wall (mcp.md §4.1 / CANONICAL §6). create_site's
-	// `handle` is the ONE allowed identifier because it mints a NEW site (and is
-	// capability-gated), not a selector over existing sites.
-	banned := []string{"site", "siteid", "site_id", "uuid", "owner", "ownerid"}
+// In the membership-capped model EVERY content tool takes a `site` (handle); the
+// site is authorized per call against the token user's membership (authz.go). This
+// is the inverse of the old "no tool takes a site selector" pivot guarantee, which
+// was replaced. list_sites enumerates memberships (no selector); create_site mints
+// a NEW site via `handle` (not a selector over existing sites).
+func TestContentToolsCarrySiteSelector(t *testing.T) {
+	noSelector := map[string]bool{"list_sites": true, "create_site": true}
 
 	for _, spec := range toolSpecs() {
+		hasSite := false
+		hasHandle := false
 		for i := 0; i < spec.argType.NumField(); i++ {
 			f := spec.argType.Field(i)
 			jsonName := strings.Split(f.Tag.Get("json"), ",")[0]
-			lowerField := strings.ToLower(f.Name)
-			lowerJSON := strings.ToLower(jsonName)
-			for _, b := range banned {
-				assert.NotEqual(t, b, lowerField, "%s.%s is a forbidden site selector", spec.name, f.Name)
-				assert.NotEqual(t, b, lowerJSON, "%s json:%q is a forbidden site selector", spec.name, jsonName)
-			}
-			// "handle" is allowed ONLY on create_site.
-			if lowerField == "handle" || lowerJSON == "handle" {
-				assert.Equal(t, "create_site", spec.name, "only create_site may take a handle")
+			switch strings.ToLower(jsonName) {
+			case "site":
+				hasSite = true
+			case "handle":
+				hasHandle = true
 			}
 		}
+		if noSelector[spec.name] {
+			assert.False(t, hasSite, "%s must NOT carry a site selector", spec.name)
+			if spec.name == "create_site" {
+				assert.True(t, hasHandle, "create_site mints a NEW site via handle")
+			}
+			continue
+		}
+		assert.True(t, hasSite, "%s must carry a `site` selector (membership-capped)", spec.name)
 	}
 }
 
-// pivotService wraps a FakeService and asserts every git-touching call is pinned
-// to the expected site UUID. Any call with a different site fails the test.
-type pivotService struct {
-	*site.FakeService
-	t        *testing.T
-	wantSite uuid.UUID
-}
-
-func (p *pivotService) check(id uuid.UUID) {
-	p.t.Helper()
-	require.Equal(p.t, p.wantSite, id, "site.Service called with a site OTHER than the pinned token site")
-}
-
-func (p *pivotService) GetSite(ctx context.Context, id uuid.UUID) (site.Site, error) {
-	p.check(id)
-	return p.FakeService.GetSite(ctx, id)
-}
-func (p *pivotService) ListFiles(ctx context.Context, in site.ListFilesInput) ([]site.FileEntry, site.ResolvedRef, error) {
-	p.check(in.SiteID)
-	return p.FakeService.ListFiles(ctx, in)
-}
-func (p *pivotService) ReadFile(ctx context.Context, id uuid.UUID, b site.BranchName, ref, path string) (site.FileContent, error) {
-	p.check(id)
-	return p.FakeService.ReadFile(ctx, id, b, ref, path)
-}
-func (p *pivotService) WriteFile(ctx context.Context, in site.WriteFileInput) (site.CommitInfo, error) {
-	p.check(in.SiteID)
-	return p.FakeService.WriteFile(ctx, in)
-}
-func (p *pivotService) Commit(ctx context.Context, in site.CommitInput) (site.CommitInfo, error) {
-	p.check(in.SiteID)
-	return p.FakeService.Commit(ctx, in)
-}
-func (p *pivotService) Publish(ctx context.Context, in site.PublishInput) (site.CommitInfo, error) {
-	p.check(in.SiteID)
-	return p.FakeService.Publish(ctx, in)
-}
-func (p *pivotService) Rollback(ctx context.Context, id uuid.UUID, b site.BranchName, to, base string, a site.Actor) (site.CommitInfo, error) {
-	p.check(id)
-	return p.FakeService.Rollback(ctx, id, b, to, base, a)
-}
-func (p *pivotService) GetDiff(ctx context.Context, in site.DiffOptions) (site.DiffResult, error) {
-	p.check(in.SiteID)
-	return p.FakeService.GetDiff(ctx, in)
-}
-func (p *pivotService) GetLog(ctx context.Context, in site.LogOptions) ([]site.CommitInfo, error) {
-	p.check(in.SiteID)
-	return p.FakeService.GetLog(ctx, in)
-}
-func (p *pivotService) CreateBranch(ctx context.Context, id uuid.UUID, n site.BranchName, from string) (site.Branch, error) {
-	p.check(id)
-	return p.FakeService.CreateBranch(ctx, id, n, from)
-}
-
-func TestPivot_ServiceAlwaysCalledWithClaimsSiteID(t *testing.T) {
+// TestGuard_PerSiteAuthorization exercises the guard + authz path end-to-end for a
+// member: read + write + history tools all succeed when the user has the role.
+func TestGuard_PerSiteAuthorization(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "pinned-site")
-	piv := &pivotService{FakeService: fake, t: t, wantSite: s.ID}
-	r := newTestRegistry(piv)
-	c := claims(s.ID, owner, scopePublish, false)
+	r := newTestRegistry(fake)
+	s, base := seedSiteR(t, r, owner, "pinned-site")
+	c := claims(owner, scopePublish, false)
+	h := string(s.Handle)
 
-	// Exercise read + write + history tools; the pivotService asserts the UUID.
-	_, _, err := guard(r, scopeRead, classRead, r.listSites)(context.Background(), reqFor(c), ListSitesArgs{})
+	_, _, err := guard(r, classRead, r.listSites)(context.Background(), reqFor(c), ListSitesArgs{})
 	require.NoError(t, err)
-	_, _, err = guard(r, scopeRead, classRead, r.readFile)(context.Background(), reqFor(c), ReadFileArgs{Path: "index.html"})
+	_, _, err = guard(r, classRead, r.readFile)(context.Background(), reqFor(c), ReadFileArgs{Site: h, Path: "index.html"})
 	require.NoError(t, err)
-	_, _, err = guard(r, scopeWrite, classWrite, r.writeFile)(context.Background(), reqFor(c), WriteFileArgs{Path: "a.html", Content: "<x>", BaseSHA: base})
+	_, _, err = guard(r, classWrite, r.writeFile)(context.Background(), reqFor(c), WriteFileArgs{Site: h, Path: "a.html", Content: "<x>", BaseSHA: base})
 	require.NoError(t, err)
-	_, _, err = guard(r, scopeRead, classRead, r.getLog)(context.Background(), reqFor(c), GetLogArgs{})
+	_, _, err = guard(r, classRead, r.getLog)(context.Background(), reqFor(c), GetLogArgs{Site: h})
 	require.NoError(t, err)
 }
 
-// ---- SCOPE × TOOL MATRIX ----
+// ---- SCOPE × TOOL MATRIX (token scope only; per-site role caps separately) ----
 
 func TestScopeMatrix(t *testing.T) {
 	tokenScopes := []scope{scopeRead, scopeWrite, scopePublish}
 
-	// allowed[tool][tokenScope] = should the scope gate permit the call?
+	// allowed[tool][tokenScope] = should the token's scope chain include the tool's
+	// required scope? (The membership role intersection is tested separately.)
 	for _, spec := range toolSpecs() {
 		for _, tok := range tokenScopes {
 			spec, tok := spec, tok
@@ -171,33 +127,98 @@ func scopeRank(s scope) int {
 	}
 }
 
+// TestAuthzMatrix is the MEMBERSHIP-CAPPED authorization matrix: for each
+// (token scope × membership role) the effective scope is the intersection, and a
+// tool requiring a scope outside the intersection is forbidden. This replaces the
+// old global-scope-only gate.
+func TestAuthzMatrix(t *testing.T) {
+	roles := []gen.SiteRole{gen.SiteRoleOwner, gen.SiteRoleEditor, gen.SiteRoleViewer}
+	tokenScopes := []scope{scopeRead, scopeWrite, scopePublish}
+	needs := []scope{scopeRead, scopeWrite, scopePublish}
+
+	for _, role := range roles {
+		for _, tok := range tokenScopes {
+			for _, need := range needs {
+				role, tok, need := role, tok, need
+				t.Run(string(role)+"/"+string(tok)+"/need-"+string(need), func(t *testing.T) {
+					eff := intersectScopes(scopeChain(tok), role)
+					// want = need is granted by BOTH the token chain AND the role.
+					tokenGrants := scopeRank(tok) >= scopeRank(need)
+					var roleTop scope = scopeRead
+					if role == gen.SiteRoleOwner || role == gen.SiteRoleEditor {
+						roleTop = scopePublish
+					}
+					roleGrants := scopeRank(roleTop) >= scopeRank(need)
+					want := tokenGrants && roleGrants
+
+					got := false
+					for _, sc := range eff {
+						if sc == need {
+							got = true
+						}
+					}
+					assert.Equal(t, want, got, "role=%s token=%s need=%s", role, tok, need)
+				})
+			}
+		}
+	}
+}
+
+// TestGuard_WriteTokenViewerRole_WriteDeniedReadOk is the headline authz case from
+// the task: token(write) + the user is a VIEWER on the site -> write denied, read
+// ok. The effective scope is token(read,write) ∩ viewer(read) = {read}.
+func TestGuard_WriteTokenViewerRole_WriteDeniedReadOk(t *testing.T) {
+	fake := site.NewFakeService()
+	owner := uuid.New()
+	r := newTestRegistry(fake)
+	// Seed the site (as some owner) and then make the caller a VIEWER on it.
+	s, base := seedSite(t, fake, owner, "viewer-site")
+	caller := uuid.New()
+	fakeMembersOf(r).grant(s, caller, gen.SiteRoleViewer)
+	c := claims(caller, scopeWrite, false) // write-capable token, viewer role
+	h := string(s.Handle)
+
+	// read_file is permitted (read ∈ effective {read}).
+	_, _, rerr := r.readFile(context.Background(), c, ReadFileArgs{Site: h, Path: "index.html"})
+	require.NoError(t, rerr)
+
+	// write_file is forbidden (write ∉ effective {read}).
+	res, _, werr := r.writeFile(context.Background(), c, WriteFileArgs{Site: h, Path: "a.html", Content: "x", BaseSHA: base})
+	require.NoError(t, werr)
+	require.NotNil(t, res)
+	assert.True(t, res.IsError)
+	body := decodeErrBody(t, res.StructuredContent)
+	assert.Equal(t, codeForbidden, body.Code)
+	assert.Equal(t, "viewer", body.Details["role"])
+}
+
 func TestGuard_ReadTokenForbiddenOnWriteTools(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "scope-site")
 	r := newTestRegistry(fake)
-	readClaims := claims(s.ID, owner, scopeRead, true) // read-only token
+	s, base := seedSiteR(t, r, owner, "scope-site")
+	readClaims := claims(owner, scopeRead, true) // read-only token (owner role)
+	h := string(s.Handle)
 
 	cases := []struct {
 		name string
 		call func() (*mcp.CallToolResult, error)
 	}{
 		{"write_file", func() (*mcp.CallToolResult, error) {
-			res, _, err := guard(r, scopeWrite, classWrite, r.writeFile)(context.Background(), reqFor(readClaims), WriteFileArgs{Path: "a.html", Content: "x", BaseSHA: base})
+			res, _, err := r.writeFile(context.Background(), readClaims, WriteFileArgs{Site: h, Path: "a.html", Content: "x", BaseSHA: base})
 			return res, err
 		}},
 		{"publish", func() (*mcp.CallToolResult, error) {
-			res, _, err := guard(r, scopePublish, classPublish, r.publish)(context.Background(), reqFor(readClaims), PublishArgs{BaseSHA: base})
+			res, _, err := r.publish(context.Background(), readClaims, PublishArgs{Site: h, BaseSHA: base})
 			return res, err
 		}},
 		{"rollback", func() (*mcp.CallToolResult, error) {
-			res, _, err := guard(r, scopeWrite, classWrite, r.rollback)(context.Background(), reqFor(readClaims), RollbackArgs{ToSHA: base, BaseSHA: base})
+			res, _, err := r.rollback(context.Background(), readClaims, RollbackArgs{Site: h, ToSHA: base, BaseSHA: base})
 			return res, err
 		}},
-		{"create_site", func() (*mcp.CallToolResult, error) {
-			res, _, err := guard(r, scopeWrite, classCreate, r.createSite)(context.Background(), reqFor(readClaims), CreateSiteArgs{Handle: "new-one"})
-			return res, err
-		}},
+		// NOTE: create_site is NOT a write-scope gate — it is gated by
+		// can_create_sites (token AND user), tested separately in tools_test.go.
+		// A read token that holds can_create_sites can legitimately create a site.
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,7 +236,7 @@ func TestGuard_MissingPrincipal_Unauthenticated(t *testing.T) {
 	r := newTestRegistry(fake)
 	// A request with no Extra.TokenInfo (should never happen behind the bearer
 	// middleware) must fail closed to unauthenticated.
-	res, _, err := guard(r, scopeRead, classRead, r.listSites)(context.Background(), &mcp.CallToolRequest{}, ListSitesArgs{})
+	res, _, err := guard(r, classRead, r.listSites)(context.Background(), &mcp.CallToolRequest{}, ListSitesArgs{})
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.True(t, res.IsError)
@@ -225,12 +246,12 @@ func TestGuard_MissingPrincipal_Unauthenticated(t *testing.T) {
 func TestGuard_RateLimited(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "rl-site")
 	r := newTestRegistry(fake)
+	seedSiteR(t, r, owner, "rl-site")
 	r.limits.Limiter = denyLimiter{}
-	c := claims(s.ID, owner, scopeRead, false)
+	c := claims(owner, scopeRead, false)
 
-	res, _, err := guard(r, scopeRead, classRead, r.listSites)(context.Background(), reqFor(c), ListSitesArgs{})
+	res, _, err := guard(r, classRead, r.listSites)(context.Background(), reqFor(c), ListSitesArgs{})
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.True(t, res.IsError)

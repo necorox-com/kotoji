@@ -26,8 +26,9 @@ type fakeMetaStore struct {
 	roles map[string]gen.SiteRole
 	// members keyed by siteID -> list of member rows.
 	members map[uuid.UUID][]gen.ListMembersRow
-	// tokens keyed by siteID -> token rows; created tokens land here too.
-	tokens map[uuid.UUID][]gen.ListTokensForSiteRow
+	// tokens keyed by userID -> token rows; per-USER now (a token spans all the
+	// user's memberships). Created tokens land here too.
+	tokens map[uuid.UUID][]gen.ListUserTokensRow
 	// users by id and by email.
 	users   map[uuid.UUID]gen.User
 	byEmail map[string]gen.User
@@ -48,7 +49,7 @@ func newFakeMetaStore() *fakeMetaStore {
 	return &fakeMetaStore{
 		roles:   map[string]gen.SiteRole{},
 		members: map[uuid.UUID][]gen.ListMembersRow{},
-		tokens:  map[uuid.UUID][]gen.ListTokensForSiteRow{},
+		tokens:  map[uuid.UUID][]gen.ListUserTokensRow{},
 		users:   map[uuid.UUID]gen.User{},
 		byEmail: map[string]gen.User{},
 	}
@@ -163,13 +164,12 @@ func (f *fakeMetaStore) GetMember(_ context.Context, arg gen.GetMemberParams) (g
 	return gen.SiteMember{SiteID: arg.SiteID, UserID: arg.UserID, Role: role}, nil
 }
 
-func (f *fakeMetaStore) CreateToken(_ context.Context, arg gen.CreateTokenParams) (gen.CreateTokenRow, error) {
+func (f *fakeMetaStore) CreateUserToken(_ context.Context, arg gen.CreateUserTokenParams) (gen.CreateUserTokenRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	row := gen.CreateTokenRow{
+	row := gen.CreateUserTokenRow{
 		ID:             uuid.New(),
-		SiteID:         arg.SiteID,
-		CreatedBy:      arg.CreatedBy,
+		UserID:         arg.UserID,
 		Name:           arg.Name,
 		TokenPrefix:    arg.TokenPrefix,
 		Scopes:         arg.Scopes,
@@ -177,32 +177,33 @@ func (f *fakeMetaStore) CreateToken(_ context.Context, arg gen.CreateTokenParams
 		CreatedAt:      pgtype.Timestamptz{Time: time.Now(), Valid: true},
 		ExpiresAt:      arg.ExpiresAt,
 	}
-	f.tokens[arg.SiteID] = append(f.tokens[arg.SiteID], gen.ListTokensForSiteRow{
-		ID: row.ID, SiteID: row.SiteID, CreatedBy: row.CreatedBy, Name: row.Name,
+	f.tokens[arg.UserID] = append(f.tokens[arg.UserID], gen.ListUserTokensRow{
+		ID: row.ID, UserID: row.UserID, Name: row.Name,
 		TokenPrefix: row.TokenPrefix, Scopes: row.Scopes, CanCreateSites: row.CanCreateSites,
 		CreatedAt: row.CreatedAt, ExpiresAt: row.ExpiresAt,
 	})
 	return row, nil
 }
 
-func (f *fakeMetaStore) ListTokensForSite(_ context.Context, siteID uuid.UUID) ([]gen.ListTokensForSiteRow, error) {
+func (f *fakeMetaStore) ListUserTokens(_ context.Context, userID uuid.UUID) ([]gen.ListUserTokensRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]gen.ListTokensForSiteRow, len(f.tokens[siteID]))
-	copy(out, f.tokens[siteID])
+	out := make([]gen.ListUserTokensRow, len(f.tokens[userID]))
+	copy(out, f.tokens[userID])
 	return out, nil
 }
 
-func (f *fakeMetaStore) RevokeToken(_ context.Context, arg gen.RevokeTokenParams) error {
+func (f *fakeMetaStore) RevokeUserToken(_ context.Context, arg gen.RevokeUserTokenParams) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	rows := f.tokens[arg.SiteID]
+	rows := f.tokens[arg.UserID]
 	for i := range rows {
-		if rows[i].ID == arg.ID {
+		// Owner-scoped revoke: only touch rows owned by this user.
+		if rows[i].ID == arg.ID && rows[i].UserID == arg.UserID {
 			rows[i].RevokedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
 		}
 	}
-	f.tokens[arg.SiteID] = rows
+	f.tokens[arg.UserID] = rows
 	return nil
 }
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
@@ -18,22 +19,23 @@ const (
 	encodingBase64 = "base64"
 )
 
-// registerAll wires every tool with its scope + rate class. The In types carry
-// jsonschema tags (auto-inferred schema) and — critically — NONE of the content
-// tools carry a site selector: the site is always claims.SiteID (PIVOT guarantee,
-// asserted by reflection in the tests).
+// registerAll wires every tool with its declared scope + rate class. The In types
+// carry jsonschema tags (auto-inferred schema). Content tools take a `site` (the
+// project handle); every call is membership-capped (intersection of the token's
+// scopes and the user's role on that site, authz.go). create_site is the one tool
+// that does NOT take a site (it mints a new one) and is can_create_sites-gated.
 func (r *registry) registerAll(s *mcp.Server) {
-	addTool(s, r, "list_sites", "List the single project this token may address.", scopeRead, classRead, r.listSites)
-	addTool(s, r, "list_files", "List files in the project at a branch or commit.", scopeRead, classRead, r.listFiles)
-	addTool(s, r, "read_file", "Read a file; returns the commit SHA to pass back as base_sha.", scopeRead, classRead, r.readFile)
-	addTool(s, r, "write_file", "Write a file (base_sha REQUIRED; stale base_sha is rejected as conflict).", scopeWrite, classWrite, r.writeFile)
-	addTool(s, r, "create_site", "Create a NEW project (disabled unless the token has can_create_sites).", scopeWrite, classCreate, r.createSite)
-	addTool(s, r, "save", "Commit the working set on a branch (base_sha REQUIRED).", scopeWrite, classWrite, r.save)
-	addTool(s, r, "publish", "Promote a branch to the live published site (base_sha REQUIRED).", scopePublish, classPublish, r.publish)
-	addTool(s, r, "get_diff", "Diff two refs, or a commit vs its parent.", scopeRead, classRead, r.getDiff)
-	addTool(s, r, "get_log", "Return commit history for a branch (paginated).", scopeRead, classRead, r.getLog)
-	addTool(s, r, "rollback", "Forward-revert a branch to a previous commit's tree (base_sha REQUIRED).", scopeWrite, classWrite, r.rollback)
-	addTool(s, r, "create_branch", "Create a new branch from an existing branch or commit.", scopeWrite, classWrite, r.createBranch)
+	addTool(s, r, "list_sites", "List the projects you are a member of, with your effective scope on each.", scopeRead, classRead, r.listSites)
+	addTool(s, r, "list_files", "List files in a project (site) at a branch or commit.", scopeRead, classRead, r.listFiles)
+	addTool(s, r, "read_file", "Read a file from a project (site); returns the commit SHA to pass back as base_sha.", scopeRead, classRead, r.readFile)
+	addTool(s, r, "write_file", "Write a file to a project (site) (base_sha REQUIRED; stale base_sha is rejected as conflict).", scopeWrite, classWrite, r.writeFile)
+	addTool(s, r, "create_site", "Create a NEW project (disabled unless the token AND your account allow creating sites).", scopeWrite, classCreate, r.createSite)
+	addTool(s, r, "save", "Commit the working set on a project (site) branch (base_sha REQUIRED).", scopeWrite, classWrite, r.save)
+	addTool(s, r, "publish", "Promote a project (site) branch to the live published site (base_sha REQUIRED).", scopePublish, classPublish, r.publish)
+	addTool(s, r, "get_diff", "Diff two refs in a project (site), or a commit vs its parent.", scopeRead, classRead, r.getDiff)
+	addTool(s, r, "get_log", "Return commit history for a project (site) branch (paginated).", scopeRead, classRead, r.getLog)
+	addTool(s, r, "rollback", "Forward-revert a project (site) branch to a previous commit's tree (base_sha REQUIRED).", scopeWrite, classWrite, r.rollback)
+	addTool(s, r, "create_branch", "Create a new branch in a project (site) from an existing branch or commit.", scopeWrite, classWrite, r.createBranch)
 }
 
 // actorFor builds the git/audit Actor for an MCP call from the verified claims.
@@ -66,54 +68,71 @@ func deref(s *string) string {
 
 // ============================ list_sites ============================
 
-// ListSitesArgs takes no arguments — the token already identifies the site.
+// ListSitesArgs takes no arguments — it enumerates the token user's memberships.
 type ListSitesArgs struct{}
 
-// SiteSummary is one project in a list_sites result.
+// SiteSummary is one project in a list_sites result, including the user's role on
+// it and the EFFECTIVE scope (token ∩ role) so the model knows what it may do.
 type SiteSummary struct {
-	UUID          string `json:"uuid"`
-	Handle        string `json:"handle"`
-	PublishedURL  string `json:"published_url"`
-	DraftURL      string `json:"draft_url"`
-	DefaultBranch string `json:"default_branch"`
-	IsPublished   bool   `json:"is_published"`
-	UpdatedAt     string `json:"updated_at"`
+	UUID            string   `json:"uuid"`
+	Handle          string   `json:"handle"`
+	Role            string   `json:"role"`             // the token user's membership role
+	EffectiveScopes []string `json:"effective_scopes"` // token.scopes ∩ roleScopes(role)
+	PublishedURL    string   `json:"published_url"`
+	DraftURL        string   `json:"draft_url"`
+	DefaultBranch   string   `json:"default_branch"`
+	IsPublished     bool     `json:"is_published"`
+	UpdatedAt       string   `json:"updated_at"`
 }
 
-// ListSitesResult wraps the (single) pinned site.
+// ListSitesResult wraps the user's membership list.
 type ListSitesResult struct {
 	Sites []SiteSummary `json:"sites"`
 }
 
 func (r *registry) listSites(ctx context.Context, c TokenInfo, _ ListSitesArgs) (*mcp.CallToolResult, ListSitesResult, error) {
-	// Pinned: a single GetSite on claims.SiteID — never a list query, so a token
-	// can only ever see its own project (mcp.md §5.1).
-	s, err := r.svc.GetSite(ctx, c.SiteID)
+	// Enumerate the projects the token's USER is a member of (NOT every site): a
+	// token spans exactly its user's memberships (CANONICAL §6). The effective
+	// scope per site is the intersection of the token's scopes and the membership
+	// role's scopes, so the model sees precisely what it can do where.
+	rows, err := r.members.ListSitesForUser(ctx, gen.ListSitesForUserParams{
+		UserID: c.UserID,
+		Off:    0,
+		Lim:    listSitesPageLimit,
+	})
 	if err != nil {
 		res, gerr := r.mapError(err, "list_sites")
 		return res, ListSitesResult{}, gerr
 	}
-	out := ListSitesResult{Sites: []SiteSummary{r.toSummary(s)}}
+	out := ListSitesResult{Sites: make([]SiteSummary, 0, len(rows))}
+	for _, row := range rows {
+		out.Sites = append(out.Sites, r.toSummary(c, row))
+	}
 	return nil, out, nil
 }
 
-// toSummary composes the wire summary, including preview URLs from the base domain.
-func (r *registry) toSummary(s site.Site) SiteSummary {
+// toSummary composes the wire summary for a membership row, including the role,
+// the effective scopes (token ∩ role), and preview URLs from the base domain.
+func (r *registry) toSummary(c TokenInfo, row gen.ListSitesForUserRow) SiteSummary {
+	handle := site.Handle(row.Handle)
 	return SiteSummary{
-		UUID:          s.ID.String(),
-		Handle:        string(s.Handle),
-		PublishedURL:  r.publishedURL(s.Handle),
-		DraftURL:      r.previewURL(s.Handle, site.BranchDraft),
-		DefaultBranch: string(s.DefaultBranch),
-		IsPublished:   s.HasPublished,
-		UpdatedAt:     s.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		UUID:            row.ID.String(),
+		Handle:          row.Handle,
+		Role:            string(row.Role),
+		EffectiveScopes: scopeStrings(intersectScopes(c.Scopes, row.Role)),
+		PublishedURL:    r.publishedURL(handle),
+		DraftURL:        r.previewURL(handle, site.BranchDraft),
+		DefaultBranch:   row.DefaultBranch,
+		IsPublished:     row.PublishedCommitSha != nil && *row.PublishedCommitSha != "",
+		UpdatedAt:       row.UpdatedAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
 }
 
 // ============================ list_files ============================
 
-// ListFilesArgs — NO site selector. Optional branch/ref/path/recursive.
+// ListFilesArgs takes the target `site` (handle). Optional branch/ref/path/recursive.
 type ListFilesArgs struct {
+	Site      string  `json:"site" jsonschema:"project handle (from list_sites) to list files in"`
 	Branch    *string `json:"branch,omitempty" jsonschema:"branch name; defaults to the working branch (draft)"`
 	Path      *string `json:"path,omitempty" jsonschema:"subtree filter, repo-relative POSIX path; defaults to repo root"`
 	Ref       *string `json:"ref,omitempty" jsonschema:"commit SHA to list at; defaults to the branch tip"`
@@ -136,6 +155,10 @@ type ListFilesResult struct {
 }
 
 func (r *registry) listFiles(ctx context.Context, c TokenInfo, in ListFilesArgs) (*mcp.CallToolResult, ListFilesResult, error) {
+	ac, errRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeRead)
+	if errRes != nil || gerr != nil {
+		return errRes, ListFilesResult{}, gerr
+	}
 	dir := deref(in.Path)
 	if dir != "" {
 		// Reuse the read confinement (no extension check) for the dir filter.
@@ -149,7 +172,7 @@ func (r *registry) listFiles(ctx context.Context, c TokenInfo, in ListFilesArgs)
 	recursive := in.Recursive != nil && *in.Recursive
 
 	entries, ref, err := r.svc.ListFiles(ctx, site.ListFilesInput{
-		SiteID:    c.SiteID,
+		SiteID:    ac.site.ID,
 		Branch:    branch,
 		Dir:       dir,
 		Ref:       deref(in.Ref),
@@ -178,8 +201,9 @@ func (r *registry) listFiles(ctx context.Context, c TokenInfo, in ListFilesArgs)
 
 // ============================ read_file ============================
 
-// ReadFileArgs — NO site selector.
+// ReadFileArgs takes the target `site` (handle) plus the file path.
 type ReadFileArgs struct {
+	Site   string  `json:"site" jsonschema:"project handle (from list_sites) to read from"`
 	Path   string  `json:"path" jsonschema:"file path relative to the site root, POSIX style"`
 	Branch *string `json:"branch,omitempty" jsonschema:"branch name; defaults to the working branch (draft)"`
 	Ref    *string `json:"ref,omitempty" jsonschema:"commit SHA to read at; defaults to the branch tip"`
@@ -198,13 +222,17 @@ type ReadFileResult struct {
 }
 
 func (r *registry) readFile(ctx context.Context, c TokenInfo, in ReadFileArgs) (*mcp.CallToolResult, ReadFileResult, error) {
+	ac, errRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeRead)
+	if errRes != nil || gerr != nil {
+		return errRes, ReadFileResult{}, gerr
+	}
 	clean, errRes := validateContentPath(in.Path, false)
 	if errRes != nil {
 		return errRes, ReadFileResult{}, nil
 	}
 	branch := branchOrDefault(in.Branch)
 
-	fc, err := r.svc.ReadFile(ctx, c.SiteID, branch, deref(in.Ref), clean)
+	fc, err := r.svc.ReadFile(ctx, ac.site.ID, branch, deref(in.Ref), clean)
 	if err != nil {
 		res, gerr := r.mapError(err, "read_file")
 		return res, ReadFileResult{}, gerr
@@ -241,8 +269,10 @@ func (r *registry) readFile(ctx context.Context, c TokenInfo, in ReadFileArgs) (
 
 // ============================ write_file ============================
 
-// WriteFileArgs — NO site selector. base_sha is REQUIRED (no force flag, v1).
+// WriteFileArgs takes the target `site` (handle). base_sha is REQUIRED (no force
+// flag, v1).
 type WriteFileArgs struct {
+	Site     string  `json:"site" jsonschema:"project handle (from list_sites) to write to"`
 	Path     string  `json:"path" jsonschema:"file path relative to the site root"`
 	Content  string  `json:"content" jsonschema:"full new file contents"`
 	Encoding *string `json:"encoding,omitempty" jsonschema:"utf-8 (default) or base64 for binary"`
@@ -265,6 +295,10 @@ type WriteFileResult struct {
 }
 
 func (r *registry) writeFile(ctx context.Context, c TokenInfo, in WriteFileArgs) (*mcp.CallToolResult, WriteFileResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeWrite)
+	if authRes != nil || gerr != nil {
+		return authRes, WriteFileResult{}, gerr
+	}
 	clean, errRes := validateContentPath(in.Path, true)
 	if errRes != nil {
 		return errRes, WriteFileResult{}, nil
@@ -290,7 +324,7 @@ func (r *registry) writeFile(ctx context.Context, c TokenInfo, in WriteFileArgs)
 	commit := in.Commit == nil || *in.Commit // default true
 
 	ci, err := r.svc.WriteFile(ctx, site.WriteFileInput{
-		SiteID:  c.SiteID,
+		SiteID:  ac.site.ID,
 		Branch:  branch,
 		Path:    clean,
 		Content: content,
@@ -343,8 +377,9 @@ func (r *registry) decodeContent(raw string, encoding *string) ([]byte, *mcp.Cal
 
 // ============================ create_site ============================
 
-// CreateSiteArgs is the ONE tool that mints a NEW site (its result is outside the
-// token's original binding). Gated by claims.CanCreateSites (decision #8).
+// CreateSiteArgs is the ONE tool that mints a NEW site (the user becomes its
+// owner). It takes a NEW `handle` (not a selector over existing sites). Gated by
+// token.can_create_sites AND the user's users.can_create_sites (decision #8).
 type CreateSiteArgs struct {
 	Handle   string  `json:"handle" jsonschema:"new site handle; lowercase [a-z0-9-], 3-63 chars, unique, not reserved"`
 	Init     *string `json:"init,omitempty" jsonschema:"'empty' (default) or 'template'"`
@@ -362,11 +397,21 @@ type CreateSiteResult struct {
 }
 
 func (r *registry) createSite(ctx context.Context, c TokenInfo, in CreateSiteArgs) (*mcp.CallToolResult, CreateSiteResult, error) {
-	// Account capability gate (CANONICAL §6.2 / decision #8): OFF by default for
-	// project tokens. A per-project token that can spawn projects is a privilege-
-	// escalation vector, so we refuse unless explicitly enabled at issuance.
+	// Capability gate (CANONICAL §6.2 / decision #8): create_site requires BOTH the
+	// token's can_create_sites AND the user's account flag. c.CanCreateSites is the
+	// AND computed at verify time; we ALSO re-read the user's flag here so a flag
+	// revoked AFTER issuance takes effect immediately (the same per-request
+	// re-evaluation principle the membership-cap uses). Either gate failing -> forbidden.
 	if !c.CanCreateSites {
 		return toolErr(codeForbidden, "this token cannot create sites; create the project in the dashboard", nil), CreateSiteResult{}, nil
+	}
+	user, err := r.members.GetUserByID(ctx, c.UserID)
+	if err != nil {
+		res, gerr := r.mapError(err, "create_site")
+		return res, CreateSiteResult{}, gerr
+	}
+	if !user.CanCreateSites && !user.IsAdmin {
+		return toolErr(codeForbidden, "your account is not allowed to create sites", nil), CreateSiteResult{}, nil
 	}
 
 	s, err := r.svc.CreateSite(ctx, site.CreateSiteInput{
@@ -384,15 +429,16 @@ func (r *registry) createSite(ctx context.Context, c TokenInfo, in CreateSiteArg
 		Handle:        string(s.Handle),
 		DraftURL:      r.previewURL(s.Handle, site.BranchDraft),
 		DefaultBranch: string(s.DefaultBranch),
-		TokenHint:     "issue a project token for this site in the dashboard to manage it via MCP",
+		TokenHint:     "your existing token already covers this new site (you are its owner); use it directly via MCP",
 	}
 	return nil, out, nil
 }
 
 // ============================ save ============================
 
-// SaveArgs — NO site selector. base_sha REQUIRED.
+// SaveArgs takes the target `site` (handle). base_sha REQUIRED.
 type SaveArgs struct {
+	Site    string  `json:"site" jsonschema:"project handle (from list_sites) to commit in"`
 	Branch  *string `json:"branch,omitempty" jsonschema:"branch to commit; 'published' rejected; default draft"`
 	BaseSHA string  `json:"base_sha" jsonschema:"REQUIRED tip SHA the commit is based on (optimistic lock)"`
 	Message *string `json:"message,omitempty" jsonschema:"commit message"`
@@ -408,6 +454,10 @@ type SaveResult struct {
 }
 
 func (r *registry) save(ctx context.Context, c TokenInfo, in SaveArgs) (*mcp.CallToolResult, SaveResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeWrite)
+	if authRes != nil || gerr != nil {
+		return authRes, SaveResult{}, gerr
+	}
 	if in.BaseSHA == "" {
 		return toolErr(codeValidation, "base_sha: required", nil), SaveResult{}, nil
 	}
@@ -417,7 +467,7 @@ func (r *registry) save(ctx context.Context, c TokenInfo, in SaveArgs) (*mcp.Cal
 	}
 
 	ci, err := r.svc.Commit(ctx, site.CommitInput{
-		SiteID:  c.SiteID,
+		SiteID:  ac.site.ID,
 		Branch:  branch,
 		Message: deref(in.Message),
 		BaseSHA: in.BaseSHA,
@@ -445,8 +495,10 @@ func isNothingToCommit(err error) bool {
 
 // ============================ publish ============================
 
-// PublishArgs — NO site selector. base_sha guards against shipping a stale snapshot.
+// PublishArgs takes the target `site` (handle). base_sha guards against shipping a
+// stale snapshot.
 type PublishArgs struct {
+	Site    string  `json:"site" jsonschema:"project handle (from list_sites) to publish"`
 	From    *string `json:"from,omitempty" jsonschema:"source branch to publish; default draft"`
 	BaseSHA string  `json:"base_sha" jsonschema:"REQUIRED tip SHA of the source branch you intend to publish"`
 	Message *string `json:"message,omitempty" jsonschema:"publish commit message"`
@@ -463,13 +515,17 @@ type PublishResult struct {
 }
 
 func (r *registry) publish(ctx context.Context, c TokenInfo, in PublishArgs) (*mcp.CallToolResult, PublishResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopePublish)
+	if authRes != nil || gerr != nil {
+		return authRes, PublishResult{}, gerr
+	}
 	if in.BaseSHA == "" {
 		return toolErr(codeValidation, "base_sha: required (tip of the source branch)", nil), PublishResult{}, nil
 	}
 	from := branchOrDefault(in.From)
 
 	ci, err := r.svc.Publish(ctx, site.PublishInput{
-		SiteID:  c.SiteID,
+		SiteID:  ac.site.ID,
 		From:    from,
 		BaseSHA: in.BaseSHA,
 		Message: deref(in.Message),
@@ -480,11 +536,8 @@ func (r *registry) publish(ctx context.Context, c TokenInfo, in PublishArgs) (*m
 		return res, PublishResult{}, gerr
 	}
 
-	// Compose the published URL from the site's current handle.
-	var publishedURL string
-	if s, gerr := r.svc.GetSite(ctx, c.SiteID); gerr == nil {
-		publishedURL = r.publishedURL(s.Handle)
-	}
+	// Compose the published URL from the site's current handle (already resolved).
+	publishedURL := r.publishedURL(ac.site.Handle)
 
 	out := PublishResult{
 		PublishedCommit: ci.SHA,
@@ -499,8 +552,10 @@ func (r *registry) publish(ctx context.Context, c TokenInfo, in PublishArgs) (*m
 
 // ============================ get_diff ============================
 
-// GetDiffArgs — NO site selector. Two modes: from/to, or a single commit vs parent.
+// GetDiffArgs takes the target `site` (handle). Two modes: from/to, or a single
+// commit vs parent.
 type GetDiffArgs struct {
+	Site         string  `json:"site" jsonschema:"project handle (from list_sites) to diff in"`
 	From         *string `json:"from,omitempty" jsonschema:"source ref or branch"`
 	To           *string `json:"to,omitempty" jsonschema:"target ref or branch; omit with 'commit' to diff a single commit vs its parent"`
 	Commit       *string `json:"commit,omitempty" jsonschema:"single commit SHA to diff against its parent (alternative to from/to)"`
@@ -530,6 +585,10 @@ type DiffResult struct {
 }
 
 func (r *registry) getDiff(ctx context.Context, c TokenInfo, in GetDiffArgs) (*mcp.CallToolResult, DiffResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeRead)
+	if authRes != nil || gerr != nil {
+		return authRes, DiffResult{}, gerr
+	}
 	// Resolve the two modes into From/To for the service.
 	from := deref(in.From)
 	to := deref(in.To)
@@ -551,7 +610,7 @@ func (r *registry) getDiff(ctx context.Context, c TokenInfo, in GetDiffArgs) (*m
 	nameStatus := in.Format != nil && strings.ToLower(*in.Format) == "name-status"
 
 	dr, err := r.svc.GetDiff(ctx, site.DiffOptions{
-		SiteID:       c.SiteID,
+		SiteID:       ac.site.ID,
 		From:         from,
 		To:           to,
 		Path:         deref(in.Path),
@@ -601,8 +660,9 @@ func (r *registry) getDiff(ctx context.Context, c TokenInfo, in GetDiffArgs) (*m
 
 // ============================ get_log ============================
 
-// GetLogArgs — NO site selector.
+// GetLogArgs takes the target `site` (handle).
 type GetLogArgs struct {
+	Site   string  `json:"site" jsonschema:"project handle (from list_sites) to read history from"`
 	Branch *string `json:"branch,omitempty" jsonschema:"branch; default draft"`
 	Path   *string `json:"path,omitempty" jsonschema:"restrict to commits touching this path"`
 	Limit  *int    `json:"limit,omitempty" jsonschema:"max commits, default 20, max 100"`
@@ -628,6 +688,10 @@ type LogResult struct {
 }
 
 func (r *registry) getLog(ctx context.Context, c TokenInfo, in GetLogArgs) (*mcp.CallToolResult, LogResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeRead)
+	if authRes != nil || gerr != nil {
+		return authRes, LogResult{}, gerr
+	}
 	branch := branchOrDefault(in.Branch)
 	limit := 20
 	if in.Limit != nil {
@@ -639,7 +703,7 @@ func (r *registry) getLog(ctx context.Context, c TokenInfo, in GetLogArgs) (*mcp
 	}
 
 	commits, err := r.svc.GetLog(ctx, site.LogOptions{
-		SiteID: c.SiteID,
+		SiteID: ac.site.ID,
 		Branch: branch,
 		Limit:  limit,
 		Before: deref(in.Before),
@@ -672,8 +736,9 @@ func (r *registry) getLog(ctx context.Context, c TokenInfo, in GetLogArgs) (*mcp
 
 // ============================ rollback ============================
 
-// RollbackArgs — NO site selector. base_sha + to_sha both REQUIRED.
+// RollbackArgs takes the target `site` (handle). base_sha + to_sha both REQUIRED.
 type RollbackArgs struct {
+	Site    string  `json:"site" jsonschema:"project handle (from list_sites) to roll back in"`
 	Branch  *string `json:"branch,omitempty" jsonschema:"branch; 'published' rejected; default draft"`
 	ToSHA   string  `json:"to_sha" jsonschema:"REQUIRED commit whose tree is restored (must be an ancestor on the branch)"`
 	BaseSHA string  `json:"base_sha" jsonschema:"REQUIRED current branch tip you believe you are reverting from"`
@@ -689,6 +754,10 @@ type RollbackResult struct {
 }
 
 func (r *registry) rollback(ctx context.Context, c TokenInfo, in RollbackArgs) (*mcp.CallToolResult, RollbackResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeWrite)
+	if authRes != nil || gerr != nil {
+		return authRes, RollbackResult{}, gerr
+	}
 	if in.ToSHA == "" {
 		return toolErr(codeValidation, "to_sha: required", nil), RollbackResult{}, nil
 	}
@@ -700,7 +769,7 @@ func (r *registry) rollback(ctx context.Context, c TokenInfo, in RollbackArgs) (
 		return toolErr(codeValidation, "branch: 'published' is not rollback-able; publish from a rolled-back draft", nil), RollbackResult{}, nil
 	}
 
-	ci, err := r.svc.Rollback(ctx, c.SiteID, branch, in.ToSHA, in.BaseSHA, actorFor(c))
+	ci, err := r.svc.Rollback(ctx, ac.site.ID, branch, in.ToSHA, in.BaseSHA, actorFor(c))
 	if err != nil {
 		res, gerr := r.mapError(err, "rollback")
 		return res, RollbackResult{}, gerr
@@ -711,8 +780,10 @@ func (r *registry) rollback(ctx context.Context, c TokenInfo, in RollbackArgs) (
 
 // ============================ create_branch ============================
 
-// CreateBranchArgs — NO site selector. Creates a new branch from an existing ref.
+// CreateBranchArgs takes the target `site` (handle). Creates a new branch from an
+// existing ref.
 type CreateBranchArgs struct {
+	Site string  `json:"site" jsonschema:"project handle (from list_sites) to create the branch in"`
 	Name string  `json:"name" jsonschema:"new branch name; lowercase [a-z0-9-], no '--', not 'published'/'draft'"`
 	From *string `json:"from,omitempty" jsonschema:"source branch or commit; default draft"`
 }
@@ -725,6 +796,10 @@ type CreateBranchResult struct {
 }
 
 func (r *registry) createBranch(ctx context.Context, c TokenInfo, in CreateBranchArgs) (*mcp.CallToolResult, CreateBranchResult, error) {
+	ac, authRes, gerr := r.authorizeSite(ctx, c, in.Site, scopeWrite)
+	if authRes != nil || gerr != nil {
+		return authRes, CreateBranchResult{}, gerr
+	}
 	if in.Name == "" {
 		return toolErr(codeValidation, "name: required", nil), CreateBranchResult{}, nil
 	}
@@ -732,7 +807,7 @@ func (r *registry) createBranch(ctx context.Context, c TokenInfo, in CreateBranc
 	if in.From != nil && *in.From != "" {
 		from = *in.From
 	}
-	b, err := r.svc.CreateBranch(ctx, c.SiteID, site.BranchName(in.Name), from)
+	b, err := r.svc.CreateBranch(ctx, ac.site.ID, site.BranchName(in.Name), from)
 	if err != nil {
 		res, gerr := r.mapError(err, "create_branch")
 		return res, CreateBranchResult{}, gerr

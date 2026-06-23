@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/necorox-com/kotoji/backend/internal/auth"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/openapi"
 )
@@ -28,13 +29,16 @@ const (
 
 const base62Alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-// listTokens GET /api/sites/{handle}/tokens — owner only; never returns secrets.
+// listTokens GET /api/tokens — the CURRENT USER's own tokens; never returns
+// secrets. A token is owned by the user (not a project) and automatically covers
+// all of the user's memberships (CANONICAL §6: membership-capped).
 func (s *server) listTokens(w http.ResponseWriter, r *http.Request) {
-	ac, ok := s.resolveAccess(w, r, chi.URLParam(r, "handle"), capOwner)
+	user, ok := auth.CurrentUser(r.Context())
 	if !ok {
+		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "authentication required", nil)
 		return
 	}
-	rows, err := s.deps.Store.ListTokensForSite(r.Context(), ac.site.ID)
+	rows, err := s.deps.Store.ListUserTokens(r.Context(), user.UserID)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -58,11 +62,14 @@ func (s *server) listTokens(w http.ResponseWriter, r *http.Request) {
 	}{Tokens: out})
 }
 
-// createToken POST /api/sites/{handle}/tokens — issue a token (owner only). The
-// plaintext is returned ONCE; only the hash + prefix are persisted.
+// createToken POST /api/tokens — issue a token for the CURRENT USER. The
+// plaintext is returned ONCE; only the hash + prefix are persisted. The token's
+// can_create_sites is capped by the user's own users.can_create_sites (a token
+// can never exceed its owner's account capability).
 func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
-	ac, ok := s.resolveAccess(w, r, chi.URLParam(r, "handle"), capOwner)
+	user, ok := auth.CurrentUser(r.Context())
 	if !ok {
+		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "authentication required", nil)
 		return
 	}
 	var body openapi.CreateTokenRequest
@@ -88,14 +95,16 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// can_create_sites is requested by the body but CAPPED by the user's account
+	// flag: a token may never grant a capability its owner lacks (CANONICAL §6.2).
+	// Admins are implicitly permitted (mirrors the createSite handler gate).
 	canCreate := false
-	if body.CanCreateSites != nil {
-		canCreate = *body.CanCreateSites
+	if body.CanCreateSites != nil && *body.CanCreateSites {
+		canCreate = user.CanCreateSites || user.IsAdmin
 	}
 
-	row, err := s.deps.Store.CreateToken(r.Context(), gen.CreateTokenParams{
-		SiteID:         ac.site.ID,
-		CreatedBy:      ac.user.UserID,
+	row, err := s.deps.Store.CreateUserToken(r.Context(), gen.CreateUserTokenParams{
+		UserID:         user.UserID,
 		Name:           body.Name,
 		TokenPrefix:    prefix,
 		TokenHash:      hash,
@@ -108,13 +117,13 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Audit at the instance level (no site_id: a token now spans all memberships).
 	s.auditBestEffort(r.Context(), gen.InsertAuditParams{
-		ActorUserID: uuidPtr(ac.user.UserID),
-		SiteID:      uuidPtr(ac.site.ID),
+		ActorUserID: uuidPtr(user.UserID),
 		TokenID:     uuidPtr(row.ID),
 		Action:      "token.create",
 		Source:      gen.AuditSourceEditor,
-		Metadata:    auditMeta(map[string]any{"name": body.Name, "scopes": fromScopes(body.Scopes)}),
+		Metadata:    auditMeta(map[string]any{"name": body.Name, "scopes": fromScopes(body.Scopes), "can_create_sites": canCreate}),
 	})
 
 	writeJSON(w, http.StatusCreated, openapi.CreatedToken{
@@ -131,10 +140,14 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// revokeToken DELETE /api/sites/{handle}/tokens/{tokenId} — owner only.
+// revokeToken DELETE /api/tokens/{tokenId} — revoke one of the CURRENT USER's
+// own tokens. Scoped to the owner (user_id) so a user can never revoke another
+// user's token. A missing/already-revoked token is a no-op -> 204 idempotent (we
+// do not 404 to avoid token-id enumeration across users).
 func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
-	ac, ok := s.resolveAccess(w, r, chi.URLParam(r, "handle"), capOwner)
+	user, ok := auth.CurrentUser(r.Context())
 	if !ok {
+		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "authentication required", nil)
 		return
 	}
 	tokenID, perr := uuid.Parse(chi.URLParam(r, "tokenId"))
@@ -142,16 +155,12 @@ func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, codeValidation, "invalid token id", validationDetails{Field: "tokenId", Reason: "must be a uuid"})
 		return
 	}
-	// RevokeToken is scoped to the site (prevents cross-site revocation) and only
-	// touches active rows; a missing/already-revoked token is a no-op -> 204
-	// idempotent (we do not 404 to avoid token-id enumeration).
-	if err := s.deps.Store.RevokeToken(r.Context(), gen.RevokeTokenParams{ID: tokenID, SiteID: ac.site.ID}); err != nil {
+	if err := s.deps.Store.RevokeUserToken(r.Context(), gen.RevokeUserTokenParams{ID: tokenID, UserID: user.UserID}); err != nil {
 		writeServiceError(w, err)
 		return
 	}
 	s.auditBestEffort(r.Context(), gen.InsertAuditParams{
-		ActorUserID: uuidPtr(ac.user.UserID),
-		SiteID:      uuidPtr(ac.site.ID),
+		ActorUserID: uuidPtr(user.UserID),
 		TokenID:     uuidPtr(tokenID),
 		Action:      "token.revoke",
 		Source:      gen.AuditSourceEditor,

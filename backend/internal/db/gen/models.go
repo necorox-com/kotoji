@@ -208,21 +208,6 @@ type SiteMember struct {
 	CreatedBy *uuid.UUID         `json:"created_by"`
 }
 
-type SiteToken struct {
-	ID             uuid.UUID          `json:"id"`
-	SiteID         uuid.UUID          `json:"site_id"`
-	CreatedBy      uuid.UUID          `json:"created_by"`
-	Name           string             `json:"name"`
-	TokenPrefix    string             `json:"token_prefix"`
-	TokenHash      []byte             `json:"token_hash"`
-	Scopes         []string           `json:"scopes"`
-	CanCreateSites bool               `json:"can_create_sites"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	LastUsedAt     pgtype.Timestamptz `json:"last_used_at"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
-}
-
 type User struct {
 	ID             uuid.UUID          `json:"id"`
 	Email          string             `json:"email"`
@@ -243,4 +228,18 @@ type UserIdentity struct {
 	EmailAtLink *string            `json:"email_at_link"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	LastLoginAt pgtype.Timestamptz `json:"last_login_at"`
+}
+
+type UserToken struct {
+	ID             uuid.UUID          `json:"id"`
+	UserID         uuid.UUID          `json:"user_id"`
+	Name           string             `json:"name"`
+	TokenPrefix    string             `json:"token_prefix"`
+	TokenHash      []byte             `json:"token_hash"`
+	Scopes         []string           `json:"scopes"`
+	CanCreateSites bool               `json:"can_create_sites"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt     pgtype.Timestamptz `json:"last_used_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
 }

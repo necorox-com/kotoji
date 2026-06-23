@@ -12,23 +12,22 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const createToken = `-- name: CreateToken :one
+const createUserToken = `-- name: CreateUserToken :one
 
-INSERT INTO site_tokens (
-    site_id, created_by, name, token_prefix, token_hash,
+INSERT INTO user_tokens (
+    user_id, name, token_prefix, token_hash,
     scopes, can_create_sites, expires_at
 )
 VALUES (
-    $1, $2, $3, $4, $5,
-    $6, $7, $8
+    $1, $2, $3, $4,
+    $5, $6, $7
 )
-RETURNING id, site_id, created_by, name, token_prefix, scopes,
+RETURNING id, user_id, name, token_prefix, scopes,
           can_create_sites, created_at, last_used_at, expires_at, revoked_at
 `
 
-type CreateTokenParams struct {
-	SiteID         uuid.UUID          `json:"site_id"`
-	CreatedBy      uuid.UUID          `json:"created_by"`
+type CreateUserTokenParams struct {
+	UserID         uuid.UUID          `json:"user_id"`
 	Name           string             `json:"name"`
 	TokenPrefix    string             `json:"token_prefix"`
 	TokenHash      []byte             `json:"token_hash"`
@@ -37,10 +36,9 @@ type CreateTokenParams struct {
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 }
 
-type CreateTokenRow struct {
+type CreateUserTokenRow struct {
 	ID             uuid.UUID          `json:"id"`
-	SiteID         uuid.UUID          `json:"site_id"`
-	CreatedBy      uuid.UUID          `json:"created_by"`
+	UserID         uuid.UUID          `json:"user_id"`
 	Name           string             `json:"name"`
 	TokenPrefix    string             `json:"token_prefix"`
 	Scopes         []string           `json:"scopes"`
@@ -51,15 +49,20 @@ type CreateTokenRow struct {
 	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
 }
 
-// tokens.sql — per-site MCP/API tokens (hash-only storage).
-// Columns match the 0001_init `site_tokens` DDL. Plaintext is shown once at create
-// and never persisted; only token_hash (sha256, 32 bytes) + a 12-char prefix are stored.
-// Issue a token. scopes is a subset of {read,write,publish}; can_create_sites gates the
-// MCP create_site capability (default FALSE). Returns everything EXCEPT the hash.
-func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (CreateTokenRow, error) {
-	row := q.db.QueryRow(ctx, createToken,
-		arg.SiteID,
-		arg.CreatedBy,
+// tokens.sql — per-USER MCP/API tokens (hash-only storage).
+// Columns match the 0004 `user_tokens` DDL. A token is owned by a user and carries
+// ONE scope set; it automatically covers all of that user's memberships. The
+// effective scope on a given site is computed at call time (intersection with the
+// membership role's scopes), so this table never stores a site binding. Plaintext
+// is shown once at create and never persisted; only token_hash (sha256, 32 bytes)
+// + a 12-char prefix are stored.
+// Issue a token for a user. scopes is a subset of {read,write,publish};
+// can_create_sites gates the MCP create_site capability (default FALSE, and
+// additionally capped by users.can_create_sites at call time). Returns everything
+// EXCEPT the hash.
+func (q *Queries) CreateUserToken(ctx context.Context, arg CreateUserTokenParams) (CreateUserTokenRow, error) {
+	row := q.db.QueryRow(ctx, createUserToken,
+		arg.UserID,
 		arg.Name,
 		arg.TokenPrefix,
 		arg.TokenHash,
@@ -67,11 +70,10 @@ func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (Creat
 		arg.CanCreateSites,
 		arg.ExpiresAt,
 	)
-	var i CreateTokenRow
+	var i CreateUserTokenRow
 	err := row.Scan(
 		&i.ID,
-		&i.SiteID,
-		&i.CreatedBy,
+		&i.UserID,
 		&i.Name,
 		&i.TokenPrefix,
 		&i.Scopes,
@@ -84,21 +86,20 @@ func (q *Queries) CreateToken(ctx context.Context, arg CreateTokenParams) (Creat
 	return i, err
 }
 
-const getTokenByHash = `-- name: GetTokenByHash :one
-SELECT t.id, t.site_id, t.created_by, t.name, t.token_prefix, t.token_hash,
+const getUserTokenByHash = `-- name: GetUserTokenByHash :one
+SELECT t.id, t.user_id, t.name, t.token_prefix, t.token_hash,
        t.scopes, t.can_create_sites, t.expires_at, t.revoked_at
-FROM site_tokens t
-JOIN users u ON u.id = t.created_by
+FROM user_tokens t
+JOIN users u ON u.id = t.user_id
 WHERE t.token_hash = $1
   AND t.revoked_at IS NULL
   AND (t.expires_at IS NULL OR t.expires_at > now())
   AND u.is_active = TRUE
 `
 
-type GetTokenByHashRow struct {
+type GetUserTokenByHashRow struct {
 	ID             uuid.UUID          `json:"id"`
-	SiteID         uuid.UUID          `json:"site_id"`
-	CreatedBy      uuid.UUID          `json:"created_by"`
+	UserID         uuid.UUID          `json:"user_id"`
 	Name           string             `json:"name"`
 	TokenPrefix    string             `json:"token_prefix"`
 	TokenHash      []byte             `json:"token_hash"`
@@ -109,13 +110,12 @@ type GetTokenByHashRow struct {
 }
 
 // Exact lookup by full hash (defense-in-depth / admin tooling). Active tokens only.
-func (q *Queries) GetTokenByHash(ctx context.Context, tokenHash []byte) (GetTokenByHashRow, error) {
-	row := q.db.QueryRow(ctx, getTokenByHash, tokenHash)
-	var i GetTokenByHashRow
+func (q *Queries) GetUserTokenByHash(ctx context.Context, tokenHash []byte) (GetUserTokenByHashRow, error) {
+	row := q.db.QueryRow(ctx, getUserTokenByHash, tokenHash)
+	var i GetUserTokenByHashRow
 	err := row.Scan(
 		&i.ID,
-		&i.SiteID,
-		&i.CreatedBy,
+		&i.UserID,
 		&i.Name,
 		&i.TokenPrefix,
 		&i.TokenHash,
@@ -127,56 +127,56 @@ func (q *Queries) GetTokenByHash(ctx context.Context, tokenHash []byte) (GetToke
 	return i, err
 }
 
-const getTokenByPrefix = `-- name: GetTokenByPrefix :many
-SELECT t.id, t.site_id, t.created_by, t.name, t.token_prefix, t.token_hash,
+const getUserTokenByPrefix = `-- name: GetUserTokenByPrefix :many
+SELECT t.id, t.user_id, t.name, t.token_prefix, t.token_hash,
        t.scopes, t.can_create_sites, t.expires_at,
-       u.is_active AS creator_active, u.can_create_sites AS creator_can_create_sites
-FROM site_tokens t
-JOIN users u ON u.id = t.created_by
+       u.is_active AS user_active, u.can_create_sites AS user_can_create_sites
+FROM user_tokens t
+JOIN users u ON u.id = t.user_id
 WHERE t.token_prefix = $1
   AND t.revoked_at IS NULL
   AND (t.expires_at IS NULL OR t.expires_at > now())
   AND u.is_active = TRUE
 `
 
-type GetTokenByPrefixRow struct {
-	ID                    uuid.UUID          `json:"id"`
-	SiteID                uuid.UUID          `json:"site_id"`
-	CreatedBy             uuid.UUID          `json:"created_by"`
-	Name                  string             `json:"name"`
-	TokenPrefix           string             `json:"token_prefix"`
-	TokenHash             []byte             `json:"token_hash"`
-	Scopes                []string           `json:"scopes"`
-	CanCreateSites        bool               `json:"can_create_sites"`
-	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
-	CreatorActive         bool               `json:"creator_active"`
-	CreatorCanCreateSites bool               `json:"creator_can_create_sites"`
+type GetUserTokenByPrefixRow struct {
+	ID                 uuid.UUID          `json:"id"`
+	UserID             uuid.UUID          `json:"user_id"`
+	Name               string             `json:"name"`
+	TokenPrefix        string             `json:"token_prefix"`
+	TokenHash          []byte             `json:"token_hash"`
+	Scopes             []string           `json:"scopes"`
+	CanCreateSites     bool               `json:"can_create_sites"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	UserActive         bool               `json:"user_active"`
+	UserCanCreateSites bool               `json:"user_can_create_sites"`
 }
 
 // AUTH-BY-TOKEN HOT PATH (MCP/API). Narrow by indexed prefix among ACTIVE tokens; the
 // caller then constant-time compares token_hash to pick the exact row (prefix is not
-// unique by design). Joins the creating user so scope-capping can read their role/flags.
-func (q *Queries) GetTokenByPrefix(ctx context.Context, tokenPrefix string) ([]GetTokenByPrefixRow, error) {
-	rows, err := q.db.Query(ctx, getTokenByPrefix, tokenPrefix)
+// unique by design). Joins the owning user so capability-capping can read their flags;
+// per-site role capping happens later (GetRole at call time) since a token now spans
+// ALL of the user's memberships.
+func (q *Queries) GetUserTokenByPrefix(ctx context.Context, tokenPrefix string) ([]GetUserTokenByPrefixRow, error) {
+	rows, err := q.db.Query(ctx, getUserTokenByPrefix, tokenPrefix)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []GetTokenByPrefixRow{}
+	items := []GetUserTokenByPrefixRow{}
 	for rows.Next() {
-		var i GetTokenByPrefixRow
+		var i GetUserTokenByPrefixRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.SiteID,
-			&i.CreatedBy,
+			&i.UserID,
 			&i.Name,
 			&i.TokenPrefix,
 			&i.TokenHash,
 			&i.Scopes,
 			&i.CanCreateSites,
 			&i.ExpiresAt,
-			&i.CreatorActive,
-			&i.CreatorCanCreateSites,
+			&i.UserActive,
+			&i.UserCanCreateSites,
 		); err != nil {
 			return nil, err
 		}
@@ -188,18 +188,17 @@ func (q *Queries) GetTokenByPrefix(ctx context.Context, tokenPrefix string) ([]G
 	return items, nil
 }
 
-const listTokensForSite = `-- name: ListTokensForSite :many
-SELECT id, site_id, created_by, name, token_prefix, scopes, can_create_sites,
+const listUserTokens = `-- name: ListUserTokens :many
+SELECT id, user_id, name, token_prefix, scopes, can_create_sites,
        created_at, last_used_at, expires_at, revoked_at
-FROM site_tokens
-WHERE site_id = $1
+FROM user_tokens
+WHERE user_id = $1
 ORDER BY created_at DESC
 `
 
-type ListTokensForSiteRow struct {
+type ListUserTokensRow struct {
 	ID             uuid.UUID          `json:"id"`
-	SiteID         uuid.UUID          `json:"site_id"`
-	CreatedBy      uuid.UUID          `json:"created_by"`
+	UserID         uuid.UUID          `json:"user_id"`
 	Name           string             `json:"name"`
 	TokenPrefix    string             `json:"token_prefix"`
 	Scopes         []string           `json:"scopes"`
@@ -210,20 +209,19 @@ type ListTokensForSiteRow struct {
 	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
 }
 
-// Token management UI. NEVER returns the hash.
-func (q *Queries) ListTokensForSite(ctx context.Context, siteID uuid.UUID) ([]ListTokensForSiteRow, error) {
-	rows, err := q.db.Query(ctx, listTokensForSite, siteID)
+// Token-management UI: a user's own tokens. NEVER returns the hash.
+func (q *Queries) ListUserTokens(ctx context.Context, userID uuid.UUID) ([]ListUserTokensRow, error) {
+	rows, err := q.db.Query(ctx, listUserTokens, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ListTokensForSiteRow{}
+	items := []ListUserTokensRow{}
 	for rows.Next() {
-		var i ListTokensForSiteRow
+		var i ListUserTokensRow
 		if err := rows.Scan(
 			&i.ID,
-			&i.SiteID,
-			&i.CreatedBy,
+			&i.UserID,
 			&i.Name,
 			&i.TokenPrefix,
 			&i.Scopes,
@@ -243,28 +241,28 @@ func (q *Queries) ListTokensForSite(ctx context.Context, siteID uuid.UUID) ([]Li
 	return items, nil
 }
 
-const revokeToken = `-- name: RevokeToken :exec
-UPDATE site_tokens SET revoked_at = now()
-WHERE id = $1 AND site_id = $2 AND revoked_at IS NULL
+const revokeUserToken = `-- name: RevokeUserToken :exec
+UPDATE user_tokens SET revoked_at = now()
+WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
 `
 
-type RevokeTokenParams struct {
+type RevokeUserTokenParams struct {
 	ID     uuid.UUID `json:"id"`
-	SiteID uuid.UUID `json:"site_id"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
-// Soft revoke (instant). Scoped to the site to prevent cross-site revocation.
-func (q *Queries) RevokeToken(ctx context.Context, arg RevokeTokenParams) error {
-	_, err := q.db.Exec(ctx, revokeToken, arg.ID, arg.SiteID)
+// Soft revoke (instant). Scoped to the owner to prevent cross-user revocation.
+func (q *Queries) RevokeUserToken(ctx context.Context, arg RevokeUserTokenParams) error {
+	_, err := q.db.Exec(ctx, revokeUserToken, arg.ID, arg.UserID)
 	return err
 }
 
-const touchToken = `-- name: TouchToken :exec
-UPDATE site_tokens SET last_used_at = now() WHERE id = $1
+const touchUserToken = `-- name: TouchUserToken :exec
+UPDATE user_tokens SET last_used_at = now() WHERE id = $1
 `
 
 // Throttled last_used_at update; never on every call.
-func (q *Queries) TouchToken(ctx context.Context, id uuid.UUID) error {
-	_, err := q.db.Exec(ctx, touchToken, id)
+func (q *Queries) TouchUserToken(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, touchUserToken, id)
 	return err
 }

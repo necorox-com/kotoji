@@ -1,20 +1,25 @@
 "use client";
 
 /**
- * ProjectDetail · Settings — design.md §3.5 (Settings incl. McpTokenPanel +
- * rename/delete) / §3.3 SiteSettingsForm.
+ * ProjectDetail · Settings — design.md §3.5 (Settings: rename/delete + members +
+ * GitHub) / §3.3 SiteSettingsForm.
  *
  * Composes the settings surface (no SiteSettingsForm organism is exported in this
  * codebase, so it's built here from primitives + the site hooks per the design
  * inventory):
  *  - General: visibility / publish mode / description (useUpdateSite),
  *  - Rename handle (useRenameSite) with the plain-language redirect note,
- *  - AI / MCP tokens (McpTokenPanel organism),
+ *  - GitHub mirror linking + manual sync (GitHubSection),
  *  - Danger zone: delete the site with a typed-handle confirmation (useDeleteSite).
  *
+ * NOTE: MCP/API tokens are NO LONGER issued here. Under the re-architected model
+ * (CANONICAL §6) a token is owned by the USER (not a project) and automatically
+ * covers every project they're a member of, so token management lives on the
+ * account /settings page (AccountTokenPanel), not on a project.
+ *
  * Role gating (CANONICAL §6.1): all of the above are owner-only ("manageSettings"
- * / "rename" / "manageTokens" / "deleteSite"). Non-owners see a read-only note.
- * The loading/error triplet covers the site detail fetch.
+ * / "rename" / "deleteSite"). Non-owners see a read-only note. The loading/error
+ * triplet covers the site detail fetch.
  */
 
 import { use, useState } from "react";
@@ -23,7 +28,7 @@ import { useTranslations } from "next-intl";
 import { toast } from "sonner";
 import { Trash2 } from "lucide-react";
 
-import { McpTokenPanel, GitHubSection } from "@/components/organisms";
+import { GitHubSection } from "@/components/organisms";
 import { ConfirmDialog } from "@/components/molecules/confirm-dialog";
 import { ErrorState } from "@/components/molecules/error-state";
 import { LoadingState } from "@/components/molecules/loading-state";
@@ -315,8 +320,9 @@ export default function SettingsPage({ params }: SiteParams) {
         mirrorEnabled={config?.githubMirrorEnabled ?? false}
       />
 
-      {/* AI / MCP tokens */}
-      <McpTokenPanel handle={handle} role={role} baseDomain={baseDomain} />
+      {/* AI / MCP tokens are now PER-USER (CANONICAL §6): they're issued from
+          your account Settings (/settings), not per project — one token spans
+          every project you're a member of. So no token panel here. */}
 
       {/* Danger zone (owner only) */}
       {canDelete ? (

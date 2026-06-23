@@ -33,10 +33,10 @@ type MetaStore interface {
 	RemoveMember(ctx context.Context, arg gen.RemoveMemberParams) error
 	GetMember(ctx context.Context, arg gen.GetMemberParams) (gen.SiteMember, error)
 
-	// ---- tokens ----
-	CreateToken(ctx context.Context, arg gen.CreateTokenParams) (gen.CreateTokenRow, error)
-	ListTokensForSite(ctx context.Context, siteID uuid.UUID) ([]gen.ListTokensForSiteRow, error)
-	RevokeToken(ctx context.Context, arg gen.RevokeTokenParams) error
+	// ---- tokens (per-USER; a token spans all the user's memberships) ----
+	CreateUserToken(ctx context.Context, arg gen.CreateUserTokenParams) (gen.CreateUserTokenRow, error)
+	ListUserTokens(ctx context.Context, userID uuid.UUID) ([]gen.ListUserTokensRow, error)
+	RevokeUserToken(ctx context.Context, arg gen.RevokeUserTokenParams) error
 
 	// ---- site settings (owner-only patch) ----
 	UpdateSiteSettings(ctx context.Context, arg gen.UpdateSiteSettingsParams) error

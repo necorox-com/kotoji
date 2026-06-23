@@ -29,7 +29,7 @@ func readMigration(t *testing.T, name string) string {
 // TestMigrationFilesExistAndNonEmpty asserts both migration files are present and
 // have content. This is the lightweight guard runnable without Postgres.
 func TestMigrationFilesExistAndNonEmpty(t *testing.T) {
-	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql", "0003_instance_settings.sql"} {
+	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql", "0003_instance_settings.sql", "0004_user_tokens.sql"} {
 		_ = readMigration(t, name)
 	}
 }
@@ -38,7 +38,7 @@ func TestMigrationFilesExistAndNonEmpty(t *testing.T) {
 // directives. Every StatementBegin must be balanced by a StatementEnd so goose's
 // parser does not choke on function/trigger bodies.
 func TestMigrationGooseFraming(t *testing.T) {
-	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql", "0003_instance_settings.sql"} {
+	for _, name := range []string{"0001_init.sql", "0002_seed_reserved.sql", "0003_instance_settings.sql", "0004_user_tokens.sql"} {
 		src := readMigration(t, name)
 		assert.Containsf(t, src, "-- +goose Up", "%s missing +goose Up", name)
 		assert.Containsf(t, src, "-- +goose Down", "%s missing +goose Down", name)
@@ -86,6 +86,30 @@ func TestInitMigrationDownDropsEverything(t *testing.T) {
 	} {
 		assert.Containsf(t, down, "drop table if exists "+tbl, "Down must drop table %s", tbl)
 	}
+}
+
+// TestUserTokensMigrationSwapsTokenTable asserts the 0004 re-architecture migration
+// drops the per-project site_tokens table and creates the per-user user_tokens
+// table (the canonical token model swap), keeping the audit FK consistent.
+func TestUserTokensMigrationSwapsTokenTable(t *testing.T) {
+	src := strings.ToLower(readMigration(t, "0004_user_tokens.sql"))
+
+	up, down, found := strings.Cut(src, "-- +goose down")
+	require.True(t, found, "0004 must have a +goose Down section")
+
+	// Up: drop site_tokens, create user_tokens (with the canonical columns), and
+	// re-point the audit FK at user_tokens.
+	assert.Contains(t, up, "drop table if exists site_tokens", "Up must drop site_tokens")
+	assert.Contains(t, up, "create table user_tokens", "Up must create user_tokens")
+	assert.Contains(t, up, "user_id", "user_tokens must be keyed by user_id")
+	assert.Contains(t, up, "references user_tokens(id) on delete set null",
+		"Up must re-point audit_log.token_id at user_tokens (SET NULL)")
+	assert.Contains(t, up, "octet_length(token_hash) = 32", "Up must keep the sha256 hash-len CHECK")
+	assert.Contains(t, up, "char_length(token_prefix) = 12", "Up must keep the 12-char prefix CHECK")
+
+	// Down: reverse cleanly back to the per-project site_tokens shape.
+	assert.Contains(t, down, "drop table if exists user_tokens", "Down must drop user_tokens")
+	assert.Contains(t, down, "create table site_tokens", "Down must recreate site_tokens")
 }
 
 // reservedSeedRe extracts the handles from the 0002 INSERT VALUES rows of the form

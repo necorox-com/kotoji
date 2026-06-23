@@ -44,10 +44,12 @@
   (decision #4); the lock acquisition sits behind an interface so a
   `pg_advisory_xact_lock(hashtext(uuid))` impl can drop in for future HA.
 - **Authz boundary:** `site.Service` is **NOT membership-authz-aware**. It trusts the
-  `SiteID` it is given. Session→role and token→site+scope checks are enforced *above* it
-  (REST/MCP middleware). The Service still validates paths/branches/baseSHA (defense in
-  depth) and returns `ErrValidation` for git-level operation rules it owns (e.g. refusing
-  to write/delete the `published` branch directly).
+  `SiteID` it is given. Session→role and token→membership+scope checks are enforced *above*
+  it (REST/MCP middleware). An MCP token is per-USER; the MCP layer resolves the named site,
+  reads the user's membership role, and caps the call to `intersection(token.scopes, role
+  scopes)` before passing the resolved `SiteID` down. The Service still validates
+  paths/branches/baseSHA (defense in depth) and returns `ErrValidation` for git-level
+  operation rules it owns (e.g. refusing to write/delete the `published` branch directly).
 
 ```go
 package site
@@ -701,28 +703,30 @@ CREATE TABLE site_members (
 );
 CREATE INDEX idx_site_members_user_id ON site_members (user_id);
 
--- ============================ site_tokens ============================
--- Per-project MCP/API token. (consistency-report #1.2 canonical shape.)
-CREATE TABLE site_tokens (
+-- ============================ user_tokens ============================
+-- Per-USER MCP/API token (established by migration 0004, which DROPPED the v1
+-- per-project `site_tokens`). A token is owned by a user and automatically covers
+-- ALL of that user's memberships; the effective scope on a given site is computed
+-- at call time as intersection(token.scopes, membership-role scopes) — §6.2.
+CREATE TABLE user_tokens (
     id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    site_id          UUID        NOT NULL REFERENCES sites(id) ON DELETE CASCADE,  -- one token = one site
-    created_by       UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- the human it acts as
+    user_id          UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- the human it acts as
     name             TEXT        NOT NULL DEFAULT '',   -- human label, e.g. "claude-laptop"
     token_prefix     TEXT        NOT NULL,              -- first 12 chars of plaintext (UI + lookup)
     token_hash       BYTEA       NOT NULL,              -- sha256(plaintext), 32 bytes
     scopes           TEXT[]      NOT NULL DEFAULT '{read,write,publish}',  -- subset of {read,write,publish}
-    can_create_sites BOOLEAN     NOT NULL DEFAULT FALSE,  -- gates create_site over MCP (decision #2/#8)
+    can_create_sites BOOLEAN     NOT NULL DEFAULT FALSE,  -- gates create_site over MCP; capped by users.can_create_sites
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at     TIMESTAMPTZ,                        -- throttled update
     expires_at       TIMESTAMPTZ,                        -- NULL = no expiry
     revoked_at       TIMESTAMPTZ,                        -- NULL = active
-    CONSTRAINT site_tokens_hash_len CHECK (octet_length(token_hash) = 32),
-    CONSTRAINT site_tokens_prefix_len CHECK (char_length(token_prefix) = 12),
-    CONSTRAINT site_tokens_scopes_valid CHECK (scopes <@ ARRAY['read','write','publish']::text[])
+    CONSTRAINT user_tokens_hash_len CHECK (octet_length(token_hash) = 32),
+    CONSTRAINT user_tokens_prefix_len CHECK (char_length(token_prefix) = 12),
+    CONSTRAINT user_tokens_scopes_valid CHECK (scopes <@ ARRAY['read','write','publish']::text[])
 );
-CREATE UNIQUE INDEX uq_site_tokens_hash   ON site_tokens (token_hash);
-CREATE INDEX idx_site_tokens_prefix       ON site_tokens (token_prefix) WHERE revoked_at IS NULL;
-CREATE INDEX idx_site_tokens_site_id      ON site_tokens (site_id);
+CREATE UNIQUE INDEX uq_user_tokens_hash   ON user_tokens (token_hash);
+CREATE INDEX idx_user_tokens_prefix       ON user_tokens (token_prefix) WHERE revoked_at IS NULL;
+CREATE INDEX idx_user_tokens_user_id      ON user_tokens (user_id);
 
 -- ============================ handle_redirects ============================
 CREATE TABLE handle_redirects (
@@ -749,7 +753,7 @@ CREATE TABLE audit_log (
     id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     actor_user_id UUID      REFERENCES users(id)       ON DELETE SET NULL,  -- human actor; NULL for system
     site_id    UUID         REFERENCES sites(id)       ON DELETE SET NULL,  -- target; NULL for instance-level
-    token_id   UUID         REFERENCES site_tokens(id) ON DELETE SET NULL,  -- if via a token
+    token_id   UUID         REFERENCES user_tokens(id) ON DELETE SET NULL,  -- if via a token (re-pointed in 0004)
     action     TEXT         NOT NULL,        -- 'site.create','file.write','publish','rollback',...
     source     audit_source NOT NULL,        -- upload|editor|mcp|system
     commit_sha TEXT,                         -- resulting git commit, if any
@@ -819,12 +823,11 @@ DELETE FROM reserved_handles WHERE handle IN
 | `site_members.site_id → sites` | CASCADE | membership is a pure join |
 | `site_members.user_id → users` | CASCADE | membership is a pure join |
 | `site_members.created_by → users` | SET NULL | keep the grant record |
-| `site_tokens.site_id → sites` | CASCADE | tokens die with the site |
-| `site_tokens.created_by → users` | CASCADE | no orphan credentials |
+| `user_tokens.user_id → users` | CASCADE | no orphan credentials (a token dies with its owner) |
 | `handle_redirects.site_id → sites` | CASCADE | free former handles on delete |
 | `audit_log.actor_user_id → users` | **SET NULL** | audit must survive referenced-row deletion |
 | `audit_log.site_id → sites` | **SET NULL** | audit must survive (denormalize handle into metadata) |
-| `audit_log.token_id → site_tokens` | **SET NULL** | audit must survive |
+| `audit_log.token_id → user_tokens` | **SET NULL** | audit must survive (re-pointed in 0004) |
 
 > **Deleting a site** removes the `sites` row's relational dependents via cascade, but the
 > on-disk repo is the SiteService's job: soft-delete sets `deleted_at`; the 30-day reaper
@@ -931,11 +934,12 @@ The serve-side MIME table in `routing-and-serving.md` §5.3 (exported as one Go 
 
 Two **orthogonal** axes:
 - **Per-site role** (`site_members.role`): `owner | editor | viewer`.
-- **Token/API scope** (`site_tokens.scopes`): subset of `{read, write, publish}`, chain
-  `read ⊂ write ⊂ publish`.
+- **Token/API scope** (`user_tokens.scopes`): subset of `{read, write, publish}`, chain
+  `read ⊂ write ⊂ publish`. A token is owned by a **user** (`user_tokens.user_id`) and
+  automatically covers ALL of that user's memberships (no per-project binding).
 - **Instance superuser**: `users.is_admin` (a third, separate axis — admin screen, quotas,
   reserved-word edits; not a site role).
-- **Site-creation capability**: `users.can_create_sites` and `site_tokens.can_create_sites`.
+- **Site-creation capability**: `users.can_create_sites` and `user_tokens.can_create_sites`.
 
 ### 6.1 Role → capability matrix
 
@@ -963,27 +967,38 @@ Notes:
 - `users.is_admin` overrides for instance operations only; it does NOT silently grant
   per-site write — admins act on a site by being a member (or via explicit admin tooling).
 
-### 6.2 Token-scope × role capping rule
+### 6.2 Token-scope × role capping rule (membership-capped, per-user token)
 
-A token's *effective* capability = **intersection** of:
+A token is **owned by a user** (`user_tokens.user_id`) and automatically covers EVERY
+project the user is a member of. On a given site, the token's *effective* capability =
+**intersection** of:
 1. the token's `scopes` (chain `read ⊂ write ⊂ publish`), AND
-2. the capability of the **creating member's role** at the time of each call
-   (`site_members.role` of `site_tokens.created_by`).
+2. the scopes the user's **membership role** grants on THAT site, re-evaluated on EVERY
+   request (`site_members.role` of `user_tokens.user_id`): `owner/editor → {read,write,
+   publish}`, `viewer → {read}`.
 
-Concretely:
+Because step 2 is re-evaluated per call, removing the user's membership (or downgrading the
+role) **instantly** limits the token — no re-issue — and the token can **never exceed the
+user's own access**.
+
+Concretely, on a site where the user is a member:
 - `read` scope ⇒ read tools only.
-- `write` scope ⇒ read + write/save/rollback/create_branch — **only if the creating member is
-  owner or editor** (a viewer cannot mint a write-capable token; capped to read).
-- `publish` scope ⇒ write + publish — **only if the creating member may publish** (owner, or
-  editor under `publish_mode='direct'`).
-- `create_site` via MCP additionally requires `site_tokens.can_create_sites = true` (default
-  FALSE) AND the creating user's `users.can_create_sites = true` (decision #2/#8).
+- `write` scope ⇒ read + write/save/rollback/create_branch — **only if the user is owner or
+  editor on that site** (capped to read where the user is a viewer).
+- `publish` scope ⇒ write + publish — **only if the user may publish** (owner, or editor
+  under `publish_mode='direct'`).
+- A user who is **not a member** of the named site is refused with `not_found` (no existence
+  leak) — the token cannot reach it at all.
+- `create_site` via MCP requires `user_tokens.can_create_sites = true` (default FALSE) AND
+  the user's `users.can_create_sites = true` (decision #2/#8). The new site is owned by the
+  user, so the SAME token immediately covers it.
 - A token can never exceed `owner`; "delete site / manage members / issue tokens" are **not**
   grantable to any token in v1.
 
 Enforcement point: REST/MCP middleware (the Service is not membership-authz-aware, §1). The
-MCP layer's structural guarantee (no content tool takes a site selector; always called with
-`claims.SiteID`) prevents cross-site pivot (decision #8 / `mcp.md` §4).
+MCP layer resolves the named `site` and caps the call to the user's membership
+(membership-capped authorization REPLACES the old "no content tool takes a site selector"
+pin; `mcp.md` §4).
 
 ---
 
@@ -1014,7 +1029,8 @@ The single set of wire names used by **both** REST (`openapi.yaml`) and MCP (`mc
 - `via` value mapping is fixed: `ui`/`monaco` → `editor`; `webhook`/`github`/`admin` →
   `system` (finer distinction in `audit_log.metadata.kind`) (consistency-report #1.12).
 - Token plaintext format: **`kotoji_pat_<base62>`**, ≥160 bits CSPRNG; only `sha256(hash)` +
-  12-char `token_prefix` stored (consistency-report #1.2).
+  12-char `token_prefix` stored. A token is **per-user** (`user_tokens.user_id`) and
+  membership-capped — it covers all the user's projects, effective scope = token ∩ role (§6.2).
 
 ---
 
@@ -1027,8 +1043,9 @@ The single set of wire names used by **both** REST (`openapi.yaml`) and MCP (`mc
 2. **Per-site roles.** `owner` (full: members, rename, delete, publish, edit, branches),
    `editor` (edit + publish + create/delete branches), `viewer` (read incl. previews; NO
    writes). Instance superuser = `users.is_admin` (separate axis). Token/API scope chain
-   `read ⊂ write ⊂ publish`, **capped by the creating member's role**. Both users and tokens
-   carry `can_create_sites`.
+   `read ⊂ write ⊂ publish`. A token is **per-user** (`user_tokens`) and covers all the
+   user's memberships; on each site its effective scope is **capped by the user's role on
+   that site**, re-evaluated per request (§6.2). Both users and tokens carry `can_create_sites`.
 3. **Soft delete.** `sites.deleted_at`; **30-day** grace (handle stays reserved); the reaper
    makes a `git bundle` backup to `/data/backups/{uuid}` then reclaims disk.
 4. **Single backend replica for v1.** In-process per-site keyed mutex + `flock`. HA is not a

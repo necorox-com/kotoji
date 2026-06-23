@@ -19,10 +19,10 @@ func validPlaintext(suffix string) string {
 
 func TestVerifier_Valid(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
-	pt := store.seedToken(validPlaintext("aaaa"), siteID, userID, tokenID, tokenOpts{
+	userID, tokenID := uuid.New(), uuid.New()
+	pt := store.seedToken(validPlaintext("aaaa"), userID, tokenID, tokenOpts{
 		scopes:           []string{"read", "write", "publish"},
-		creatorCanCreate: true,
+		userCanCreate: true,
 		canCreateSites:   true,
 	})
 
@@ -37,7 +37,6 @@ func TestVerifier_Valid(t *testing.T) {
 
 	c, ok := claimsFromTokenInfo(info)
 	require.True(t, ok)
-	assert.Equal(t, siteID, c.SiteID)
 	assert.Equal(t, userID, c.UserID)
 	assert.Equal(t, tokenID, c.TokenID)
 	assert.ElementsMatch(t, []string{"read", "write", "publish"}, c.Scopes)
@@ -55,12 +54,12 @@ func TestVerifier_Valid(t *testing.T) {
 
 func TestVerifier_CanCreate_CappedByCreator(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	userID, tokenID := uuid.New(), uuid.New()
 	// Token says it can create, but the creating user cannot → effective false.
-	pt := store.seedToken(validPlaintext("bbbb"), siteID, userID, tokenID, tokenOpts{
+	pt := store.seedToken(validPlaintext("bbbb"), userID, tokenID, tokenOpts{
 		scopes:           []string{"read", "write"},
 		canCreateSites:   true,
-		creatorCanCreate: false,
+		userCanCreate: false,
 	})
 	v := NewVerifier(store)
 	v.touch = func(uuid.UUID) {}
@@ -85,10 +84,10 @@ func TestVerifier_Malformed(t *testing.T) {
 
 func TestVerifier_UnknownHash(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	userID, tokenID := uuid.New(), uuid.New()
 	// Seed a token sharing the prefix but with a different plaintext (hash differs).
 	good := validPlaintext("cccc")
-	store.seedToken(good, siteID, userID, tokenID, tokenOpts{scopes: []string{"read"}})
+	store.seedToken(good, userID, tokenID, tokenOpts{scopes: []string{"read"}})
 
 	// Same 12-char prefix, different remainder → hash mismatch.
 	attacker := good[:prefixLen] + "ZZZZZZZZZZZZZZZZ"
@@ -102,9 +101,9 @@ func TestVerifier_UnknownHash(t *testing.T) {
 
 func TestVerifier_Revoked(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	userID, tokenID := uuid.New(), uuid.New()
 	// revoked tokens are not returned by the query → treated as unknown (401).
-	pt := store.seedToken(validPlaintext("dddd"), siteID, userID, tokenID, tokenOpts{
+	pt := store.seedToken(validPlaintext("dddd"), userID, tokenID, tokenOpts{
 		scopes:  []string{"read"},
 		revoked: true,
 	})
@@ -118,9 +117,9 @@ func TestVerifier_Revoked(t *testing.T) {
 
 func TestVerifier_Expired(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	userID, tokenID := uuid.New(), uuid.New()
 	past := time.Now().Add(-time.Hour)
-	pt := store.seedToken(validPlaintext("eeee"), siteID, userID, tokenID, tokenOpts{
+	pt := store.seedToken(validPlaintext("eeee"), userID, tokenID, tokenOpts{
 		scopes:    []string{"read"},
 		expiresAt: &past,
 	})
@@ -136,11 +135,11 @@ func TestVerifier_Expired(t *testing.T) {
 
 func TestVerifier_InactiveCreator_Rejected(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
+	userID, tokenID := uuid.New(), uuid.New()
 	// An inactive creating user means the DB query returns no row → 401.
-	pt := store.seedToken(validPlaintext("hhhh"), siteID, userID, tokenID, tokenOpts{
+	pt := store.seedToken(validPlaintext("hhhh"), userID, tokenID, tokenOpts{
 		scopes:          []string{"read"},
-		creatorInactive: true,
+		userInactive: true,
 	})
 	v := NewVerifier(store)
 	v.touch = func(uuid.UUID) {}
@@ -165,8 +164,8 @@ func TestVerifier_DBError_Is500Class(t *testing.T) {
 func TestVerifier_TouchNeverBlocksOnError(t *testing.T) {
 	store := newFakeTokenStore()
 	store.touchErr = errors.New("touch boom")
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
-	pt := store.seedToken(validPlaintext("gggg"), siteID, userID, tokenID, tokenOpts{scopes: []string{"read"}})
+	userID, tokenID := uuid.New(), uuid.New()
+	pt := store.seedToken(validPlaintext("gggg"), userID, tokenID, tokenOpts{scopes: []string{"read"}})
 
 	v := NewVerifier(store) // default async touch
 	info, err := v.Verify(context.Background(), pt, nil)

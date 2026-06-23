@@ -2,9 +2,9 @@
 
 > Status: **locked design**, implementation-ready.
 > Scope: the kotoji control-plane MCP server (Go). Defines transport, mounting,
-> per-project token auth, scope enforcement, every tool's I/O schema + error
-> behaviour + the `SiteService` method it delegates to, client config, safety
-> guarantees, limits, Go type sketches and the test matrix.
+> per-user token auth (membership-capped), scope enforcement, every tool's I/O
+> schema + error behaviour + the `SiteService` method it delegates to, client
+> config, safety guarantees, limits, Go type sketches and the test matrix.
 
 This document is a **contract**. The MCP layer is a thin, authenticated adapter
 over `SiteService` — it owns **no git logic**. Every mutation funnels through the
@@ -34,8 +34,12 @@ from a forwarded HTTP session.
 ```
 
 The MCP layer's only extra responsibilities vs. REST are:
-1. Translate the **bearer token** into `(userID, siteUUID, scopes)`.
-2. **Pin every tool call to that one site** (scope enforcement; §4).
+1. Translate the **bearer token** into `(userID, tokenID, scopes, canCreateSites)` —
+   a token is owned by a USER, not bound to a site.
+2. **Membership-cap every tool call**: resolve the named `site` (handle), read the
+   user's membership role, and require `intersection(token.scopes, role scopes)`
+   (§4). A token can only ever act within its user's memberships, and never beyond
+   the user's own access.
 3. Map `SiteService` errors into MCP tool-result errors (§6).
 
 ---
@@ -72,10 +76,10 @@ shadow `mcp.hosting.example.com`. (See identifier model in the spec.)
 
 `NewStreamableHTTPHandler` takes a `getServer func(*http.Request) *mcp.Server`.
 kotoji uses a **single shared `*mcp.Server`** (tools are stateless; per-call
-state comes from the token, not the server). The per-site scoping is enforced
-**inside each tool**, not by minting a server per site — minting per-site
-servers would mean N tool registrations and a registry keyed by host, which buys
-nothing because the token already identifies the site.
+state comes from the token, not the server). The per-site authorization is
+enforced **inside each tool** (resolve the named site → membership role →
+effective scope), not by minting a server per site — the token identifies the
+USER, and each tool names the site it targets.
 
 ```go
 // internal/mcpserver/server.go
@@ -119,7 +123,7 @@ user visits).
 
 ---
 
-## 3. Authentication: per-project scoped token
+## 3. Authentication: per-user token (membership-capped)
 
 ### 3.1 How the client passes the token
 
@@ -134,31 +138,37 @@ Token format: `kotoji_pat_` prefix (greppable, lets us scan-detect leaks) +
 plaintext is shown exactly once at creation time in the dashboard. Prefix lets
 the verifier fast-reject anything that isn't ours before a DB hit.
 
-### 3.2 Token storage (`site_tokens`)
+### 3.2 Token storage (`user_tokens`)
 
-Authoritative DDL (mirrored in `docs/contracts/db.md`):
+Authoritative DDL (mirrored in `docs/contracts/db.md` / migration `0004`):
 
 ```sql
-CREATE TABLE site_tokens (
-    id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-    site_id      UUID        NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
-    user_id      UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name         TEXT        NOT NULL,             -- human label, e.g. "claude-laptop"
-    token_hash   BYTEA       NOT NULL,             -- sha256(plaintext), 32 bytes
-    token_prefix TEXT        NOT NULL,             -- first 12 chars of plaintext, for UI display
-    scopes       TEXT[]      NOT NULL DEFAULT '{read,write,publish}',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_used_at TIMESTAMPTZ,
-    expires_at   TIMESTAMPTZ,                      -- NULL = no expiry
-    revoked_at   TIMESTAMPTZ
+CREATE TABLE user_tokens (
+    id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id          UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- the human the token acts as
+    name             TEXT        NOT NULL DEFAULT '',  -- human label, e.g. "claude-laptop"
+    token_prefix     TEXT        NOT NULL,             -- first 12 chars of plaintext, for UI + lookup
+    token_hash       BYTEA       NOT NULL,             -- sha256(plaintext), 32 bytes
+    scopes           TEXT[]      NOT NULL DEFAULT '{read,write,publish}',
+    can_create_sites BOOLEAN     NOT NULL DEFAULT FALSE, -- gates create_site; capped by users.can_create_sites
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at     TIMESTAMPTZ,
+    expires_at       TIMESTAMPTZ,                       -- NULL = no expiry
+    revoked_at       TIMESTAMPTZ
 );
-CREATE UNIQUE INDEX site_tokens_token_hash_key ON site_tokens (token_hash);
-CREATE INDEX site_tokens_site_id_idx ON site_tokens (site_id);
+CREATE UNIQUE INDEX uq_user_tokens_hash   ON user_tokens (token_hash);
+CREATE INDEX idx_user_tokens_prefix       ON user_tokens (token_prefix) WHERE revoked_at IS NULL;
+CREATE INDEX idx_user_tokens_user_id      ON user_tokens (user_id);
 ```
 
-A token is **bound to exactly one `site_id`** at issuance. There is no
-"account-wide" MCP token in v1 — this is the core security property. (Multi-site
-tokens are an Open Question, §11.)
+A token is **owned by a user** and carries ONE scope set; it **automatically
+covers every project the user is a member of**. There is no site binding on the
+token. The **effective** capability on a given site is re-computed on EVERY
+request as `intersection(token.scopes, the membership role's scopes)` — so
+removing the user's membership (or downgrading the role) instantly limits the
+token, and a token can **never exceed the user's own access** (§4). This
+membership-capped model REPLACES the v1 per-project `site_tokens` (which was
+dropped; existing per-project tokens were invalidated, users re-issue).
 
 ### 3.3 The `TokenVerifier`
 
@@ -168,48 +178,35 @@ The SDK's `auth.TokenVerifier` is:
 type TokenVerifier func(ctx context.Context, token string, req *http.Request) (*TokenInfo, error)
 ```
 
-kotoji's implementation:
+kotoji's implementation resolves the token to the OWNING USER (no site):
 
 ```go
 // internal/mcpserver/verifier.go
-type kotojiClaims struct {
-    SiteID  uuid.UUID
-    UserID  uuid.UUID
-    TokenID uuid.UUID
+type TokenInfo struct {
+    UserID         uuid.UUID // the human the token acts as (user_tokens.user_id)
+    TokenID        uuid.UUID
+    Scopes         []string  // subset of {read,write,publish}
+    CanCreateSites bool      // token flag AND'd with users.can_create_sites
 }
 
 func (v *Verifier) Verify(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
     if !strings.HasPrefix(token, tokenPrefix) { // "kotoji_pat_"
         return nil, fmt.Errorf("malformed token: %w", auth.ErrInvalidToken)
     }
-    sum := sha256.Sum256([]byte(token))
-    row, err := v.q.GetSiteTokenByHash(ctx, sum[:]) // sqlc query
-    if errors.Is(err, pgx.ErrNoRows) {
-        return nil, fmt.Errorf("unknown token: %w", auth.ErrInvalidToken)
-    }
+    rows, err := v.q.GetUserTokenByPrefix(ctx, token[:12]) // active tokens sharing the prefix
     if err != nil {
-        return nil, err // 500-ish; SDK maps non-ErrInvalidToken as needed
+        return nil, err // infra error → 500
     }
-    if row.RevokedAt.Valid {
-        return nil, fmt.Errorf("revoked token: %w", auth.ErrInvalidToken)
-    }
-    if row.ExpiresAt.Valid && time.Now().After(row.ExpiresAt.Time) {
-        return nil, fmt.Errorf("expired token: %w", auth.ErrInvalidToken)
-    }
-    // Best-effort last_used_at bump (async, never blocks the request).
-    v.touchAsync(row.ID)
-
+    sum := sha256.Sum256([]byte(token))
+    // constant-time compare sum against each candidate hash; reject expired/revoked.
+    // ... (match selected) ...
+    canCreate := match.CanCreateSites && match.UserCanCreateSites // capped by the owner
+    v.touch(match.ID) // best-effort last_used_at bump
     return &auth.TokenInfo{
-        Scopes:     row.Scopes,            // []string: read|write|publish
-        Expiration: expiry(row.ExpiresAt), // zero time if NULL
-        UserID:     row.UserID.String(),
-        Extra: map[string]any{
-            kClaims: kotojiClaims{
-                SiteID:  row.SiteID,
-                UserID:  row.UserID,
-                TokenID: row.ID,
-            },
-        },
+        Scopes:     match.Scopes,
+        Expiration: expiry(match.ExpiresAt),
+        UserID:     match.UserID.String(),
+        Extra:      map[string]any{kClaims: TokenInfo{UserID: match.UserID, TokenID: match.ID, Scopes: match.Scopes, CanCreateSites: canCreate}},
     }, nil
 }
 ```
@@ -218,11 +215,11 @@ Notes:
 - Verification failures **must** unwrap to `auth.ErrInvalidToken` so the SDK
   returns `401` with a `WWW-Authenticate` header (RFC 6750). Infra errors
   (DB down) return a plain error → `500`.
-- We **do not** set global `Scopes` in `RequireBearerTokenOptions`; the SDK can
-  check scopes centrally, but kotoji's scope semantics are *per tool*
-  (`read_file` needs `read`, `publish` needs `publish`), so each tool checks its
-  own required scope (§4.2). This keeps a single source of truth for "what scope
-  does this tool need" next to the tool.
+- We **do not** set global `Scopes` in `RequireBearerTokenOptions`. Scope is
+  enforced **per call, per site**: a tool requiring `write` is allowed only if
+  `write ∈ intersection(token.scopes, role scopes)` for the named site (§4.2).
+- The verifier no longer carries a `SiteID`; the site comes from each tool's
+  `site` argument and is authorized in the handler (§4.1).
 
 ### 3.4 From token to handler
 
@@ -230,16 +227,13 @@ Inside a tool handler, the SDK exposes the verified token via the request's
 `Extra`:
 
 ```go
-func principalFrom(req *mcp.CallToolRequest) (kotojiClaims, []string, error) {
+func principalFrom(req *mcp.CallToolRequest) (TokenInfo, bool) {
     info := req.GetExtra().TokenInfo // *auth.TokenInfo, set by RequireBearerToken
     if info == nil {
-        return kotojiClaims{}, nil, errUnauthenticated
+        return TokenInfo{}, false
     }
-    c, ok := info.Extra[kClaims].(kotojiClaims)
-    if !ok {
-        return kotojiClaims{}, nil, errUnauthenticated
-    }
-    return c, info.Scopes, nil
+    c, ok := info.Extra[kClaims].(TokenInfo)
+    return c, ok
 }
 ```
 
@@ -250,48 +244,54 @@ func principalFrom(req *mcp.CallToolRequest) (kotojiClaims, []string, error) {
 This is the headline security property. Two independent guards, both in the
 `registry` wrapper that decorates every tool handler:
 
-### 4.1 Site pinning (the hard wall)
+### 4.1 Membership-cap (the hard wall)
 
-The token carries **one** `SiteID`. **No tool accepts a site identifier that can
-override it for mutation/read of project contents.** Concretely:
+The token identifies a **user**, not a site. Every content tool takes a `site`
+(the project handle), and the wrapper **caps** the call to the user's membership:
 
-- `list_files`, `read_file`, `write_file`, `save`, `publish`, `get_diff`,
-  `get_log`, `rollback` take **no `site` / `handle` / `uuid` argument at all**.
-  The site is `claims.SiteID`, full stop. There is no input field an attacker can
-  populate to pivot.
-- `list_sites` returns **only** the single pinned site (so a multi-tool client
-  still sees a consistent shape), filtered to `WHERE id = claims.SiteID`.
-- `create_site` is the **one** tool that creates a *new* site. It is therefore
-  the only one whose result is a site the token did **not** previously address.
-  See §5.5 for its special handling (it requires the `write` scope **and** an
-  account-level capability flag; by default project tokens **cannot** create
-  sites — see §11 gap).
+1. Resolve the named `site` (current handle → site). A miss is `not_found`.
+2. Read the user's **membership role** on that site (`site_members.GetRole`). If
+   the user is **NOT a member**, return `not_found` — we never confirm a site's
+   existence to a non-member (no existence leak).
+3. Compute **effective scopes** = `intersection(token.scopes, roleScopes(role))`,
+   where `owner/editor → {read,write,publish}` and `viewer → {read}` (CANONICAL §6).
+4. The tool's required scope must be in the effective set, else `forbidden`.
 
-Because no tool takes a target site, path-style traversal across projects is
-structurally impossible — there is no parameter to traverse with. The
-`SiteService` is additionally called as `svc.X(ctx, claims.SiteID, ...)`, and
-`SiteService` itself resolves storage as `/data/sites/{uuid}/.git` from that
-UUID. A compromised token still only ever reaches one repo.
+This runs on **every call**, so a token can only ever act within its user's
+memberships and can never exceed the user's access — removing a membership or
+downgrading the role limits the token immediately, with no re-issue. A token of
+user A naming a site A is not a member of is refused (`not_found`) before any
+`SiteService` touch: this REPLACES the old "no tool takes a site selector / one
+token = one site" pin. `SiteService` still resolves storage as
+`/data/sites/{uuid}/.git` from the resolved site UUID.
 
-### 4.2 Action scope check
+`list_sites` returns the user's memberships (with role + effective scope per
+site); `create_site` mints a NEW site (the user becomes owner) and is gated by
+`token.can_create_sites AND users.can_create_sites` (§5.5).
 
-Every tool declares the scope it needs; the wrapper rejects before delegating:
+### 4.2 Action scope check (token chain × membership role)
+
+Every tool declares the scope it needs. The effective grant is the intersection
+of the token's scopes and the membership role's scopes:
 
 | scope | grants tools |
 |---|---|
 | `read` | `list_sites`, `list_files`, `read_file`, `get_diff`, `get_log` |
-| `write` | everything in `read` + `write_file`, `save`, `rollback`, `create_site`* |
+| `write` | everything in `read` + `write_file`, `save`, `rollback`, `create_branch` |
 | `publish` | everything in `write` + `publish` |
 
-`*` `create_site` additionally gated by account capability (§5.5 / §11).
+`create_site` is NOT a `write`-scope gate; it is gated by `can_create_sites`
+(token AND user), §5.5.
 
-Scopes are a superset chain (`publish ⊇ write ⊇ read`) enforced at issuance, so
-a `publish` token also reads. The wrapper checks `hasScope(tokenScopes, required)`.
+Token scopes are a superset chain (`publish ⊇ write ⊇ read`) enforced at issuance.
+The role scopes are: `owner/editor → {read,write,publish}`, `viewer → {read}`.
+A tool is allowed only when its required scope is in BOTH (e.g. a `write` token on
+a site where the user is a `viewer` may only read).
 
 ### 4.3 Path confinement inside a site
 
-Within the one site, `write_file`/`read_file` paths are still untrusted input.
-The wrapper validates **before** `SiteService`:
+Within the resolved site, `write_file`/`read_file` paths are still untrusted
+input. The wrapper validates **before** `SiteService`:
 - reject absolute paths, `..` segments, `.git/` prefix, NUL bytes, backslashes;
 - normalize to a clean relative POSIX path;
 - enforce the **extension allowlist** (same list as Zip upload:
@@ -301,22 +301,30 @@ The wrapper validates **before** `SiteService`:
 `SiteService` re-validates (defence in depth) — the MCP layer must not be the
 only guard.
 
-### 4.4 The decorator
+### 4.4 The decorator + per-site authorization
+
+The guard does the TOKEN-level gates (principal recovery + per-token rate limit);
+the per-SITE authorization happens inside each handler via `authorizeSite`, since
+the target site comes from the tool's `site` argument:
 
 ```go
-func (r *registry) guard(required scope, fn toolFn) mcp.ToolHandlerFor[any, any] {
-    return func(ctx context.Context, req *mcp.CallToolRequest, args any) (*mcp.CallToolResult, any, error) {
-        claims, scopes, err := principalFrom(req)
-        if err != nil {
-            return toolErr(codeUnauthenticated, "invalid or missing token"), nil, nil
-        }
-        if !hasScope(scopes, required) {
-            return toolErr(codeForbidden,
-                fmt.Sprintf("token lacks %q scope", required)), nil, nil
-        }
-        ctx = withClaims(ctx, claims) // every downstream SiteService call uses claims.SiteID
-        return fn(ctx, req, args)
+// guard: token-level gates only (no site needed yet).
+func guard(r *registry, class toolClass, fn toolFn) mcp.ToolHandlerFor[In, Out] {
+    return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
+        claims, ok := principalFrom(req)
+        if !ok { return toolErr(codeUnauthenticated, "invalid or missing token"), zero, nil }
+        if !r.limits.Allow(claims.TokenID, class) { return toolErr(codeRateLimited, ...), zero, nil }
+        return fn(withClaims(ctx, claims), claims, in)
     }
+}
+
+// authorizeSite: per-call membership cap (run first in each content handler).
+func (r *registry) authorizeSite(ctx, c TokenInfo, handle string, need scope) (authorized, *CallToolResult, error) {
+    s, err := r.svc.GetSiteByHandle(ctx, Handle(handle)) // miss → not_found
+    role, err := r.members.GetRole(ctx, {s.ID, c.UserID}) // no membership → not_found
+    eff := intersect(c.Scopes, roleScopes(role))          // owner/editor→rwp, viewer→r
+    if !contains(eff, need) { return _, toolErr(codeForbidden, ...), nil }
+    return authorized{site: s, role: role, scopes: eff}, nil, nil
 }
 ```
 
@@ -325,8 +333,10 @@ func (r *registry) guard(required scope, fn toolFn) mcp.ToolHandlerFor[any, any]
 ## 5. Tool catalogue
 
 Conventions for every tool below:
-- **No tool takes a site selector** except `list_sites` (returns the pinned one)
-  and `create_site` (mints a new one). The site is `claims.SiteID`.
+- **Every content tool takes a `site`** (the project handle), authorized per call
+  against the token user's membership (§4.1). `list_sites` takes no selector (it
+  enumerates the user's memberships); `create_site` takes a NEW `handle` (it mints
+  a new site, not a selector over existing ones).
 - `branch` is optional; default is the site's working branch (`draft`).
   `branch` must pass the same validation as handles minus reserved-word rules
   (branch names `published`/`draft`/`feature-*` are allowed; arbitrary names are
@@ -346,12 +356,13 @@ The `SiteService` method names referenced below are defined in
 
 ### 5.1 `list_sites`  — scope: `read`
 
-Lists the site(s) this token may address. With v1 single-site tokens, exactly
-one element (or zero if the site was deleted under the token).
+Lists the projects the token's **user is a member of**, each with the user's
+membership `role` and the `effective_scopes` (`token.scopes ∩ role scopes`) so the
+model knows exactly what it may do where. Empty when the user has no memberships.
 
 **Input**
 ```jsonc
-{} // no arguments
+{} // no arguments — enumerates the user's memberships
 ```
 
 **Output**
@@ -361,6 +372,8 @@ one element (or zero if the site was deleted under the token).
     {
       "uuid": "7f3a...",
       "handle": "expense-calc",
+      "role": "owner",
+      "effective_scopes": ["read", "write", "publish"],
       "published_url": "https://expense-calc.hosting.example.com",
       "draft_url": "https://expense-calc--draft.hosting.example.com",
       "default_branch": "draft",
@@ -370,9 +383,8 @@ one element (or zero if the site was deleted under the token).
   ]
 }
 ```
-**Delegates to** `svc.GetSite(ctx, claims.SiteID)` (single fetch; no list query
-needed since scope is one site).
-**Errors** — `not_found` if the site was deleted.
+**Delegates to** `members.ListSitesForUser(ctx, claims.UserID)` (membership join).
+**Errors** — infra only (a non-member simply does not see the site).
 
 ---
 
@@ -381,6 +393,7 @@ needed since scope is one site).
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",   // required: project handle (from list_sites)
   "branch": "draft",        // optional, default = default working branch
   "path": "assets/",        // optional subtree filter, default = repo root
   "ref": "a1b2c3d"          // optional commit SHA to list at; default = branch tip
@@ -401,7 +414,8 @@ needed since scope is one site).
 Directories are implied by paths; we return a **flat file list** (non-engineer
 clients and AIs both prefer full paths). `size` is bytes of the blob at `ref`.
 
-**Delegates to** `svc.ListFiles(ctx, claims.SiteID, branch, ref, pathPrefix)`.
+**Delegates to** `svc.ListFiles(ctx, resolvedSiteID, branch, ref, pathPrefix)`
+after `authorizeSite(site, read)`.
 **Errors** — `not_found` (branch/ref), `validation` (bad path).
 
 ---
@@ -411,6 +425,7 @@ clients and AIs both prefer full paths). `size` is bytes of the blob at `ref`.
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",   // required: project handle (from list_sites)
   "path": "index.html",     // required
   "branch": "draft",        // optional
   "ref": "a1b2c3d"          // optional; default = branch tip
@@ -439,9 +454,10 @@ AI client: *read → edit → write_file(base_sha = the commit I read)*.
 `encoding:"base64"`. Files over the read limit return `truncated:true` and the
 first N bytes; the model is told to use the editor for large binaries.
 
-**Delegates to** `svc.ReadFile(ctx, claims.SiteID, branch, ref, path)`.
-**Errors** — `not_found`, `validation`, `too_large` (only if even truncation
-disabled for binary, §10).
+**Delegates to** `svc.ReadFile(ctx, resolvedSiteID, branch, ref, path)` after
+`authorizeSite(site, read)`.
+**Errors** — `not_found` (incl. non-membership), `validation`, `too_large` (only
+if even truncation disabled for binary, §10).
 
 ---
 
@@ -454,6 +470,7 @@ flow where "save" = `write_file(commit:true)` or an explicit `save` call.
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",        // required: project handle (from list_sites)
   "path": "index.html",          // required
   "content": "<!doctype html>...",// required
   "encoding": "utf-8",           // "utf-8" (default) | "base64"
@@ -518,18 +535,19 @@ base_sha/branch=published), `not_found` (branch), `too_large` (§10).
 
 ---
 
-### 5.5 `create_site`  — scope: `write` + account capability
+### 5.5 `create_site`  — capability: `can_create_sites`
 
-Creates a brand-new repo + DB row. **This is the one tool whose result is a site
-outside the original token's binding**, so it is special-cased:
+Creates a brand-new repo + DB row. It does NOT take a `site` selector (it mints a
+new one via `handle`), and it is gated by **capability**, not the read/write chain:
 
-- Requires `write` scope **and** the token's account flag `can_create_sites`
-  (column on `site_tokens`, default **false** for project-scoped tokens).
-  Rationale: a per-project token that can spawn arbitrary new projects is a
-  privilege-escalation vector and breaks the "scoped to one project" promise.
-  By default, **MCP create_site is disabled**; you create the first site in the
-  dashboard, then issue a token for it. (See §11 — this is a real product gap.)
-- When enabled, the new site is owned by `claims.UserID`.
+- Requires `user_tokens.can_create_sites` **AND** `users.can_create_sites`
+  (both re-checked at call time; the token flag is AND'd with the user flag).
+  Default token `can_create_sites = false`. Rationale: a token that can spawn
+  arbitrary new projects is a privilege-escalation vector, so it is opt-in at
+  issuance and still capped by the user's account flag.
+- The new site is owned by `claims.UserID`. Because the token is per-user and
+  automatically covers all the user's memberships, the SAME token immediately
+  works on the new site (the user is its owner) — no new token needed.
 
 **Input**
 ```jsonc
@@ -548,11 +566,11 @@ outside the original token's binding**, so it is special-cased:
   "handle": "invoice-tool",
   "draft_url": "https://invoice-tool--draft.hosting.example.com",
   "default_branch": "draft",
-  "token_hint": "issue a project token for this site in the dashboard to manage it via MCP"
+  "token_hint": "your existing token already covers this new site (you are its owner)"
 }
 ```
-Note: `create_site` does **not** return a usable token for the new site (we will
-not mint credentials over MCP). The model is told to ask the human to issue one.
+Note: `create_site` does **not** mint a new token — your existing per-user token
+already covers the new site (you are its owner).
 
 **Delegates to** `svc.CreateSite(ctx, CreateRequest{Handle, OwnerID, Init, Template})`.
 **Errors** — `forbidden` (capability off / scope), `validation` (handle rules),
@@ -570,6 +588,7 @@ common MCP flow `write_file(commit:true)` already commits, so `save` exists for:
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",      // required: project handle (from list_sites)
   "branch": "draft",           // optional; "published" rejected
   "base_sha": "a1b2c3d4...",   // REQUIRED: optimistic lock, same rules as write_file
   "message": "tidy up layout"  // optional
@@ -601,6 +620,7 @@ Promotes `draft` (or a named source branch) into `published`. This is the
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",      // required: project handle (from list_sites)
   "from": "draft",             // optional source branch, default = default working branch
   "base_sha": "a1b2c3d4...",   // REQUIRED: SHA of `from` the publish is intended for
   "message": "publish: v1.2"   // optional
@@ -643,6 +663,7 @@ The DB `sites.is_published` / `published_commit` columns are updated **inside**
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",       // required: project handle (from list_sites)
   // Two modes:
   //  (a) compare two refs:
   "from": "published",          // ref or branch
@@ -684,6 +705,7 @@ The DB `sites.is_published` / `published_commit` columns are updated **inside**
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",       // required: project handle (from list_sites)
   "branch": "draft",            // optional, default = default working branch
   "path": "assets/app.js",      // optional; history of one file
   "limit": 20,                  // optional, default 20, max 100
@@ -729,6 +751,7 @@ SHA model still holds.
 **Input**
 ```jsonc
 {
+  "site": "expense-calc",       // required: project handle (from list_sites)
   "branch": "draft",            // optional; "published" rejected (publish from a rolled-back draft instead)
   "to_sha": "a1b2c3d4...",      // required: the commit whose tree we restore
   "base_sha": "f6a7b8c9...",    // REQUIRED: current branch tip the client believes it is reverting from
@@ -857,6 +880,7 @@ package mcpserver
 
 // ---- read_file ----
 type ReadFileArgs struct {
+    Site   string  `json:"site" jsonschema:"project handle (from list_sites) to read from"`
     Path   string  `json:"path" jsonschema:"file path relative to the site root, POSIX style"`
     Branch *string `json:"branch,omitempty" jsonschema:"branch name; defaults to the working branch (draft)"`
     Ref    *string `json:"ref,omitempty" jsonschema:"commit SHA to read at; defaults to the branch tip"`
@@ -874,6 +898,7 @@ type ReadFileResult struct {
 
 // ---- write_file ----
 type WriteFileArgs struct {
+    Site     string  `json:"site" jsonschema:"project handle (from list_sites) to write to"`
     Path     string  `json:"path" jsonschema:"file path relative to the site root"`
     Content  string  `json:"content" jsonschema:"full new file contents"`
     Encoding *string `json:"encoding,omitempty" jsonschema:"utf-8 (default) or base64 for binary"`
@@ -895,6 +920,7 @@ type WriteFileResult struct {
 
 // ---- publish ----
 type PublishArgs struct {
+    Site    string  `json:"site" jsonschema:"project handle (from list_sites) to publish"`
     From    *string `json:"from,omitempty" jsonschema:"source branch to publish; default working branch"`
     BaseSHA string  `json:"base_sha" jsonschema:"REQUIRED tip SHA of the source branch you intend to publish"`
     Message *string `json:"message,omitempty"`
@@ -1091,16 +1117,22 @@ swap an in-memory bucket for a Postgres/Redis-backed one.
 run a real temp git repo + ephemeral Postgres (testcontainers or `pg-tmp`).
 
 ### 12.1 Unit — verifier & auth (mock sqlc querier)
-- valid token → `TokenInfo` with correct `SiteID`/`UserID`/`Scopes`.
-- malformed prefix / unknown hash / revoked / expired → unwraps to `ErrInvalidToken`.
+- valid token → `TokenInfo` with correct `UserID`/`TokenID`/`Scopes`/`CanCreateSites` (no `SiteID`).
+- `can_create_sites` capped by the owning user's flag (AND of both).
+- malformed prefix / unknown hash / revoked / expired / inactive owner → unwraps to `ErrInvalidToken`.
 - DB error → non-`ErrInvalidToken` error (maps to 500, not 401).
 - `last_used_at` touch is async and never blocks/fails the request.
 
-### 12.2 Unit — scope & site guard (mock SiteService)
-- table-driven: each tool × {read, write, publish} token → allowed/forbidden matrix.
-- a `read`-scope token calling `write_file`/`publish`/`rollback`/`create_site` → `forbidden`.
-- **pivot attempt**: confirm no tool struct has a site/handle/uuid field (compile-time + reflection test over arg types); the SiteService mock asserts it is *always* called with `claims.SiteID`.
-- `create_site` with capability flag off → `forbidden`.
+### 12.2 Unit — membership-cap authz (mock SiteService + membership querier)
+- table-driven authz matrix: each (token scope × membership role) → effective
+  scope = intersection; a tool requiring a scope outside it → `forbidden`.
+- **token(write) + user is viewer on the site → write denied, read ok**.
+- **non-membership**: a user NOT a member of the named site → `not_found` on every
+  tool (no existence leak).
+- **pivot attempt**: token of user A naming a site A is not a member of → `not_found`
+  before any SiteService touch (membership-capped, replaces the old site-pin).
+- `list_sites` returns only the user's memberships (with effective scope per site).
+- `create_site` requires `token.can_create_sites AND users.can_create_sites` → else `forbidden`.
 
 ### 12.3 Unit — per-tool behaviour (mock SiteService)
 - `read_file` echoes `commit` as the value usable for `base_sha`; base64 path for binary; `truncated` at the read limit.
@@ -1128,20 +1160,20 @@ run a real temp git repo + ephemeral Postgres (testcontainers or `pg-tmp`).
 - 401 path: missing/garbage `Authorization` header → handler returns 401 with `WWW-Authenticate` before any tool runs.
 
 ### 12.6 Security regression tests
-- token for site A cannot read/write site B (issue token A, attempt every tool; assert SiteService only ever sees A's UUID).
+- token of user A cannot reach a site A is not a member of (attempt every tool naming that site → `not_found` before any SiteService touch).
+- membership downgrade limits the token immediately (write token → user downgraded to viewer → write `forbidden`, read still ok; no re-issue).
 - revoked token mid-session: a connection that authenticated, then the token is revoked, fails on the next tool call (verifier hit per call, not cached indefinitely).
 
 ---
 
 ## 13. Open questions / gaps (考慮漏れ)
 
-1. **Multi-site / account-wide tokens.** v1 is strictly one-token-one-site, which
-   is the safest default but means a user juggling 10 projects configures 10 MCP
-   entries. Do we want a *scoped* multi-site token (explicit allow-list of site
-   UUIDs in `site_tokens.scopes` or a join table)? If yes, content tools then
-   **need** a site argument again — reopening the pivot surface. Recommend
-   deferring; if added, the site arg must be validated against the token's
-   allow-list, not free-form.
+1. **Multi-site / account-wide tokens — RESOLVED (per-user model).** A token is
+   now owned by a user and automatically covers all of that user's memberships;
+   content tools take a `site` argument validated against the user's membership at
+   call time (membership-capped). The former pivot risk is closed by the
+   membership cap (a token can never act outside its user's memberships and never
+   exceed the user's role-derived access), not by removing the site argument.
 
 2. **`create_site` over MCP at all.** Disabled by default (capability flag). Is
    "the AI creates a new project autonomously" a desired flow or an anti-feature

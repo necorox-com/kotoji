@@ -216,7 +216,7 @@ func TestResponseConformance(t *testing.T) {
 		{"listFiles", http.MethodGet, "/api/sites/conform-site/branches/draft/files", nil, http.StatusOK},
 		{"readFile", http.MethodGet, "/api/sites/conform-site/branches/draft/file?path=index.html", nil, http.StatusOK},
 		{"listMembers", http.MethodGet, "/api/sites/conform-site/members", nil, http.StatusOK},
-		{"listTokens", http.MethodGet, "/api/sites/conform-site/tokens", nil, http.StatusOK},
+		{"listTokens", http.MethodGet, "/api/tokens", nil, http.StatusOK},
 		{"getLog", http.MethodGet, "/api/sites/conform-site/branches/draft/log", nil, http.StatusOK},
 		// mirrorSite returns 200 with a MirrorResult even when not linked (ok=false);
 		// this validates the new response schema against the contract.
@@ -226,7 +226,7 @@ func TestResponseConformance(t *testing.T) {
 			openapi.WriteFileRequest{Path: "index.html", Content: "<h1>c</h1>", BaseSha: fc.Sha}, http.StatusOK,
 		},
 		{
-			"createToken", http.MethodPost, "/api/sites/conform-site/tokens",
+			"createToken", http.MethodPost, "/api/tokens",
 			openapi.CreateTokenRequest{Name: "ci", Scopes: []openapi.TokenScope{openapi.Read}}, http.StatusCreated,
 		},
 		{

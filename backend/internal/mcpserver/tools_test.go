@@ -9,50 +9,68 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
 // callCtx is a background context for handler calls (claims travel via reqFor).
 func callCtx() context.Context { return context.Background() }
 
-func TestListSites_ReturnsOnlyPinnedSite(t *testing.T) {
+func TestListSites_ReturnsOnlyMemberships(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	mine, _ := seedSite(t, fake, owner, "mine")
-	_, _ = seedSite(t, fake, owner, "other") // a second site the token must NOT see
 	r := newTestRegistry(fake)
-	c := claims(mine.ID, owner, scopeRead, false)
+	mine, _ := seedSiteR(t, r, owner, "mine")
+	// A second site the user is NOT a member of must NOT appear in list_sites.
+	_, _ = seedSite(t, fake, uuid.New(), "other")
+	c := claims(owner, scopeRead, false)
 
 	_, out, err := r.listSites(callCtx(), c, ListSitesArgs{})
 	require.NoError(t, err)
 	require.Len(t, out.Sites, 1)
 	assert.Equal(t, "mine", out.Sites[0].Handle)
 	assert.Equal(t, mine.ID.String(), out.Sites[0].UUID)
+	assert.Equal(t, "owner", out.Sites[0].Role)
+	assert.Equal(t, []string{"read"}, out.Sites[0].EffectiveScopes, "effective = token(read) ∩ owner(read,write,publish)")
 	assert.Equal(t, "https://mine--draft.hosting.test", out.Sites[0].DraftURL)
 	assert.Equal(t, "https://mine.hosting.test", out.Sites[0].PublishedURL)
 }
 
-func TestListSites_DeletedSite_NotFound(t *testing.T) {
+func TestAuthorizeSite_NotAMember_NotFound(t *testing.T) {
 	fake := site.NewFakeService()
-	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "gone")
-	require.NoError(t, fake.DeleteSite(callCtx(), s.ID, site.Actor{UserID: owner}))
 	r := newTestRegistry(fake)
+	// A site owned by someone else; the token user has NO membership on it.
+	other := uuid.New()
+	s, _ := seedSite(t, fake, other, "stranger")
+	caller := uuid.New()
+	c := claims(caller, scopeRead, false)
 
-	res, _, err := r.listSites(callCtx(), claims(s.ID, owner, scopeRead, false), ListSitesArgs{})
+	// Any content tool naming the site must 404 (no existence leak).
+	res, _, err := r.readFile(callCtx(), c, ReadFileArgs{Site: string(s.Handle), Path: "index.html"})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeNotFound, decodeErrBody(t, res.StructuredContent).Code)
 }
 
+func TestAuthorizeSite_MissingSite_Required(t *testing.T) {
+	fake := site.NewFakeService()
+	r := newTestRegistry(fake)
+	c := claims(uuid.New(), scopeRead, false)
+
+	res, _, err := r.readFile(callCtx(), c, ReadFileArgs{Path: "index.html"}) // no Site
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
+}
+
 func TestReadFile_EchoesCommitAsBaseSHA(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "rf-site")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeRead, false)
+	s, base := seedSiteR(t, r, owner, "rf-site")
+	c := claims(owner, scopeRead, false)
 
-	_, out, err := r.readFile(callCtx(), c, ReadFileArgs{Path: "index.html"})
+	_, out, err := r.readFile(callCtx(), c, ReadFileArgs{Site: string(s.Handle), Path: "index.html"})
 	require.NoError(t, err)
 	assert.Equal(t, base, out.Commit, "read_file.commit is the value to pass back as base_sha")
 	assert.Equal(t, encodingUTF8, out.Encoding)
@@ -63,13 +81,14 @@ func TestReadFile_EchoesCommitAsBaseSHA(t *testing.T) {
 func TestReadFile_BinaryIsBase64(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "bin")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "bin")
+	c := claims(owner, scopeWrite, false)
 
 	// Write a binary file (NUL byte → IsBinary) via base64, then read it back.
 	raw := []byte{0x89, 0x50, 0x00, 0x01, 0x02}
 	_, wr, err := r.writeFile(callCtx(), c, WriteFileArgs{
+		Site:     string(s.Handle),
 		Path:     "img.png",
 		Content:  base64.StdEncoding.EncodeToString(raw),
 		Encoding: strptr(encodingBase64),
@@ -77,7 +96,7 @@ func TestReadFile_BinaryIsBase64(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, out, err := r.readFile(callCtx(), c, ReadFileArgs{Path: "img.png", Branch: strptr("draft"), Ref: strptr(wr.Commit)})
+	_, out, err := r.readFile(callCtx(), c, ReadFileArgs{Site: string(s.Handle), Path: "img.png", Branch: strptr("draft"), Ref: strptr(wr.Commit)})
 	require.NoError(t, err)
 	assert.Equal(t, encodingBase64, out.Encoding)
 	decoded, derr := base64.StdEncoding.DecodeString(out.Content)
@@ -88,14 +107,14 @@ func TestReadFile_BinaryIsBase64(t *testing.T) {
 func TestReadFile_TruncatedAtReadLimit(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "big")
 	r := newTestRegistry(fake)
+	s, base := seedSiteR(t, r, owner, "big")
 	r.limits = Limits{MaxReadBytes: 4, Limiter: NewMemoryLimiter()}.withDefaults()
-	c := claims(s.ID, owner, scopeWrite, false)
+	c := claims(owner, scopeWrite, false)
 
-	_, wr, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "big.txt", Content: "0123456789", BaseSHA: base})
+	_, wr, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "big.txt", Content: "0123456789", BaseSHA: base})
 	require.NoError(t, err)
-	_, out, err := r.readFile(callCtx(), c, ReadFileArgs{Path: "big.txt", Ref: strptr(wr.Commit)})
+	_, out, err := r.readFile(callCtx(), c, ReadFileArgs{Site: string(s.Handle), Path: "big.txt", Ref: strptr(wr.Commit)})
 	require.NoError(t, err)
 	assert.True(t, out.Truncated)
 	assert.Len(t, out.Content, 4)
@@ -104,11 +123,11 @@ func TestReadFile_TruncatedAtReadLimit(t *testing.T) {
 func TestWriteFile_MissingBaseSHA_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "wf-site")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, _ := seedSiteR(t, r, owner, "wf-site")
+	c := claims(owner, scopeWrite, false)
 
-	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "a.html", Content: "x"})
+	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "a.html", Content: "x"})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
@@ -117,11 +136,11 @@ func TestWriteFile_MissingBaseSHA_Validation(t *testing.T) {
 func TestWriteFile_PublishedBranch_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "wfp")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "wfp")
+	c := claims(owner, scopeWrite, false)
 
-	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "a.html", Content: "x", BaseSHA: base, Branch: strptr("published")})
+	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "a.html", Content: "x", BaseSHA: base, Branch: strptr("published")})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
@@ -130,15 +149,15 @@ func TestWriteFile_PublishedBranch_Validation(t *testing.T) {
 func TestWriteFile_StaleBaseSHA_ConflictWithDetails(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "conf")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "conf")
+	c := claims(owner, scopeWrite, false)
 
 	// First write advances the tip.
-	_, first, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "index.html", Content: "v1", BaseSHA: base})
+	_, first, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v1", BaseSHA: base})
 	require.NoError(t, err)
 	// Second write with the OLD base_sha is stale → conflict.
-	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "index.html", Content: "v2", BaseSHA: base})
+	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v2", BaseSHA: base})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	body := decodeErrBody(t, res.StructuredContent)
@@ -153,11 +172,11 @@ func TestWriteFile_StaleBaseSHA_ConflictWithDetails(t *testing.T) {
 func TestWriteFile_Success(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "ok-site")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "ok-site")
+	c := claims(owner, scopeWrite, false)
 
-	_, out, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "page.html", Content: "<h1>hi</h1>", BaseSHA: base})
+	_, out, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "page.html", Content: "<h1>hi</h1>", BaseSHA: base})
 	require.NoError(t, err)
 	assert.True(t, out.Committed)
 	assert.NotEmpty(t, out.Commit)
@@ -169,13 +188,13 @@ func TestWriteFile_Success(t *testing.T) {
 func TestWriteFile_DisallowedExtension_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "ext")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "ext")
+	c := claims(owner, scopeWrite, false)
 
 	// .php is not in the served allowlist; .mp4 is allowlisted but media-denied for MCP.
 	for _, p := range []string{"shell.php", "movie.mp4"} {
-		res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: p, Content: "x", BaseSHA: base})
+		res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: p, Content: "x", BaseSHA: base})
 		require.NoError(t, err)
 		require.True(t, res.IsError, "path %q", p)
 		assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code, "path %q", p)
@@ -185,12 +204,12 @@ func TestWriteFile_DisallowedExtension_Validation(t *testing.T) {
 func TestWriteFile_TooLarge(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "tl-site")
 	r := newTestRegistry(fake)
+	s, base := seedSiteR(t, r, owner, "tl-site")
 	r.limits = Limits{MaxFileBytes: 4, Limiter: NewMemoryLimiter()}.withDefaults()
-	c := claims(s.ID, owner, scopeWrite, false)
+	c := claims(owner, scopeWrite, false)
 
-	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "a.html", Content: "abcdef", BaseSHA: base})
+	res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "a.html", Content: "abcdef", BaseSHA: base})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeTooLarge, decodeErrBody(t, res.StructuredContent).Code)
@@ -199,12 +218,12 @@ func TestWriteFile_TooLarge(t *testing.T) {
 func TestWriteFile_PathTraversal_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "trav")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "trav")
+	c := claims(owner, scopeWrite, false)
 
 	for _, p := range []string{"../escape.html", "/abs.html", ".git/config", "a\x00b.html", `back\slash.html`} {
-		res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: p, Content: "x", BaseSHA: base})
+		res, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: p, Content: "x", BaseSHA: base})
 		require.NoError(t, err)
 		require.True(t, res.IsError, "path %q must be rejected", p)
 		assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code, "path %q", p)
@@ -215,7 +234,22 @@ func TestCreateSite_CapabilityOff_Forbidden(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
 	r := newTestRegistry(fake)
-	c := claims(uuid.New(), owner, scopeWrite, false) // canCreate=false
+	fakeMembersOf(r).addUser(gen.User{ID: owner, CanCreateSites: true, IsActive: true})
+	c := claims(owner, scopeWrite, false) // token canCreate=false
+
+	res, _, err := r.createSite(callCtx(), c, CreateSiteArgs{Handle: "fresh"})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	assert.Equal(t, codeForbidden, decodeErrBody(t, res.StructuredContent).Code)
+}
+
+func TestCreateSite_UserFlagOff_Forbidden(t *testing.T) {
+	fake := site.NewFakeService()
+	owner := uuid.New()
+	r := newTestRegistry(fake)
+	// Token says canCreate=true, but the USER account cannot create sites.
+	fakeMembersOf(r).addUser(gen.User{ID: owner, CanCreateSites: false, IsActive: true})
+	c := claims(owner, scopeWrite, true)
 
 	res, _, err := r.createSite(callCtx(), c, CreateSiteArgs{Handle: "fresh"})
 	require.NoError(t, err)
@@ -227,7 +261,8 @@ func TestCreateSite_CapabilityOn_Success(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
 	r := newTestRegistry(fake)
-	c := claims(uuid.New(), owner, scopeWrite, true) // canCreate=true
+	fakeMembersOf(r).addUser(gen.User{ID: owner, CanCreateSites: true, IsActive: true})
+	c := claims(owner, scopeWrite, true) // token canCreate=true AND user flag on
 
 	_, out, err := r.createSite(callCtx(), c, CreateSiteArgs{Handle: "fresh-site"})
 	require.NoError(t, err)
@@ -240,9 +275,10 @@ func TestCreateSite_CapabilityOn_Success(t *testing.T) {
 func TestCreateSite_HandleTaken_Conflict(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	seedSite(t, fake, owner, "dup")
 	r := newTestRegistry(fake)
-	c := claims(uuid.New(), owner, scopeWrite, true)
+	seedSite(t, fake, owner, "dup")
+	fakeMembersOf(r).addUser(gen.User{ID: owner, CanCreateSites: true, IsActive: true})
+	c := claims(owner, scopeWrite, true)
 
 	res, _, err := r.createSite(callCtx(), c, CreateSiteArgs{Handle: "dup"})
 	require.NoError(t, err)
@@ -253,11 +289,11 @@ func TestCreateSite_HandleTaken_Conflict(t *testing.T) {
 func TestSave_CleanTree_NoOp(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "save")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "save")
+	c := claims(owner, scopeWrite, false)
 
-	_, out, err := r.save(callCtx(), c, SaveArgs{BaseSHA: base})
+	_, out, err := r.save(callCtx(), c, SaveArgs{Site: string(s.Handle), BaseSHA: base})
 	require.NoError(t, err)
 	assert.True(t, out.NoOp, "a clean working tree surfaces as no_op")
 	assert.Equal(t, base, out.Commit)
@@ -266,11 +302,11 @@ func TestSave_CleanTree_NoOp(t *testing.T) {
 func TestSave_PublishedBranch_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "savep")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "savep")
+	c := claims(owner, scopeWrite, false)
 
-	res, _, err := r.save(callCtx(), c, SaveArgs{BaseSHA: base, Branch: strptr("published")})
+	res, _, err := r.save(callCtx(), c, SaveArgs{Site: string(s.Handle), BaseSHA: base, Branch: strptr("published")})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
@@ -279,14 +315,14 @@ func TestSave_PublishedBranch_Validation(t *testing.T) {
 func TestPublish_StaleBaseSHA_Conflict(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "pub")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopePublish, false)
+	s, base := seedSiteR(t, r, owner, "pub")
+	c := claims(owner, scopePublish, false)
 
 	// Advance draft so the original base is stale.
-	_, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "index.html", Content: "v2", BaseSHA: base})
+	_, _, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v2", BaseSHA: base})
 	require.NoError(t, err)
-	res, _, err := r.publish(callCtx(), c, PublishArgs{BaseSHA: base})
+	res, _, err := r.publish(callCtx(), c, PublishArgs{Site: string(s.Handle), BaseSHA: base})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeConflict, decodeErrBody(t, res.StructuredContent).Code)
@@ -295,11 +331,11 @@ func TestPublish_StaleBaseSHA_Conflict(t *testing.T) {
 func TestPublish_Success(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "pubok")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopePublish, false)
+	s, base := seedSiteR(t, r, owner, "pubok")
+	c := claims(owner, scopePublish, false)
 
-	_, out, err := r.publish(callCtx(), c, PublishArgs{BaseSHA: base})
+	_, out, err := r.publish(callCtx(), c, PublishArgs{Site: string(s.Handle), BaseSHA: base})
 	require.NoError(t, err)
 	assert.NotEmpty(t, out.PublishedCommit)
 	assert.Equal(t, "draft", out.From)
@@ -316,11 +352,11 @@ func TestPublish_Success(t *testing.T) {
 func TestRollback_UnreachableToSHA_NotFound(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "rb-site")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "rb-site")
+	c := claims(owner, scopeWrite, false)
 
-	res, _, err := r.rollback(callCtx(), c, RollbackArgs{ToSHA: "deadbeef", BaseSHA: base})
+	res, _, err := r.rollback(callCtx(), c, RollbackArgs{Site: string(s.Handle), ToSHA: "deadbeef", BaseSHA: base})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeNotFound, decodeErrBody(t, res.StructuredContent).Code)
@@ -329,14 +365,14 @@ func TestRollback_UnreachableToSHA_NotFound(t *testing.T) {
 func TestRollback_Success_ForwardCommit(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "rbok")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "rbok")
+	c := claims(owner, scopeWrite, false)
 
-	_, w1, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "index.html", Content: "v2", BaseSHA: base})
+	_, w1, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v2", BaseSHA: base})
 	require.NoError(t, err)
 	// Roll back to the original base; produces a NEW forward commit.
-	_, out, err := r.rollback(callCtx(), c, RollbackArgs{ToSHA: base, BaseSHA: w1.Commit})
+	_, out, err := r.rollback(callCtx(), c, RollbackArgs{Site: string(s.Handle), ToSHA: base, BaseSHA: w1.Commit})
 	require.NoError(t, err)
 	assert.Equal(t, base, out.RestoredFrom)
 	assert.NotEqual(t, base, out.Commit, "rollback is a forward commit, not a reset")
@@ -346,25 +382,25 @@ func TestRollback_Success_ForwardCommit(t *testing.T) {
 func TestGetLog_Pagination_And_Via(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "log")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "log")
+	c := claims(owner, scopeWrite, false)
 
 	prev := base
 	for i := 0; i < 3; i++ {
-		_, w, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "index.html", Content: "v", BaseSHA: prev})
+		_, w, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v", BaseSHA: prev})
 		require.NoError(t, err)
 		prev = w.Commit
 	}
 	// Page 1: limit 2 → cursor present.
-	_, page1, err := r.getLog(callCtx(), c, GetLogArgs{Limit: intptr(2)})
+	_, page1, err := r.getLog(callCtx(), c, GetLogArgs{Site: string(s.Handle), Limit: intptr(2)})
 	require.NoError(t, err)
 	require.Len(t, page1.Commits, 2)
 	require.NotNil(t, page1.NextBefore)
 	assert.Equal(t, "mcp", page1.Commits[0].Via, "MCP commits carry via=mcp provenance")
 
 	// Page 2: continue from cursor.
-	_, page2, err := r.getLog(callCtx(), c, GetLogArgs{Limit: intptr(2), Before: page1.NextBefore})
+	_, page2, err := r.getLog(callCtx(), c, GetLogArgs{Site: string(s.Handle), Limit: intptr(2), Before: page1.NextBefore})
 	require.NoError(t, err)
 	assert.NotEmpty(t, page2.Commits)
 	assert.NotEqual(t, page1.Commits[0].SHA, page2.Commits[0].SHA)
@@ -373,11 +409,11 @@ func TestGetLog_Pagination_And_Via(t *testing.T) {
 func TestGetLog_LimitOutOfRange_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "logv")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeRead, false)
+	s, _ := seedSiteR(t, r, owner, "logv")
+	c := claims(owner, scopeRead, false)
 
-	res, _, err := r.getLog(callCtx(), c, GetLogArgs{Limit: intptr(101)})
+	res, _, err := r.getLog(callCtx(), c, GetLogArgs{Site: string(s.Handle), Limit: intptr(101)})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
@@ -386,13 +422,13 @@ func TestGetLog_LimitOutOfRange_Validation(t *testing.T) {
 func TestGetDiff_TwoRefMode(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "diff")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, base := seedSiteR(t, r, owner, "diff")
+	c := claims(owner, scopeWrite, false)
 
-	_, w1, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: "extra.html", Content: "<x>", BaseSHA: base})
+	_, w1, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: "extra.html", Content: "<x>", BaseSHA: base})
 	require.NoError(t, err)
-	_, out, err := r.getDiff(callCtx(), c, GetDiffArgs{From: strptr(base), To: strptr(w1.Commit)})
+	_, out, err := r.getDiff(callCtx(), c, GetDiffArgs{Site: string(s.Handle), From: strptr(base), To: strptr(w1.Commit)})
 	require.NoError(t, err)
 	assert.Equal(t, base, out.FromCommit)
 	assert.NotEmpty(t, out.Files)
@@ -401,11 +437,11 @@ func TestGetDiff_TwoRefMode(t *testing.T) {
 func TestGetDiff_NoFromOrCommit_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "diffv")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeRead, false)
+	s, _ := seedSiteR(t, r, owner, "diffv")
+	c := claims(owner, scopeRead, false)
 
-	res, _, err := r.getDiff(callCtx(), c, GetDiffArgs{})
+	res, _, err := r.getDiff(callCtx(), c, GetDiffArgs{Site: string(s.Handle)})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
@@ -414,11 +450,11 @@ func TestGetDiff_NoFromOrCommit_Validation(t *testing.T) {
 func TestCreateBranch_Success(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "br-site")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeWrite, false)
+	s, _ := seedSiteR(t, r, owner, "br-site")
+	c := claims(owner, scopeWrite, false)
 
-	_, out, err := r.createBranch(callCtx(), c, CreateBranchArgs{Name: "feature-x"})
+	_, out, err := r.createBranch(callCtx(), c, CreateBranchArgs{Site: string(s.Handle), Name: "feature-x"})
 	require.NoError(t, err)
 	assert.Equal(t, "feature-x", out.Name)
 	assert.NotEmpty(t, out.HeadSHA)
@@ -427,11 +463,11 @@ func TestCreateBranch_Success(t *testing.T) {
 func TestListFiles_PathTraversal_Validation(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, _ := seedSite(t, fake, owner, "lf-site")
 	r := newTestRegistry(fake)
-	c := claims(s.ID, owner, scopeRead, false)
+	s, _ := seedSiteR(t, r, owner, "lf-site")
+	c := claims(owner, scopeRead, false)
 
-	res, _, err := r.listFiles(callCtx(), c, ListFilesArgs{Path: strptr("../etc")})
+	res, _, err := r.listFiles(callCtx(), c, ListFilesArgs{Site: string(s.Handle), Path: strptr("../etc")})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
 	assert.Equal(t, codeValidation, decodeErrBody(t, res.StructuredContent).Code)
@@ -440,18 +476,18 @@ func TestListFiles_PathTraversal_Validation(t *testing.T) {
 func TestListFiles_TruncatedAtMaxItems(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()
-	s, base := seedSite(t, fake, owner, "lftrunc")
 	r := newTestRegistry(fake)
+	s, base := seedSiteR(t, r, owner, "lftrunc")
 	r.limits = Limits{MaxListItems: 1, Limiter: NewMemoryLimiter()}.withDefaults()
-	c := claims(s.ID, owner, scopeWrite, false)
+	c := claims(owner, scopeWrite, false)
 
 	prev := base
 	for _, name := range []string{"a.html", "b.html"} {
-		_, w, err := r.writeFile(callCtx(), c, WriteFileArgs{Path: name, Content: "x", BaseSHA: prev})
+		_, w, err := r.writeFile(callCtx(), c, WriteFileArgs{Site: string(s.Handle), Path: name, Content: "x", BaseSHA: prev})
 		require.NoError(t, err)
 		prev = w.Commit
 	}
-	_, out, err := r.listFiles(callCtx(), c, ListFilesArgs{Recursive: boolptr(true)})
+	_, out, err := r.listFiles(callCtx(), c, ListFilesArgs{Site: string(s.Handle), Recursive: boolptr(true)})
 	require.NoError(t, err)
 	assert.True(t, out.Truncated)
 	assert.Len(t, out.Files, 1)

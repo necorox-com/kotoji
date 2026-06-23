@@ -91,6 +91,15 @@ func (s *server) handler() http.Handler {
 // mountAPI registers the guarded /api/* resource routes. Each handler resolves
 // access (role->capability, CANONICAL §6) before touching the Service/Store.
 func (s *server) mountAPI(r chi.Router) {
+	// Per-USER MCP/API tokens (CANONICAL §6: a token is owned by a user and spans
+	// all of that user's memberships). These are scoped to CurrentUser — NOT to a
+	// site — so they live at the top of the /api tree, not under /api/sites.
+	r.Route("/api/tokens", func(r chi.Router) {
+		r.Get("/", s.listTokens)
+		r.Post("/", s.createToken)
+		r.Delete("/{tokenId}", s.revokeToken)
+	})
+
 	r.Route("/api/sites", func(r chi.Router) {
 		r.Get("/", s.listSites)
 		r.Post("/", s.createSite)
@@ -108,11 +117,6 @@ func (s *server) mountAPI(r chi.Router) {
 			r.Post("/members", s.addMember)
 			r.Patch("/members/{userId}", s.updateMemberRole)
 			r.Delete("/members/{userId}", s.removeMember)
-
-			// tokens
-			r.Get("/tokens", s.listTokens)
-			r.Post("/tokens", s.createToken)
-			r.Delete("/tokens/{tokenId}", s.revokeToken)
 
 			// branches
 			r.Get("/branches", s.listBranches)

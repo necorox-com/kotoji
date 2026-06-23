@@ -8,46 +8,96 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/auth"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
-// TestSecurity_TokenA_CannotReachSiteB is the core cross-project regression: a
-// token bound to site A, exercised across EVERY content tool, must only ever cause
-// site.Service calls against A's UUID — never B's. The pivotService asserts this on
-// every call; the structural guarantee is that no tool even has a site argument.
-func TestSecurity_TokenA_CannotReachSiteB(t *testing.T) {
+// TestSecurity_UserA_CannotReachSiteTheyAreNotAMemberOf is the core cross-project
+// regression for the NEW membership-capped model: a token owned by user A, naming
+// a site A is NOT a member of, must be refused on EVERY content tool with a 404
+// (no existence leak) — never a site.Service call against that site. The membership
+// fake has no role for A on siteB, so authorizeSite 404s before any git touch.
+func TestSecurity_UserA_CannotReachSiteTheyAreNotAMemberOf(t *testing.T) {
 	fake := site.NewFakeService()
-	owner := uuid.New()
-	siteA, baseA := seedSite(t, fake, owner, "site-a")
-	siteB, _ := seedSite(t, fake, owner, "site-b") // the forbidden site
+	userA := uuid.New()
+	other := uuid.New()
+	r := newTestRegistry(fake)
 
-	piv := &pivotService{FakeService: fake, t: t, wantSite: siteA.ID}
-	r := newTestRegistry(piv)
-	// Token A: publish scope (so every tool is scope-permitted), can_create off.
-	cA := claims(siteA.ID, owner, scopePublish, false)
+	// Site A: A is the owner/member (reachable).
+	siteA, baseA := seedSiteR(t, r, userA, "site-a")
+	// Site B: owned by someone else; A has NO membership (the forbidden site).
+	siteB, _ := seedSite(t, fake, other, "site-b")
+
+	cA := claims(userA, scopePublish, false) // full scope token, but membership-capped
 
 	ctx := context.Background()
-	// Every content tool. None takes a site selector, so there is no field through
-	// which an attacker could substitute siteB.ID. The pivotService fails the test
-	// if any call lands on a UUID != siteA.ID.
-	_, _, _ = r.listSites(ctx, cA, ListSitesArgs{})
-	_, _, _ = r.listFiles(ctx, cA, ListFilesArgs{})
-	_, _, _ = r.readFile(ctx, cA, ReadFileArgs{Path: "index.html"})
-	_, _, _ = r.writeFile(ctx, cA, WriteFileArgs{Path: "x.html", Content: "<x>", BaseSHA: baseA})
-	_, _, _ = r.save(ctx, cA, SaveArgs{BaseSHA: baseA})
-	_, _, _ = r.publish(ctx, cA, PublishArgs{BaseSHA: baseA})
-	_, _, _ = r.getDiff(ctx, cA, GetDiffArgs{From: strptr("draft"), To: strptr("draft")})
-	_, _, _ = r.getLog(ctx, cA, GetLogArgs{})
-	_, _, _ = r.rollback(ctx, cA, RollbackArgs{ToSHA: baseA, BaseSHA: baseA})
-	_, _, _ = r.createBranch(ctx, cA, CreateBranchArgs{Name: "feature-z"})
+	hb := string(siteB.Handle)
+
+	// Every content tool naming siteB must 404 (A is not a member); none leaks B.
+	assertNotFound := func(name string, res *mcp.CallToolResult) {
+		require.NotNil(t, res, "%s: expected a tool-error result", name)
+		require.True(t, res.IsError, "%s: must be a tool error", name)
+		assert.Equal(t, codeNotFound, decodeErrBody(t, res.StructuredContent).Code, "%s: must be not_found (no existence leak)", name)
+	}
+
+	r1, _, _ := r.listFiles(ctx, cA, ListFilesArgs{Site: hb})
+	assertNotFound("list_files", r1)
+	r2, _, _ := r.readFile(ctx, cA, ReadFileArgs{Site: hb, Path: "index.html"})
+	assertNotFound("read_file", r2)
+	r3, _, _ := r.writeFile(ctx, cA, WriteFileArgs{Site: hb, Path: "x.html", Content: "<x>", BaseSHA: baseA})
+	assertNotFound("write_file", r3)
+	r4, _, _ := r.save(ctx, cA, SaveArgs{Site: hb, BaseSHA: baseA})
+	assertNotFound("save", r4)
+	r5, _, _ := r.publish(ctx, cA, PublishArgs{Site: hb, BaseSHA: baseA})
+	assertNotFound("publish", r5)
+	r6, _, _ := r.getDiff(ctx, cA, GetDiffArgs{Site: hb, From: strptr("draft"), To: strptr("draft")})
+	assertNotFound("get_diff", r6)
+	r7, _, _ := r.getLog(ctx, cA, GetLogArgs{Site: hb})
+	assertNotFound("get_log", r7)
+	r8, _, _ := r.rollback(ctx, cA, RollbackArgs{Site: hb, ToSHA: baseA, BaseSHA: baseA})
+	assertNotFound("rollback", r8)
+	r9, _, _ := r.createBranch(ctx, cA, CreateBranchArgs{Site: hb, Name: "feature-z"})
+	assertNotFound("create_branch", r9)
 
 	// Sanity: siteB exists and is reachable directly (proving the isolation above
-	// was meaningful, not because B was absent).
+	// was meaningful, not because B was absent); and A CAN reach its own siteA.
 	_, err := fake.GetSite(ctx, siteB.ID)
 	require.NoError(t, err)
+	_, _, err = r.readFile(ctx, cA, ReadFileArgs{Site: string(siteA.Handle), Path: "index.html"})
+	require.NoError(t, err)
+}
+
+// TestSecurity_MembershipDowngrade_LimitsTokenImmediately proves the effective
+// scope is re-evaluated per call: a write token whose user is downgraded to viewer
+// can still read but can no longer write (no re-issue needed).
+func TestSecurity_MembershipDowngrade_LimitsTokenImmediately(t *testing.T) {
+	fake := site.NewFakeService()
+	user := uuid.New()
+	r := newTestRegistry(fake)
+	s, base := seedSiteR(t, r, user, "downgrade") // starts as owner
+	c := claims(user, scopeWrite, false)          // write-capable token
+
+	// As owner: write works.
+	_, w1, err := r.writeFile(context.Background(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v1", BaseSHA: base})
+	require.NoError(t, err)
+	require.NotEmpty(t, w1.Commit)
+
+	// Downgrade the user to viewer on this site.
+	fakeMembersOf(r).grant(s, user, gen.SiteRoleViewer)
+
+	// Read still works (viewer grants read; token has read).
+	_, _, err = r.readFile(context.Background(), c, ReadFileArgs{Site: string(s.Handle), Path: "index.html"})
+	require.NoError(t, err)
+
+	// Write is now FORBIDDEN: effective = token(read,write) ∩ viewer(read) = {read}.
+	res, _, err := r.writeFile(context.Background(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "v2", BaseSHA: w1.Commit})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	assert.Equal(t, codeForbidden, decodeErrBody(t, res.StructuredContent).Code)
 }
 
 // TestSecurity_RevokeMidSession proves verification happens per call (not cached
@@ -55,8 +105,8 @@ func TestSecurity_TokenA_CannotReachSiteB(t *testing.T) {
 // fails. The handler enforces this because the SDK calls Verify on every request.
 func TestSecurity_RevokeMidSession(t *testing.T) {
 	store := newFakeTokenStore()
-	siteID, userID, tokenID := uuid.New(), uuid.New(), uuid.New()
-	pt := store.seedToken(validPlaintext("revk"), siteID, userID, tokenID, tokenOpts{scopes: []string{"read"}})
+	userID, tokenID := uuid.New(), uuid.New()
+	pt := store.seedToken(validPlaintext("revk"), userID, tokenID, tokenOpts{scopes: []string{"read"}})
 	v := NewVerifier(store)
 	v.touch = func(uuid.UUID) {}
 
@@ -81,6 +131,7 @@ func TestSecurity_401_BeforeAnyTool(t *testing.T) {
 	h := New(Deps{
 		Service:    site.NewFakeService(),
 		Tokens:     store,
+		Members:    newFakeMembers(),
 		BaseDomain: "hosting.test",
 	})
 

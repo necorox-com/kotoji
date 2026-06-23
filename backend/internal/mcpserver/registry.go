@@ -68,12 +68,16 @@ type toolErrorBody struct {
 }
 
 // registry owns the dependencies every tool needs and the guard that decorates
-// each handler with site-pinning + scope + path confinement before delegating.
+// each handler with principal-recovery + a per-token rate gate before delegating.
+// Per-site MEMBERSHIP-CAPPED authorization (intersection of token scopes and the
+// user's membership role) is applied inside each handler via authorizeSite, since
+// the target site now comes from the tool's `site` argument (authz.go).
 type registry struct {
-	svc    site.Service
-	limits Limits
-	log    *slog.Logger
-	cfg    Deps // carries published-URL composition inputs (base domain)
+	svc     site.Service
+	members membershipQuerier
+	limits  Limits
+	log     *slog.Logger
+	cfg     Deps // carries published-URL composition inputs (base domain)
 }
 
 // toolFnFor is the typed handler signature a tool implements AFTER the guard has
@@ -81,28 +85,33 @@ type registry struct {
 // ToolHandlerFor but with the guard guarantees already established.
 type toolFnFor[In, Out any] func(ctx context.Context, claims TokenInfo, in In) (*mcp.CallToolResult, Out, error)
 
-// addTool wraps fn with the scope/site guard (mcp.md §4.4) and the rate gate,
-// then registers it via the SDK. The In type's jsonschema tags become the tool's
-// input schema; Out becomes the structured output schema (auto-inferred).
+// addTool wraps fn with the per-token guard (principal recovery + rate gate) and
+// registers it via the SDK. The In type's jsonschema tags become the tool's input
+// schema; Out becomes the structured output schema (auto-inferred).
 //
-// CRITICAL (the PIVOT guarantee): the In struct must NOT contain a site/handle/
-// uuid selector. The site is always claims.SiteID. This is asserted at test time
-// by reflecting over every registered arg type.
+// sc is the tool's DECLARED scope. It is no longer enforced as a GLOBAL gate here
+// (a token's scopes are now capped per-site by membership): the actual scope check
+// is intersection(token.scopes, membership-role scopes) inside each handler via
+// authorizeSite. sc is retained for the rate class wiring and the test catalogue.
 func addTool[In, Out any](
 	s *mcp.Server, r *registry, name, desc string, sc scope, class toolClass,
 	fn toolFnFor[In, Out],
 ) {
-	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc}, guard(r, sc, class, fn))
+	_ = sc // declared scope; enforced per-site in the handler (membership-capped)
+	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc}, guard(r, class, fn))
 }
 
-// guard decorates a typed tool fn with the three independent gates (mcp.md §4.4):
-// principal recovery + scope check + per-token rate gate, then pins the call to
-// claims.SiteID. It returns an SDK ToolHandlerFor so it can be registered OR
-// invoked directly in unit tests with a synthetic request carrying Extra.TokenInfo.
+// guard decorates a typed tool fn with the two TOKEN-level gates that do not need
+// the target site: principal recovery + the per-token rate gate. The per-SITE
+// authorization (resolve handle -> membership role -> effective scope) happens
+// inside the handler via authorizeSite, because the site now comes from the tool's
+// `site` argument (membership-capped model REPLACES the old site pin).
 //
-// It is a free function (not a method) because Go methods cannot have their own
-// type parameters; the registry is threaded as the first argument.
-func guard[In, Out any](r *registry, sc scope, class toolClass, fn toolFnFor[In, Out]) func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, Out, error) {
+// It returns an SDK ToolHandlerFor so it can be registered OR invoked directly in
+// unit tests with a synthetic request carrying Extra.TokenInfo. It is a free
+// function (not a method) because Go methods cannot have their own type
+// parameters; the registry is threaded as the first argument.
+func guard[In, Out any](r *registry, class toolClass, fn toolFnFor[In, Out]) func(context.Context, *mcp.CallToolRequest, In) (*mcp.CallToolResult, Out, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, in In) (*mcp.CallToolResult, Out, error) {
 		var zero Out
 
@@ -113,13 +122,7 @@ func guard[In, Out any](r *registry, sc scope, class toolClass, fn toolFnFor[In,
 			return toolErr(codeUnauthenticated, "invalid or missing token", nil), zero, nil
 		}
 
-		// 2. Scope check: the chain is enforced at issuance, so a publish token
-		// holds read+write+publish. Reject before delegating.
-		if !hasScope(claims.Scopes, sc) {
-			return toolErr(codeForbidden, fmt.Sprintf("token lacks %q scope", sc), nil), zero, nil
-		}
-
-		// 3. Per-token rate gate (mcp.md §10.3). Denied → rate_limited with a
+		// 2. Per-token rate gate (mcp.md §10.3). Denied → rate_limited with a
 		// retry hint; never a Go error.
 		if okAllow, retryAfter := r.limits.Limiter.Allow(claims.TokenID, class); !okAllow {
 			return toolErr(codeRateLimited, "rate limit exceeded; back off and retry", map[string]any{
@@ -127,7 +130,8 @@ func guard[In, Out any](r *registry, sc scope, class toolClass, fn toolFnFor[In,
 			}), zero, nil
 		}
 
-		// 4. Pin every downstream site.Service call to the token's single site.
+		// 3. Stash the principal in ctx so handlers/audit can read it; per-site
+		// authorization is applied inside the handler (authorizeSite).
 		ctx = withClaims(ctx, claims)
 		return fn(ctx, claims, in)
 	}
@@ -156,7 +160,8 @@ func hasScope(have []string, required scope) bool {
 type claimsCtxKey struct{}
 
 // withClaims stashes the principal in ctx so handlers/audit can read it without
-// re-threading. The site pin is claims.SiteID.
+// re-threading. The target site comes from each tool's `site` argument and is
+// authorized per call (authz.go), not pinned on the token.
 func withClaims(ctx context.Context, c TokenInfo) context.Context {
 	return context.WithValue(ctx, claimsCtxKey{}, c)
 }

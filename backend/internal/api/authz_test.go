@@ -48,7 +48,9 @@ func TestRoleCapabilityMatrix(t *testing.T) {
 	readCall := call{http.MethodGet, "/api/sites/matrix-site/branches", nil}
 	writeCall := call{http.MethodPut, "/api/sites/matrix-site/branches/draft/file",
 		openapi.WriteFileRequest{Path: "index.html", Content: "<h1>hi</h1>", BaseSha: "seed"}}
-	ownerCall := call{http.MethodGet, "/api/sites/matrix-site/tokens", nil}
+	// Owner-only per-site op probe. Tokens moved to /api/tokens (per-user), so we
+	// use the GitHub mirror trigger, which is owner-only (CANONICAL §6.1).
+	ownerCall := call{http.MethodPost, "/api/sites/matrix-site/mirror", nil}
 
 	cases := []struct {
 		name        string
@@ -94,7 +96,7 @@ func TestUnauthenticatedAcrossEndpoints(t *testing.T) {
 		{http.MethodGet, "/api/sites"},
 		{http.MethodGet, "/api/sites/x/branches"},
 		{http.MethodGet, "/api/sites/x/members"},
-		{http.MethodGet, "/api/sites/x/tokens"},
+		{http.MethodGet, "/api/tokens"},
 	}
 	for _, ep := range endpoints {
 		rec := e.request(ep.method, ep.path).do()

@@ -234,10 +234,12 @@ func (a *App) ControlRouter() http.Handler {
 		return nil
 	}
 
-	// MCP server (control plane only). Disabled => not mounted.
+	// MCP server (control plane only). Disabled => not mounted. The one *db.Store
+	// satisfies BOTH the token verifier surface and the membership-authz surface
+	// (per-site role, the user's membership list, and the create-site user flag).
 	var mcpHandler http.Handler
 	if a.cfg.MCPEnabled {
-		mcpHandler = mcpserver.New(mcpserver.FromConfig(a.cfg, a.siteSvc, a.store, a.logger))
+		mcpHandler = mcpserver.New(mcpserver.FromConfig(a.cfg, a.siteSvc, a.store, a.store, a.logger))
 	}
 
 	apiHandler := api.NewRouter(api.Deps{

@@ -12,8 +12,12 @@
  *  (A) GitHub連携 — ADMIN ONLY (rendered only when me.user.isAdmin). The instance
  *      GitHub mirror config (enable / org / write-only PAT / write-only webhook
  *      secret), persisted via PUT /api/admin/github.
- *  (B) MCP 接続ガイド — shown to EVERYONE. A read-only tutorial for pointing an AI
- *      client at this instance's /mcp endpoint with a per-project token.
+ *  (B) MCP / API トークン — shown to EVERYONE. The user's OWN per-user tokens
+ *      (CANONICAL §6, re-architected model): a token is owned by the user and
+ *      automatically covers every project they're a member of. Issue (show-once
+ *      plaintext) / list / revoke via /api/tokens.
+ *  (C) MCP 接続ガイド — shown to EVERYONE. A read-only tutorial for pointing an AI
+ *      client at this instance's /mcp endpoint with one of the above tokens.
  *
  * Uses DashboardLayout for the standard authenticated chrome (sidebar + topnav).
  */
@@ -24,6 +28,7 @@ import { DashboardLayout } from "@/components/templates";
 import { SectionHeading } from "@/components/atoms";
 import {
   GitHubAdminSection,
+  AccountTokenPanel,
   McpGuideSection,
 } from "@/components/organisms";
 import { useMe } from "@/lib/api/hooks";
@@ -33,8 +38,11 @@ export default function SettingsPage() {
   const { data: me } = useMe();
 
   // Admin-only gate for the GitHub config section (CANONICAL §6 is_admin). The
-  // MCP guide below is shown to everyone.
+  // token panel + MCP guide below are shown to everyone.
   const isAdmin = me?.user.isAdmin ?? false;
+  // Whether the user may create sites — gates the per-token "may create sites"
+  // toggle (the server caps any requested capability to the user's own).
+  const canCreateSites = me?.user.canCreateSites ?? false;
 
   return (
     <DashboardLayout>
@@ -48,7 +56,10 @@ export default function SettingsPage() {
         {/* (A) Instance GitHub mirror config — admin only. */}
         {isAdmin ? <GitHubAdminSection /> : null}
 
-        {/* (B) MCP connection guide — everyone. */}
+        {/* (B) Per-user MCP/API tokens — everyone (the user's own tokens). */}
+        <AccountTokenPanel canCreateSites={canCreateSites} />
+
+        {/* (C) MCP connection guide — everyone. */}
         <McpGuideSection />
       </div>
     </DashboardLayout>
