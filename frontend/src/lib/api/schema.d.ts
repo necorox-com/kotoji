@@ -508,6 +508,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/domain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the instance domain/URL config (admin only)
+         * @description Returns the EFFECTIVE base domain + external control base URL with their sources and env-locked flags. Precedence is WordPress-style: the KOTOJI_BASE_DOMAIN / KOTOJI_CONTROL_BASE_URL env vars OVERRIDE the instance_settings DB values, which override values derived from the incoming request on a fresh install. A field whose env var is set has `*Locked: true` (read-only in the GUI). Requires is_admin (401 anonymous, 403 non-admin). The values are NOT secret and are returned verbatim.
+         */
+        get: operations["adminGetDomain"];
+        /**
+         * Update the instance domain/URL config (admin only)
+         * @description Persists a PARTIAL update of the runtime base domain / control base URL. Every body field is optional: an absent field is left unchanged. A field whose env var is SET (locked) is REJECTED with 409 (the change is not silently no-op'd). Values are validated server-side: `baseDomain` must be a valid DNS hostname (no scheme/port/path), `controlBaseURL` an absolute http(s) origin URL. The response is the same view as GET. Requires is_admin.
+         */
+        put: operations["adminPutDomain"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -611,6 +635,11 @@ export interface components {
             reservedHandles: string[];
             /** @example hosting.example.com */
             baseDomain: string;
+            /**
+             * @description EFFECTIVE external URL of the control host (WordPress-style precedence: KOTOJI_CONTROL_BASE_URL env OVERRIDES the instance_settings DB value, which overrides a value derived from the incoming request on a fresh install). Drives absolute links and the configured-host display on /settings.
+             * @example https://hosting.example.com
+             */
+            controlBaseURL: string;
             /** @description LEGACY single representative of the enabled provider set, for back-compat. When several providers are enabled (e.g. oidc + password break-glass) this is the highest-priority one (oidc, then password, then none). New clients should read authProviders. */
             authMode: components["schemas"]["AuthMode"];
             /** @description The ENABLED auth providers, in normalized order (oidc, password, none). The login page renders one control per entry, so OIDC + the break-glass password can be offered concurrently. A single legacy KOTOJI_AUTH_MODE value yields a one-element array. */
@@ -642,6 +671,37 @@ export interface components {
             webhookSecret?: string;
             /** @description When true, remove the stored token (reverts to the env token if any). */
             clearToken?: boolean;
+        };
+        /** @description EFFECTIVE instance domain/URL config (admin screen). Each value is reported with its source ("env" | "db" | "derived") and a "locked" flag (true when the corresponding env var is set, making the field read-only). Values are NOT secret. Precedence: env OVERRIDES DB, DB overrides a per-request derived default. */
+        DomainAdminConfig: {
+            /**
+             * @description Effective base domain used to parse {handle}[--{branch}].<base>.
+             * @example hosting.example.com
+             */
+            baseDomain: string;
+            /**
+             * @description Effective external URL of the control host.
+             * @example https://hosting.example.com
+             */
+            controlBaseURL: string;
+            baseDomainSource: components["schemas"]["DomainConfigSource"];
+            controlBaseURLSource: components["schemas"]["DomainConfigSource"];
+            /** @description True when KOTOJI_BASE_DOMAIN is set (env wins; field read-only). */
+            baseDomainLocked: boolean;
+            /** @description True when KOTOJI_CONTROL_BASE_URL is set (env wins; field read-only). */
+            controlBaseURLLocked: boolean;
+        };
+        /**
+         * @description Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+         * @enum {string}
+         */
+        DomainConfigSource: "env" | "db" | "derived";
+        /** @description Partial update of the instance domain/URL config. All fields optional; absent fields are unchanged. A field whose env var is set is rejected with 409 (locked by environment). An empty string reverts that field to the env/derived fallback (deletes the DB key). */
+        DomainAdminConfigUpdate: {
+            /** @description New base domain (valid DNS hostname; empty reverts to env/derived). */
+            baseDomain?: string;
+            /** @description New control base URL (absolute http(s) origin; empty reverts to env/derived). */
+            controlBaseURL?: string;
         };
         Site: {
             /** Format: uuid */
@@ -2008,6 +2068,64 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            422: components["responses"]["ValidationFailed"];
+        };
+    };
+    adminGetDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Effective domain/URL config */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainAdminConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    adminPutDomain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DomainAdminConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated domain/URL config */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DomainAdminConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description A targeted field is locked by the environment (env overrides DB) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             422: components["responses"]["ValidationFailed"];
         };
     };

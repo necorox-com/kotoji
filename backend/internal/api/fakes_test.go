@@ -42,6 +42,11 @@ type fakeMetaStore struct {
 	github          db.GitHubConfig
 	setGitHubInputs []db.SetGitHubConfigInput
 
+	// domain is the DB-stored domain/URL config the admin-domain handler writes.
+	// setDomainInputs records every SetDomainConfig call for assertions.
+	domain          db.DomainConfig
+	setDomainInputs []db.SetDomainConfigInput
+
 	failGetRole bool
 }
 
@@ -284,6 +289,37 @@ func (f *fakeMetaStore) SetGitHubConfig(_ context.Context, in db.SetGitHubConfig
 		f.github.Token, f.github.TokenSet = "", false
 	case in.Token != nil && *in.Token != "":
 		f.github.Token, f.github.TokenSet = *in.Token, true
+	}
+	return nil
+}
+
+// GetDomainConfig returns the in-memory DB domain/URL config.
+func (f *fakeMetaStore) GetDomainConfig(_ context.Context) (db.DomainConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.domain, nil
+}
+
+// SetDomainConfig applies a partial update mirroring the real store's semantics:
+// nil fields untouched, an empty-string pointer DELETES the key (reverts to the
+// env/derived fallback), a non-empty pointer overwrites it. Records the raw input.
+func (f *fakeMetaStore) SetDomainConfig(_ context.Context, in db.SetDomainConfigInput) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setDomainInputs = append(f.setDomainInputs, in)
+	if in.BaseDomain != nil {
+		if *in.BaseDomain == "" {
+			f.domain.BaseDomain, f.domain.BaseDomainSet = "", false
+		} else {
+			f.domain.BaseDomain, f.domain.BaseDomainSet = *in.BaseDomain, true
+		}
+	}
+	if in.ControlBaseURL != nil {
+		if *in.ControlBaseURL == "" {
+			f.domain.ControlBaseURL, f.domain.ControlBaseURLSet = "", false
+		} else {
+			f.domain.ControlBaseURL, f.domain.ControlBaseURLSet = *in.ControlBaseURL, true
+		}
 	}
 	return nil
 }

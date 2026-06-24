@@ -118,6 +118,14 @@ type Config struct {
 	// then attacker-controlled). Default true because the documented topology has a
 	// reverse proxy in front.
 	TrustForwardedHost bool
+	// BaseDomainFunc, when non-nil, supplies the EFFECTIVE base domain per request
+	// (WordPress-style runtime config: env > DB > derived). It is consulted ONLY on
+	// the env-EMPTY path; when KOTOJI_BASE_DOMAIN is set the composition root leaves
+	// this nil and the STATIC BaseDomain field is used (today's behavior, no DB read
+	// per request). The returned value is lowercased + trimmed by the resolver; an
+	// empty return falls back to the static BaseDomain so a fresh, unconfigured
+	// instance still classifies the control host.
+	BaseDomainFunc func(r *http.Request) string `json:"-"`
 }
 
 // builtinValidator implements HandleValidator + BranchValidator with the exact
@@ -238,8 +246,13 @@ func (d *DefaultResolver) Resolve(r *http.Request) (Target, error) {
 		return Target{}, &ResolveError{Status: http.StatusBadRequest, Code: CodeEmptyHost, Msg: "no host on request"}
 	}
 
+	// Resolve the EFFECTIVE base domain for this request. On the static (env-set)
+	// fast path BaseDomainFunc is nil and this is the precomputed startup value
+	// (zero DB reads). On the dynamic path it reflects the DB/derived value.
+	base, suffix := d.effectiveBase(r)
+
 	// Classify the host: control, project, or foreign.
-	class, label, herr := d.classifyHost(host)
+	class, label, herr := d.classifyHost(host, base, suffix)
 	if herr != nil {
 		return Target{}, herr
 	}
@@ -292,10 +305,27 @@ const (
 	hostProject
 )
 
+// effectiveBase returns the effective base domain (lowercased/trimmed) and its
+// "." + base suffix for THIS request. When BaseDomainFunc is set (dynamic path)
+// it is consulted and falls back to the static field on an empty return; when nil
+// (env-set fast path) it returns the precomputed startup values with no work.
+func (d *DefaultResolver) effectiveBase(r *http.Request) (base, suffix string) {
+	if d.cfg.BaseDomainFunc == nil {
+		return d.cfg.BaseDomain, d.baseSuffix
+	}
+	base = strings.ToLower(strings.TrimSpace(d.cfg.BaseDomainFunc(r)))
+	if base == "" {
+		// Unconfigured: fall back to the static field (may itself be empty).
+		return d.cfg.BaseDomain, d.baseSuffix
+	}
+	return base, "." + base
+}
+
 // classifyHost implements routing-and-serving.md §3: distinguish control-plane
-// from project hosts. host is already lowercased + port-stripped.
-func (d *DefaultResolver) classifyHost(host string) (hostClass, string, error) {
-	if host == d.cfg.BaseDomain {
+// from project hosts. host is already lowercased + port-stripped. base + suffix
+// are the EFFECTIVE base domain for this request (env > DB > derived).
+func (d *DefaultResolver) classifyHost(host, base, suffix string) (hostClass, string, error) {
+	if host == base {
 		if d.cfg.ControlLabel == "" {
 			return hostControl, "", nil
 		}
@@ -307,10 +337,10 @@ func (d *DefaultResolver) classifyHost(host string) (hostClass, string, error) {
 			Msg:    "bare base domain is not a project (control label required)",
 		}
 	}
-	if !strings.HasSuffix(host, d.baseSuffix) {
+	if !strings.HasSuffix(host, suffix) {
 		return hostForeign, "", nil // caller decides 421 vs path fallback
 	}
-	label := host[:len(host)-len(d.baseSuffix)]
+	label := host[:len(host)-len(suffix)]
 	if strings.Contains(label, ".") {
 		// Multi-label (a.b.base) is never a project; we don't serve nested subdomains.
 		return hostForeign, "", &ResolveError{

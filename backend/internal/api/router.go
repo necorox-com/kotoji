@@ -13,6 +13,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -152,13 +153,45 @@ func (s *server) mountAPI(r chi.Router) {
 // corsMiddleware builds the CORS handler from the configured allowlist. Cookie
 // auth requires AllowCredentials, so a wildcard origin is never used; the
 // allowlist comes from config. X-CSRF-Token is exposed so the SPA can echo it.
+//
+// DYNAMIC DEFAULT ORIGIN: when no explicit allowlist is configured AND the control
+// base URL env is unset (the fresh-install path), the default CORS origin is the
+// EFFECTIVE control base URL (env > DB > derived) resolved per request via
+// AllowOriginFunc. On the env-set / explicit-allowlist path this is a STATIC
+// allowlist (today's behavior, no per-request work) — the live deployment is
+// unchanged.
 func (s *server) corsMiddleware() func(http.Handler) http.Handler {
-	return cors.Handler(cors.Options{
+	opts := cors.Options{
 		AllowedOrigins:   s.deps.Config.CORSAllowedOrigins,
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Request-Id"},
 		ExposedHeaders:   []string{"X-Request-Id"},
 		AllowCredentials: true,
 		MaxAge:           300,
-	})
+	}
+	if s.useDynamicCORS() {
+		// Resolve the allowed origin per request from the effective control base URL.
+		// AllowedOrigins is left nil so AllowOriginFunc is the sole authority.
+		opts.AllowedOrigins = nil
+		opts.AllowOriginFunc = s.dynamicCORSAllow
+	}
+	return cors.Handler(opts)
+}
+
+// useDynamicCORS reports whether the default CORS origin must be resolved per
+// request (the env-empty fresh-install path). It is false whenever an explicit
+// allowlist OR the control base URL env is set, keeping the live deployment on the
+// static fast path.
+func (s *server) useDynamicCORS() bool {
+	return s.deps.Domain != nil &&
+		!s.deps.Config.CORSOriginsEnvSet &&
+		!s.deps.Config.ControlBaseURLEnvSet
+}
+
+// dynamicCORSAllow allows exactly the effective control base URL origin for the
+// request (case-insensitive). Never a wildcard (cookie auth requires a concrete
+// origin with credentials).
+func (s *server) dynamicCORSAllow(r *http.Request, origin string) bool {
+	allowed := s.deps.Domain.Resolve(r.Context(), r).ControlBaseURL.Value
+	return allowed != "" && strings.EqualFold(origin, allowed)
 }

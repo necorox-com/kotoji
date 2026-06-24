@@ -16,6 +16,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/auth"
 	"github.com/necorox-com/kotoji/backend/internal/config"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
+	"github.com/necorox-com/kotoji/backend/internal/domaincfg"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
@@ -28,6 +29,7 @@ type testEnv struct {
 	store    *fakeMetaStore
 	sessions *fakeSessionStore
 	cfg      config.Config
+	domain   *testDomainProvider
 }
 
 // testConfig is the minimal config for the API surface in tests: dev auth, no
@@ -65,12 +67,23 @@ func newTestEnv(t *testing.T) *testEnv {
 }
 
 // configForTest is the narrow set of config knobs a test may override (kept tiny
-// so the harness does not leak the full config surface). Currently only the
-// GitHub env fields, used by the admin-github "env fallback" tests.
+// so the harness does not leak the full config surface). The GitHub fields back
+// the admin-github "env fallback" tests; the domain env flags back the admin-
+// domain "env-locked" tests (env > DB precedence).
 type configForTest struct {
 	GitHubEnabled bool
 	GitHubToken   string
 	GitHubOrg     string
+
+	// BaseDomainEnvSet / ControlBaseURLEnvSet simulate KOTOJI_BASE_DOMAIN /
+	// KOTOJI_CONTROL_BASE_URL being explicitly set (locked) for the admin-domain
+	// tests. When false the domain provider resolves the DB/derived value.
+	BaseDomainEnvSet     bool
+	ControlBaseURLEnvSet bool
+	// BaseDomain / ControlBaseURL override the static env values used by the domain
+	// provider (defaults come from testConfig when these are empty).
+	BaseDomain     string
+	ControlBaseURL string
 }
 
 // newTestEnvWithConfig builds a testEnv after applying mutate to a configForTest,
@@ -92,6 +105,14 @@ func newTestEnvWith(t *testing.T, overrides *configForTest) *testEnv {
 		cfg.GitHub.Enabled = overrides.GitHubEnabled
 		cfg.GitHub.Token = overrides.GitHubToken
 		cfg.GitHub.Org = overrides.GitHubOrg
+		if overrides.BaseDomain != "" {
+			cfg.BaseDomain = overrides.BaseDomain
+		}
+		if overrides.ControlBaseURL != "" {
+			cfg.ControlBaseURL = overrides.ControlBaseURL
+		}
+		cfg.BaseDomainEnvSet = overrides.BaseDomainEnvSet
+		cfg.ControlBaseURLEnvSet = overrides.ControlBaseURLEnvSet
 	}
 	svc := site.NewFakeService()
 	store := newFakeMetaStore()
@@ -100,14 +121,55 @@ func newTestEnvWith(t *testing.T, overrides *configForTest) *testEnv {
 	provider := auth.NewDevProvider(cfg)
 	authSvc := auth.New(cfg, sessions, provider)
 
+	// Domain provider over the fake store (env flags from cfg). Wrapped by a tiny
+	// test adapter so it satisfies api.DomainConfigProvider without importing the
+	// app package's adapter (which would cycle).
+	domain := newTestDomainProvider(cfg, store)
+	authSvc.SetDomainResolver(domain)
+
 	router := NewRouter(Deps{
 		Config: cfg,
 		Site:   svc,
 		Store:  store,
 		Auth:   WrapAuth(authSvc),
+		Domain: domain,
 	})
 
-	return &testEnv{t: t, router: router, svc: svc, store: store, sessions: sessions, cfg: cfg}
+	return &testEnv{t: t, router: router, svc: svc, store: store, sessions: sessions, cfg: cfg, domain: domain}
+}
+
+// testDomainProvider wraps a real *domaincfg.Provider and translates its Resolved
+// onto the api boundary type, so it satisfies BOTH api.DomainConfigProvider (the
+// admin handler) and auth.DomainResolver (/api/config) without importing the app
+// package's adapter (which would create a test import cycle).
+type testDomainProvider struct{ p *domaincfg.Provider }
+
+func newTestDomainProvider(cfg config.Config, store domaincfg.Store) *testDomainProvider {
+	return &testDomainProvider{p: domaincfg.New(domaincfg.Config{
+		Store:             store,
+		EnvBaseDomain:     cfg.BaseDomain,
+		EnvBaseDomainSet:  cfg.BaseDomainEnvSet,
+		EnvControlBaseURL: cfg.ControlBaseURL,
+		EnvControlSet:     cfg.ControlBaseURLEnvSet,
+	})}
+}
+
+func (d *testDomainProvider) Resolve(ctx context.Context, r *http.Request) DomainResolved {
+	res := d.p.Resolve(ctx, r)
+	return DomainResolved{
+		BaseDomain:     DomainEffective{Value: res.BaseDomain.Value, Source: string(res.BaseDomain.Source), Locked: res.BaseDomain.Locked},
+		ControlBaseURL: DomainEffective{Value: res.ControlBaseURL.Value, Source: string(res.ControlBaseURL.Source), Locked: res.ControlBaseURL.Locked},
+	}
+}
+
+func (d *testDomainProvider) EnvBaseDomainLocked() bool          { return d.p.EnvBaseDomainLocked() }
+func (d *testDomainProvider) EnvControlBaseURLLocked() bool      { return d.p.EnvControlBaseURLLocked() }
+func (d *testDomainProvider) InvalidateCache()                   { d.p.InvalidateCache() }
+func (d *testDomainProvider) BaseDomainFor(r *http.Request) string {
+	return d.p.BaseDomainFor(r)
+}
+func (d *testDomainProvider) ControlBaseURLFor(r *http.Request) string {
+	return d.p.ControlBaseURLFor(r)
 }
 
 // user creates a seeded user with a live session and returns it plus the session

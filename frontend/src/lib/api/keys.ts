@@ -21,6 +21,10 @@ export const queryKeys = {
   // Instance GitHub mirror config (admin-only; secret-safe view).
   adminGitHub: () => ["admin", "github"] as const,
 
+  // Instance domain/URL config (admin-only): effective base domain + control
+  // base URL with their source ("env"|"db"|"derived") and env-locked flags.
+  adminDomain: () => ["admin", "domain"] as const,
+
   // -------- tokens (per-user, account-level) --------
   // The current user's MCP/API tokens (membership-capped; span all the user's
   // projects). Owned by the user, not a site, so this lives at the top level

@@ -364,3 +364,59 @@ func mustURL(p string) *url.URL {
 	}
 	return u
 }
+
+// TestResolve_BaseDomainFunc pins the dynamic base-domain seam: when BaseDomainFunc
+// is set it overrides the static field per request (the env-EMPTY path), and an
+// empty return falls back to the static BaseDomain. This is the data-plane half of
+// the WordPress-style runtime domain config.
+func TestResolve_BaseDomainFunc(t *testing.T) {
+	t.Run("dynamic base overrides static for classification", func(t *testing.T) {
+		// Static base is "old.example.com"; the func returns the runtime DB value.
+		cfg := Config{
+			BaseDomain:         "old.example.com",
+			EnablePathFallback: true,
+			TrustForwardedHost: false,
+			BaseDomainFunc:     func(*http.Request) string { return "new.example.com" },
+		}
+		r := NewResolver(cfg)
+
+		// A project host under the DYNAMIC base resolves as a project.
+		got, err := r.Resolve(newReq("blog.new.example.com", "/"))
+		if err != nil {
+			t.Fatalf("dynamic project host: unexpected error %v", err)
+		}
+		if got.IsControl || got.Handle != "blog" {
+			t.Fatalf("want project handle=blog, got %+v", got)
+		}
+
+		// The DYNAMIC bare base is the control host.
+		ctrl, err := r.Resolve(newReq("new.example.com", "/"))
+		if err != nil {
+			t.Fatalf("dynamic control host: unexpected error %v", err)
+		}
+		if !ctrl.IsControl {
+			t.Fatalf("dynamic bare base should be control, got %+v", ctrl)
+		}
+
+		// A host under the STALE static base is now foreign (misdirected).
+		if _, err := r.Resolve(newReq("blog.old.example.com", "/")); err == nil {
+			t.Fatalf("stale static-base host should no longer resolve as a project")
+		}
+	})
+
+	t.Run("empty func return falls back to static base", func(t *testing.T) {
+		cfg := Config{
+			BaseDomain:         "fallback.example.com",
+			EnablePathFallback: true,
+			BaseDomainFunc:     func(*http.Request) string { return "" }, // unconfigured
+		}
+		r := NewResolver(cfg)
+		got, err := r.Resolve(newReq("blog.fallback.example.com", "/"))
+		if err != nil {
+			t.Fatalf("fallback project host: unexpected error %v", err)
+		}
+		if got.Handle != "blog" {
+			t.Fatalf("want handle=blog via static fallback, got %+v", got)
+		}
+	})
+}

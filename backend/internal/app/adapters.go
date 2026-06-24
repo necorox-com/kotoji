@@ -2,10 +2,13 @@ package app
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/google/uuid"
 
+	"github.com/necorox-com/kotoji/backend/internal/api"
 	"github.com/necorox-com/kotoji/backend/internal/db"
+	"github.com/necorox-com/kotoji/backend/internal/domaincfg"
 	"github.com/necorox-com/kotoji/backend/internal/serve"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
@@ -61,4 +64,34 @@ func (r *redirectingResolver) ResolveRedirect(ctx context.Context, oldHandle str
 		return "", false, err
 	}
 	return rec.Handle, true, nil
+}
+
+// compile-time guarantee the adapter satisfies the api seam the admin
+// /api/admin/domain handlers depend on.
+var _ api.DomainConfigProvider = domainAdapter{}
+
+// domainAdapter maps the concrete *domaincfg.Provider onto api.DomainConfigProvider
+// (the api package's own type), translating domaincfg.Resolved -> api.DomainResolved
+// so the api package never imports domaincfg. The composition root wraps the shared
+// provider with this when building the control router.
+type domainAdapter struct{ p *domaincfg.Provider }
+
+// wrapDomain adapts the effective-domain provider for the api Deps.
+func wrapDomain(p *domaincfg.Provider) api.DomainConfigProvider { return domainAdapter{p: p} }
+
+func (d domainAdapter) Resolve(ctx context.Context, r *http.Request) api.DomainResolved {
+	res := d.p.Resolve(ctx, r)
+	return api.DomainResolved{
+		BaseDomain:     toAPIEffective(res.BaseDomain),
+		ControlBaseURL: toAPIEffective(res.ControlBaseURL),
+	}
+}
+
+func (d domainAdapter) EnvBaseDomainLocked() bool     { return d.p.EnvBaseDomainLocked() }
+func (d domainAdapter) EnvControlBaseURLLocked() bool { return d.p.EnvControlBaseURLLocked() }
+func (d domainAdapter) InvalidateCache()              { d.p.InvalidateCache() }
+
+// toAPIEffective maps one resolved setting onto the api boundary type.
+func toAPIEffective(e domaincfg.Effective) api.DomainEffective {
+	return api.DomainEffective{Value: e.Value, Source: string(e.Source), Locked: e.Locked}
 }

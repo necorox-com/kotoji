@@ -54,6 +54,20 @@ const (
 	SettingGitHubToken = "github_token"
 )
 
+// Domain/URL config keys in instance_settings. WordPress-style runtime config of
+// the two routing settings the admin may change in the GUI: the base domain used
+// to parse {handle}[--{branch}].<base>, and the external control base URL that
+// drives OIDC redirect / cookie host / absolute links / default CORS origin.
+// Both are PLAIN strings (NOT secret) — no secretbox is needed. Precedence is
+// resolved by the effective-config layer (env OVERRIDES DB); absent => fall back
+// to env, then to a per-request derived default.
+const (
+	// SettingBaseDomain is the runtime base domain (e.g. "hosting.example.com").
+	SettingBaseDomain = "base_domain"
+	// SettingControlBaseURL is the runtime external control base URL (absolute http(s)).
+	SettingControlBaseURL = "control_base_url"
+)
+
 // boolTrue / boolFalse are the canonical string encodings for boolean settings.
 const (
 	boolTrue  = "true"
@@ -360,6 +374,82 @@ func (s *Store) SetGitHubConfig(ctx context.Context, in SetGitHubConfigInput) er
 		// Token == nil OR empty (and not clearing): leave the stored token untouched.
 		return nil
 	})
+}
+
+// ---- instance settings (domain / URL config) ----
+
+// DomainConfig is the DB-stored WordPress-style domain/URL config. Each field is
+// reported alongside a *Set boolean so the effective-config layer can tell "admin
+// explicitly set it" from "never configured -> fall back to env / derive". Both
+// values are PLAIN strings (not secret); callers MAY echo them over the API.
+type DomainConfig struct {
+	BaseDomain        string
+	BaseDomainSet     bool
+	ControlBaseURL    string
+	ControlBaseURLSet bool
+}
+
+// SetDomainConfigInput is the write payload for SetDomainConfig. Pointer fields
+// are OPTIONAL partial updates: a nil pointer leaves that setting untouched, a
+// non-nil pointer overwrites it (an empty string DELETES the key, reverting to
+// the env/derived fallback). The caller validates the values before persisting.
+type SetDomainConfigInput struct {
+	BaseDomain     *string
+	ControlBaseURL *string
+}
+
+// GetDomainConfig reads the DB-stored domain/URL config. Absent keys map to zero
+// values with *Set=false (never an error) so the caller can layer env/derived
+// fallbacks. A store read error other than no-rows is surfaced.
+func (s *Store) GetDomainConfig(ctx context.Context) (DomainConfig, error) {
+	var cfg DomainConfig
+
+	if v, found, err := s.getSetting(ctx, SettingBaseDomain); err != nil {
+		return DomainConfig{}, err
+	} else if found {
+		cfg.BaseDomain = v
+		cfg.BaseDomainSet = true
+	}
+
+	if v, found, err := s.getSetting(ctx, SettingControlBaseURL); err != nil {
+		return DomainConfig{}, err
+	} else if found {
+		cfg.ControlBaseURL = v
+		cfg.ControlBaseURLSet = true
+	}
+
+	return cfg, nil
+}
+
+// SetDomainConfig persists a partial domain/URL config update in ONE transaction.
+// Only the non-nil fields are written so the admin GUI can PATCH a subset. An
+// empty-string pointer DELETES the key (reverts to the env/derived fallback); a
+// non-empty pointer overwrites it. The caller validates the values first (this
+// layer only persists). Values are plain (not encrypted).
+func (s *Store) SetDomainConfig(ctx context.Context, in SetDomainConfigInput) error {
+	return s.WithTx(ctx, func(q *gen.Queries) error {
+		if in.BaseDomain != nil {
+			if err := setOrDeleteSetting(ctx, q, SettingBaseDomain, *in.BaseDomain); err != nil {
+				return fmt.Errorf("db: set base_domain: %w", err)
+			}
+		}
+		if in.ControlBaseURL != nil {
+			if err := setOrDeleteSetting(ctx, q, SettingControlBaseURL, *in.ControlBaseURL); err != nil {
+				return fmt.Errorf("db: set control_base_url: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// setOrDeleteSetting writes a non-empty value or DELETES the key when value is
+// empty. Centralizes the "empty pointer reverts to fallback" semantics shared by
+// the plain (non-secret) settings.
+func setOrDeleteSetting(ctx context.Context, q *gen.Queries, key, value string) error {
+	if value == "" {
+		return q.DeleteInstanceSetting(ctx, key)
+	}
+	return q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: key, Value: value})
 }
 
 // getSetting reads one instance_settings value, mapping the no-rows sentinel to

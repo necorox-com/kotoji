@@ -136,6 +136,16 @@ type Config struct {
 	// parent (see §8.1 isolation).
 	ControlHost string
 
+	// BaseDomainEnvSet / ControlBaseURLEnvSet record whether KOTOJI_BASE_DOMAIN /
+	// KOTOJI_CONTROL_BASE_URL were EXPLICITLY set in the environment (non-empty),
+	// as opposed to falling back to the package default. They gate the WordPress-
+	// style precedence (env OVERRIDES DB): when true the value is LOCKED (read-only
+	// in the admin GUI) and the static startup value is used per request with no
+	// DB lookup — keeping the live deployment (both set) on today's fast path. When
+	// false the effective value is resolved dynamically (DB > derived).
+	BaseDomainEnvSet     bool
+	ControlBaseURLEnvSet bool
+
 	DatabaseURL string
 	DBMaxConns  int
 	AutoMigrate bool // run embedded goose migrations on boot (default true)
@@ -191,6 +201,10 @@ type Config struct {
 	OpsInterval     time.Duration // background ops scheduler tick
 
 	CORSAllowedOrigins []string
+	// CORSOriginsEnvSet records whether KOTOJI_CORS_ALLOWED_ORIGINS was explicitly
+	// configured. When false the default origin is the (effective) control base URL,
+	// which the control plane may resolve dynamically on the env-empty path.
+	CORSOriginsEnvSet bool
 
 	LogLevel  string
 	LogFormat string
@@ -307,6 +321,11 @@ func load(get getenv) (Config, error) {
 	// --- domains / URLs ---
 	c.BaseDomain = getString(get, "KOTOJI_BASE_DOMAIN", defaultBaseDomain)
 	c.ControlBaseURL = getString(get, "KOTOJI_CONTROL_BASE_URL", defaultControlBaseURL)
+	// Record whether each was EXPLICITLY set (non-empty) in the env. This gates the
+	// WordPress-style precedence: an env-set value is LOCKED (read-only in the GUI)
+	// and used statically; an unset one is resolved dynamically (DB > derived).
+	c.BaseDomainEnvSet = envSet(get, "KOTOJI_BASE_DOMAIN")
+	c.ControlBaseURLEnvSet = envSet(get, "KOTOJI_CONTROL_BASE_URL")
 
 	// Derive the bare control host from CONTROL_BASE_URL. Used as the host-only
 	// cookie domain; it must NOT be the wildcard parent domain.
@@ -427,6 +446,11 @@ func load(get getenv) (Config, error) {
 
 	// --- CORS ---
 	origins := getCSV(get, "KOTOJI_CORS_ALLOWED_ORIGINS")
+	// Record whether an explicit allowlist was configured. When it was NOT (and the
+	// control base URL env is also unset), the control plane resolves the default
+	// CORS origin dynamically from the EFFECTIVE control base URL (env > DB >
+	// derived) so a runtime-configured instance accepts its own origin.
+	c.CORSOriginsEnvSet = len(origins) > 0
 	if len(origins) == 0 {
 		origins = []string{c.ControlBaseURL}
 	}
@@ -561,6 +585,13 @@ func getString(get getenv, key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envSet reports whether key is present in the environment with a NON-EMPTY value.
+// Used to gate the env-over-DB precedence for the runtime-configurable settings.
+func envSet(get getenv, key string) bool {
+	v, ok := get(key)
+	return ok && strings.TrimSpace(v) != ""
 }
 
 func getInt(get getenv, key string, def int) int {

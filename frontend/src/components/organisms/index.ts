@@ -46,12 +46,16 @@ export { CreateSiteForm, type CreateSiteFormProps } from "./create-site-form";
 export { GitHubSection, type GitHubSectionProps } from "./github-section";
 
 // Instance / account Settings cluster (/settings): instance-wide GitHub mirror
-// config (admin-only), the per-user MCP/API token panel (everyone), and the MCP
-// connection guide (everyone).
+// config + domain/URL config (admin-only), the per-user MCP/API token panel
+// (everyone), and the MCP connection guide (everyone).
 export {
   GitHubAdminSection,
   type GitHubAdminSectionProps,
 } from "./github-admin-section";
+export {
+  DomainAdminSection,
+  type DomainAdminSectionProps,
+} from "./domain-admin-section";
 export {
   AccountTokenPanel,
   type AccountTokenPanelProps,

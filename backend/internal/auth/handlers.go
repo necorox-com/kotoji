@@ -68,7 +68,26 @@ type Auth struct {
 	// signKey signs the login-state cookie (HMAC). Derived from the admin
 	// password / a random per-process key so the cookie is tamper-evident.
 	signKey []byte
+
+	// domain, when non-nil, supplies the EFFECTIVE base domain + control base URL
+	// (WordPress-style env > DB > derived) for /api/config. nil falls back to the
+	// static cfg values (the env-set fast path / tests that do not wire it).
+	domain DomainResolver
 }
+
+// DomainResolver resolves the effective base domain + control base URL for the
+// current request. *domaincfg.Provider satisfies it; the composition root injects
+// it via SetDomainResolver. Kept an interface so the auth package does not depend
+// on the domaincfg package (and tests can stub it).
+type DomainResolver interface {
+	BaseDomainFor(r *http.Request) string
+	ControlBaseURLFor(r *http.Request) string
+}
+
+// SetDomainResolver installs the effective-domain resolver used by /api/config.
+// Optional: a nil resolver (or never calling this) keeps the static cfg behavior,
+// so existing tests / the env-set fast path are unaffected.
+func (a *Auth) SetDomainResolver(d DomainResolver) { a.domain = d }
 
 // UserUpserter is the atomic "match-or-create user + link identity" seam used at
 // callback. *db.Store satisfies it via StoreUpserter; tests inject a fake.
@@ -621,6 +640,15 @@ func (a *Auth) Me(w http.ResponseWriter, r *http.Request) {
 // PublicConfig returns the public-safe instance config (openapi InstanceConfig).
 // No auth required (security: [] in the spec).
 func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
+	// EFFECTIVE base domain + control base URL (WordPress-style env > DB > derived).
+	// The resolver is nil on the env-set fast path / in tests, where the static cfg
+	// values are used unchanged.
+	baseDomain := a.cfg.BaseDomain
+	controlBaseURL := a.cfg.ControlBaseURL
+	if a.domain != nil {
+		baseDomain = a.domain.BaseDomainFor(r)
+		controlBaseURL = a.domain.ControlBaseURLFor(r)
+	}
 	writeJSON(w, http.StatusOK, instanceConfigJSON{
 		MaxUploadBytes:    a.cfg.Zip.MaxUploadBytes,
 		ZipMaxFiles:       a.cfg.Zip.MaxFiles,
@@ -630,7 +658,8 @@ func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 		HandleMinLen:      a.cfg.HandleMinLen,
 		HandleMaxLen:      a.cfg.HandleMaxLen,
 		ReservedHandles:   reservedHandles(),
-		BaseDomain:        a.cfg.BaseDomain,
+		BaseDomain:        baseDomain,
+		ControlBaseURL:    controlBaseURL,
 		// AuthMode is the LEGACY single representative (back-compat). AuthProviders
 		// is the full ENABLED set so the login page renders EACH provider (e.g.
 		// ["oidc","password"] for the break-glass config). Existing clients that
@@ -725,6 +754,10 @@ type instanceConfigJSON struct {
 	HandleMaxLen      int      `json:"handleMaxLen"`
 	ReservedHandles   []string `json:"reservedHandles"`
 	BaseDomain        string   `json:"baseDomain"`
+	// ControlBaseURL is the EFFECTIVE external URL of the control host (env > DB >
+	// derived). The frontend reads it to build absolute links / show the configured
+	// host on /settings. Always present (derived from the request on a fresh install).
+	ControlBaseURL string `json:"controlBaseURL"`
 	// AuthMode is the legacy single representative; AuthProviders is the full
 	// enabled set ("oidc"/"password"/"none") the login page renders.
 	AuthMode            string   `json:"authMode"`

@@ -30,6 +30,11 @@ export type InstanceConfig = S["InstanceConfig"];
 export type GitHubAdminConfig = S["GitHubAdminConfig"];
 export type GitHubAdminConfigUpdate = S["GitHubAdminConfigUpdate"];
 
+// -------- admin (instance domain/URL config) --------
+export type DomainAdminConfig = S["DomainAdminConfig"];
+export type DomainAdminConfigUpdate = S["DomainAdminConfigUpdate"];
+export type DomainConfigSource = S["DomainConfigSource"];
+
 // -------- sites --------
 export type Site = S["Site"];
 export type SiteSummary = S["SiteSummary"];

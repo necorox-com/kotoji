@@ -21,6 +21,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/auth"
 	"github.com/necorox-com/kotoji/backend/internal/config"
 	"github.com/necorox-com/kotoji/backend/internal/db"
+	"github.com/necorox-com/kotoji/backend/internal/domaincfg"
 	"github.com/necorox-com/kotoji/backend/internal/mcpserver"
 	"github.com/necorox-com/kotoji/backend/internal/migrate"
 	"github.com/necorox-com/kotoji/backend/internal/observability"
@@ -56,6 +57,12 @@ type App struct {
 	auth *auth.Auth
 	// siteSvc is the single git boundary every content op delegates to.
 	siteSvc site.Service
+
+	// domain resolves the EFFECTIVE base domain + control base URL with the
+	// WordPress-style precedence (env OVERRIDES DB, DB over derived). When both
+	// envs are set it is a pure static fast path (no per-request DB read); shared
+	// by the data-plane resolver, /api/config, and the admin /api/admin/domain API.
+	domain *domaincfg.Provider
 
 	// opsScheduler runs the background operability jobs (reaper, gc, startup
 	// consistency check). It is started ONLY when the control plane runs (single
@@ -96,6 +103,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, berr
 	}
 	store.SetSecretBox(box)
+
+	// Effective domain/URL provider (WordPress-style env > DB > derived). The store
+	// is consulted ONLY for fields whose env var is unset; when both KOTOJI_BASE_DOMAIN
+	// and KOTOJI_CONTROL_BASE_URL are set this never reads the DB (the live deployment
+	// stays on the static fast path). Shared by the resolver, /api/config, and the
+	// admin domain API; the admin PUT invalidates its cache.
+	a.domain = domaincfg.New(domaincfg.Config{
+		Store:             store,
+		EnvBaseDomain:     cfg.BaseDomain,
+		EnvBaseDomainSet:  cfg.BaseDomainEnvSet,
+		EnvControlBaseURL: cfg.ControlBaseURL,
+		EnvControlSet:     cfg.ControlBaseURLEnvSet,
+	})
 
 	// Provision the schema on boot so a fresh `docker compose up` needs zero manual
 	// migration steps. Advisory-locked (safe across rolling restarts); disable with
@@ -140,6 +160,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		}
 		// *db.Store satisfies auth.StoreDeps (SessionStore + WithTx).
 		a.auth = auth.NewWithProviders(cfg, store, providers...)
+		// Surface the EFFECTIVE base domain + control base URL on /api/config (env >
+		// DB > derived). On the env-set fast path the provider returns the static
+		// values without a DB read; the dynamic path reflects the admin's DB setting.
+		a.auth.SetDomainResolver(a.domain)
 
 		// Background operability scheduler (reaper + gc + startup consistency).
 		// Built only on the control plane: the single replica that owns writes also
@@ -264,6 +288,7 @@ func (a *App) ControlRouter() http.Handler {
 		Serve:        nil, // data plane runs on its own addr (run mode all|serve)
 		MCP:          mcpHandler,
 		PreviewGrant: a.previewSigner(), // shares ONE codec with the data-plane verifier
+		Domain:       wrapDomain(a.domain),
 		Logger:       a.logger,
 	})
 
@@ -349,6 +374,11 @@ func (a *App) ServeRouter() http.Handler {
 		EnablePathFallback: true,
 		// X-Forwarded-Host is trusted only behind the documented reverse proxy.
 		TrustForwardedHost: a.cfg.TrustProxyHeaders,
+		// Dynamic base domain: ONLY when KOTOJI_BASE_DOMAIN is unset. When set, leave
+		// this nil so classifyHost uses the precomputed static suffix with no per-
+		// request DB read (today's behavior on the live instance). When unset, the
+		// resolver consults the effective value (DB > derived) each request.
+		BaseDomainFunc: a.dynamicBaseDomainFunc(),
 	})
 
 	// The tree provider reads materialized served worktrees (no git on the request
@@ -396,6 +426,20 @@ func (a *App) ServeRouter() http.Handler {
 	r.NotFound(h.ServeHTTP)
 	r.MethodNotAllowed(h.ServeHTTP)
 	return r
+}
+
+// dynamicBaseDomainFunc returns the per-request effective-base-domain resolver for
+// the data-plane resolver, or NIL when KOTOJI_BASE_DOMAIN is set (the static fast
+// path — the resolver then uses its precomputed suffix with zero DB reads). When
+// the env is unset, the returned func consults the effective provider (DB cached
+// in memory > derived from the request Host) so a runtime admin change applies.
+func (a *App) dynamicBaseDomainFunc() func(r *http.Request) string {
+	if a.cfg.BaseDomainEnvSet || a.domain == nil {
+		return nil
+	}
+	return func(r *http.Request) string {
+		return a.domain.Resolve(r.Context(), r).BaseDomain.Value
+	}
 }
 
 // serveLimiter builds the per-IP rate-limit middleware for the data plane, or nil

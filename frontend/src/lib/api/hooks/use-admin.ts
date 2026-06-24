@@ -19,7 +19,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient, call } from "../client";
 import { queryKeys } from "../keys";
-import type { GitHubAdminConfig, GitHubAdminConfigUpdate } from "../types";
+import type {
+  GitHubAdminConfig,
+  GitHubAdminConfigUpdate,
+  DomainAdminConfig,
+  DomainAdminConfigUpdate,
+} from "../types";
 
 /**
  * Read the EFFECTIVE instance GitHub mirror config (DB overrides env). Secret-
@@ -48,6 +53,41 @@ export function useUpdateAdminGitHub() {
       // Seed the admin view with the authoritative response, then invalidate
       // the public config so githubMirrorEnabled (and downstream UI) refreshes.
       qc.setQueryData(queryKeys.adminGitHub(), config);
+      qc.invalidateQueries({ queryKey: queryKeys.config() });
+    },
+  });
+}
+
+/**
+ * Read the EFFECTIVE instance domain/URL config (WordPress-style precedence: env
+ * OVERRIDES DB OVERRIDES request-derived default). Returns the effective base
+ * domain + control base URL, each with a `*Source` ("env"|"db"|"derived") and a
+ * `*Locked` flag (true when the KOTOJI_* env var is set → read-only in the GUI).
+ * NOT secret. Admin-only: a non-admin hits 403, so callers must only enable this
+ * when `me.user.isAdmin`.
+ */
+export function useAdminDomain(enabled = true) {
+  return useQuery<DomainAdminConfig>({
+    queryKey: queryKeys.adminDomain(),
+    queryFn: () => call(() => apiClient.GET("/api/admin/domain")),
+    enabled,
+  });
+}
+
+/**
+ * Update the instance domain/URL config (partial — absent fields unchanged; an
+ * empty string reverts that field to the env/derived fallback). A field whose
+ * env var is set is REJECTED with 409 (locked), and invalid values with 422; the
+ * caller surfaces those inline. On success we seed the admin view AND invalidate
+ * the public ["config"] (it exposes baseDomain) so downstream UI refreshes.
+ */
+export function useUpdateAdminDomain() {
+  const qc = useQueryClient();
+  return useMutation<DomainAdminConfig, Error, DomainAdminConfigUpdate>({
+    mutationFn: (body) =>
+      call(() => apiClient.PUT("/api/admin/domain", { body })),
+    onSuccess: (config) => {
+      qc.setQueryData(queryKeys.adminDomain(), config);
       qc.invalidateQueries({ queryKey: queryKeys.config() });
     },
   });

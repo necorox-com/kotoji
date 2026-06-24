@@ -93,7 +93,7 @@ func (s *server) previewGrant(w http.ResponseWriter, r *http.Request) {
 	grant := s.deps.PreviewGrant.SignGrant(ac.site.ID, branch, exp)
 
 	label := string(ac.site.Handle) + "--" + branch
-	previewURL := s.urlFor(label) + "/?" + serve.PreviewGrantQueryParam + "=" + grant
+	previewURL := s.urlFor(r, label) + "/?" + serve.PreviewGrantQueryParam + "=" + grant
 
 	s.auditBestEffort(r.Context(), gen.InsertAuditParams{
 		ActorUserID: uuidPtr(ac.user.UserID),

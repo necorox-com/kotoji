@@ -34,6 +34,9 @@ func (s *server) mountAdmin(r chi.Router) {
 		// Instance GitHub mirror config (write-only token; never echoed).
 		r.Method(http.MethodGet, "/github", auth.RequireAdmin(http.HandlerFunc(s.adminGetGitHub)))
 		r.Method(http.MethodPut, "/github", auth.RequireAdmin(http.HandlerFunc(s.adminPutGitHub)))
+		// Instance domain/URL config (WordPress-style env > DB > derived; non-secret).
+		r.Method(http.MethodGet, "/domain", auth.RequireAdmin(http.HandlerFunc(s.adminGetDomain)))
+		r.Method(http.MethodPut, "/domain", auth.RequireAdmin(http.HandlerFunc(s.adminPutDomain)))
 	})
 }
 

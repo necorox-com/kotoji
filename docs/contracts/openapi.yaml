@@ -832,6 +832,59 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "422": { $ref: "#/components/responses/ValidationFailed" }
 
+  /api/admin/domain:
+    get:
+      tags: [admin]
+      operationId: adminGetDomain
+      summary: Read the instance domain/URL config (admin only)
+      description: >
+        Returns the EFFECTIVE base domain + external control base URL with their
+        sources and env-locked flags. Precedence is WordPress-style: the
+        KOTOJI_BASE_DOMAIN / KOTOJI_CONTROL_BASE_URL env vars OVERRIDE the
+        instance_settings DB values, which override values derived from the
+        incoming request on a fresh install. A field whose env var is set has
+        `*Locked: true` (read-only in the GUI). Requires is_admin (401 anonymous,
+        403 non-admin). The values are NOT secret and are returned verbatim.
+      responses:
+        "200":
+          description: Effective domain/URL config
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainAdminConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [admin]
+      operationId: adminPutDomain
+      summary: Update the instance domain/URL config (admin only)
+      description: >
+        Persists a PARTIAL update of the runtime base domain / control base URL.
+        Every body field is optional: an absent field is left unchanged. A field
+        whose env var is SET (locked) is REJECTED with 409 (the change is not
+        silently no-op'd). Values are validated server-side: `baseDomain` must be
+        a valid DNS hostname (no scheme/port/path), `controlBaseURL` an absolute
+        http(s) origin URL. The response is the same view as GET. Requires
+        is_admin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DomainAdminConfigUpdate" }
+      responses:
+        "200":
+          description: Updated domain/URL config
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DomainAdminConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: A targeted field is locked by the environment (env overrides DB)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationFailed" }
+
 components:
   # --------------------------------------------------------------- security
   securitySchemes:
@@ -1057,8 +1110,8 @@ components:
       type: object
       required:
         [maxUploadBytes, zipMaxFiles, zipMaxTotalBytes, allowedExtensions,
-         handleMinLen, handleMaxLen, reservedHandles, baseDomain, authMode,
-         defaultPublishMode, githubMirrorEnabled, setupRequired]
+         handleMinLen, handleMaxLen, reservedHandles, baseDomain, controlBaseURL,
+         authMode, defaultPublishMode, githubMirrorEnabled, setupRequired]
       properties:
         maxUploadBytes: { type: integer, format: int64 }
         zipMaxFiles: { type: integer }
@@ -1074,6 +1127,15 @@ components:
           type: array
           items: { type: string }
         baseDomain: { type: string, example: hosting.example.com }
+        controlBaseURL:
+          type: string
+          example: https://hosting.example.com
+          description: >
+            EFFECTIVE external URL of the control host (WordPress-style precedence:
+            KOTOJI_CONTROL_BASE_URL env OVERRIDES the instance_settings DB value,
+            which overrides a value derived from the incoming request on a fresh
+            install). Drives absolute links and the configured-host display on
+            /settings.
         authMode:
           allOf:
             - $ref: "#/components/schemas/AuthMode"
@@ -1144,6 +1206,59 @@ components:
         clearToken:
           type: boolean
           description: When true, remove the stored token (reverts to the env token if any).
+
+    # ---------- admin (instance domain/URL config) ----------
+    DomainAdminConfig:
+      type: object
+      description: >
+        EFFECTIVE instance domain/URL config (admin screen). Each value is reported
+        with its source ("env" | "db" | "derived") and a "locked" flag (true when
+        the corresponding env var is set, making the field read-only). Values are
+        NOT secret. Precedence: env OVERRIDES DB, DB overrides a per-request derived
+        default.
+      required:
+        [baseDomain, controlBaseURL, baseDomainSource, controlBaseURLSource,
+         baseDomainLocked, controlBaseURLLocked]
+      properties:
+        baseDomain:
+          type: string
+          example: hosting.example.com
+          description: Effective base domain used to parse {handle}[--{branch}].<base>.
+        controlBaseURL:
+          type: string
+          example: https://hosting.example.com
+          description: Effective external URL of the control host.
+        baseDomainSource:
+          $ref: "#/components/schemas/DomainConfigSource"
+        controlBaseURLSource:
+          $ref: "#/components/schemas/DomainConfigSource"
+        baseDomainLocked:
+          type: boolean
+          description: True when KOTOJI_BASE_DOMAIN is set (env wins; field read-only).
+        controlBaseURLLocked:
+          type: boolean
+          description: True when KOTOJI_CONTROL_BASE_URL is set (env wins; field read-only).
+    DomainConfigSource:
+      type: string
+      enum: [env, db, derived]
+      description: >
+        Where an effective domain/URL value came from: "env" (KOTOJI_* env var,
+        locked), "db" (instance_settings, editable), or "derived" (from the
+        incoming request on a fresh, unconfigured install).
+    DomainAdminConfigUpdate:
+      type: object
+      description: >
+        Partial update of the instance domain/URL config. All fields optional;
+        absent fields are unchanged. A field whose env var is set is rejected with
+        409 (locked by environment). An empty string reverts that field to the
+        env/derived fallback (deletes the DB key).
+      properties:
+        baseDomain:
+          type: string
+          description: New base domain (valid DNS hostname; empty reverts to env/derived).
+        controlBaseURL:
+          type: string
+          description: New control base URL (absolute http(s) origin; empty reverts to env/derived).
 
     # ---------- sites ----------
     Site:

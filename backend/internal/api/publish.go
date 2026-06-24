@@ -58,8 +58,10 @@ func (s *server) publish(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Compose the published URL from the bare handle host (CANONICAL §5: published
-	// is reached at {handle}.<baseDomain>, never via "--").
-	publishedURL := s.urlFor(string(ac.site.Handle))
+	// is reached at {handle}.<baseDomain>, never via "--"). The base domain is the
+	// EFFECTIVE value (env > DB > derived) so a runtime-configured instance links to
+	// the right host.
+	publishedURL := s.urlFor(r, string(ac.site.Handle))
 	writeJSON(w, http.StatusOK, openapi.PublishResult{
 		PublishedCommit: ci.SHA,
 		PublishedUrl:    &publishedURL,
@@ -70,14 +72,22 @@ func (s *server) publish(w http.ResponseWriter, r *http.Request) {
 }
 
 // urlFor composes "<scheme>://<label>.<baseDomain>" for a host label, mirroring
-// the MCP server's URL composition (dev returns scheme+label when no domain).
-func (s *server) urlFor(label string) string {
+// the MCP server's URL composition (dev returns scheme+label when no domain). The
+// base domain is the EFFECTIVE value for this request (env > DB > derived): the
+// Domain provider returns the static env value on the live fast path and the
+// DB/derived value on the dynamic path. A nil provider (tests) falls back to the
+// static cfg value, so behavior is unchanged where it is not wired.
+func (s *server) urlFor(r *http.Request, label string) string {
 	scheme := "https"
 	if !s.deps.Config.IsProduction() {
 		scheme = "http"
 	}
-	if s.deps.Config.BaseDomain == "" {
+	base := s.deps.Config.BaseDomain
+	if s.deps.Domain != nil {
+		base = s.deps.Domain.Resolve(r.Context(), r).BaseDomain.Value
+	}
+	if base == "" {
 		return scheme + "://" + label
 	}
-	return scheme + "://" + label + "." + s.deps.Config.BaseDomain
+	return scheme + "://" + label + "." + base
 }

@@ -53,6 +53,13 @@ type MetaStore interface {
 	GetGitHubConfig(ctx context.Context) (db.GitHubConfig, error)
 	SetGitHubConfig(ctx context.Context, in db.SetGitHubConfigInput) error
 
+	// ---- instance domain/URL config (admin screen) ----
+	// SetDomainConfig persists a partial update of the runtime base domain /
+	// control base URL (plain strings, not secret; empty value deletes the key,
+	// reverting to env/derived). The GET path reads the EFFECTIVE value via the
+	// Domain provider, not here. *db.Store satisfies it.
+	SetDomainConfig(ctx context.Context, in db.SetDomainConfigInput) error
+
 	// ---- audit (best-effort append) ----
 	InsertAudit(ctx context.Context, arg gen.InsertAuditParams) error
 
@@ -108,6 +115,43 @@ type Deps struct {
 	// (routing-and-serving.md §8.1.2). nil disables the endpoint (404) — set when
 	// the data plane runs elsewhere and previews are off on this control plane.
 	PreviewGrant PreviewSigner
+	// Domain resolves the EFFECTIVE base domain + control base URL (env > DB >
+	// derived) and exposes the env-locked flags + cache invalidation for the admin
+	// /api/admin/domain surface. nil only in tests that do not exercise that route.
+	Domain DomainConfigProvider
 	// Logger is used for best-effort audit/internal logging.
 	Logger *slog.Logger
+}
+
+// DomainConfigProvider is the slice of the effective-domain provider the admin
+// /api/admin/domain handlers need: read the effective base domain + control base
+// URL with their sources, ask whether each field is env-locked, and invalidate
+// the cache after a successful PUT. *domaincfg.Provider satisfies it; tests stub
+// it. Returning the per-field source/locked lets the GET expose them to the GUI.
+type DomainConfigProvider interface {
+	// Resolve returns the effective base domain + control base URL for r (each with
+	// its value, source "env"|"db"|"derived", and locked flag).
+	Resolve(ctx context.Context, r *http.Request) DomainResolved
+	// EnvBaseDomainLocked / EnvControlBaseURLLocked report whether the respective
+	// field is pinned by the environment (env-set => read-only / reject writes).
+	EnvBaseDomainLocked() bool
+	EnvControlBaseURLLocked() bool
+	// InvalidateCache drops the cached DB read so the next Resolve re-reads it
+	// (called by the admin PUT on a successful persist).
+	InvalidateCache()
+}
+
+// DomainResolved mirrors domaincfg.Resolved at the api boundary so the package
+// does not import domaincfg directly (keeps the handler unit-testable against a
+// stub). The adapter in the composition root maps the provider's type onto this.
+type DomainResolved struct {
+	BaseDomain     DomainEffective
+	ControlBaseURL DomainEffective
+}
+
+// DomainEffective is one resolved setting: value + source + env-locked flag.
+type DomainEffective struct {
+	Value  string
+	Source string // "env" | "db" | "derived"
+	Locked bool
 }

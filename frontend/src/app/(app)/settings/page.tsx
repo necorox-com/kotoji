@@ -12,6 +12,9 @@
  *  (A) GitHub連携 — ADMIN ONLY (rendered only when me.user.isAdmin). The instance
  *      GitHub mirror config (enable / org / write-only PAT / write-only webhook
  *      secret), persisted via PUT /api/admin/github.
+ *  (A2) ドメイン / URL — ADMIN ONLY. The instance base domain + control base URL
+ *      (WordPress-style precedence: env OVERRIDES DB OVERRIDES request-derived),
+ *      persisted via PUT /api/admin/domain. Env-locked fields are read-only.
  *  (B) MCP / API トークン — shown to EVERYONE. The user's OWN per-user tokens
  *      (CANONICAL §6, re-architected model): a token is owned by the user and
  *      automatically covers every project they're a member of. Issue (show-once
@@ -28,6 +31,7 @@ import { DashboardLayout } from "@/components/templates";
 import { SectionHeading } from "@/components/atoms";
 import {
   GitHubAdminSection,
+  DomainAdminSection,
   AccountTokenPanel,
   McpGuideSection,
 } from "@/components/organisms";
@@ -55,6 +59,9 @@ export default function SettingsPage() {
 
         {/* (A) Instance GitHub mirror config — admin only. */}
         {isAdmin ? <GitHubAdminSection /> : null}
+
+        {/* (A2) Instance domain / URL config — admin only (env > DB > derived). */}
+        {isAdmin ? <DomainAdminSection /> : null}
 
         {/* (B) Per-user MCP/API tokens — everyone (the user's own tokens). */}
         <AccountTokenPanel canCreateSites={canCreateSites} />

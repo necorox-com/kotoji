@@ -29,6 +29,13 @@ const (
 	ConflictEnvelopeErrorCodeNothingToCommit ConflictEnvelopeErrorCode = "nothing_to_commit"
 )
 
+// Defines values for DomainConfigSource.
+const (
+	Db      DomainConfigSource = "db"
+	Derived DomainConfigSource = "derived"
+	Env     DomainConfigSource = "env"
+)
+
 // Defines values for ErrorEnvelopeErrorCode.
 const (
 	ErrorEnvelopeErrorCodeBranchExists         ErrorEnvelopeErrorCode = "branch_exists"
@@ -222,6 +229,39 @@ type DiffResult struct {
 	Truncated *bool      `json:"truncated,omitempty"`
 }
 
+// DomainAdminConfig EFFECTIVE instance domain/URL config (admin screen). Each value is reported with its source ("env" | "db" | "derived") and a "locked" flag (true when the corresponding env var is set, making the field read-only). Values are NOT secret. Precedence: env OVERRIDES DB, DB overrides a per-request derived default.
+type DomainAdminConfig struct {
+	// BaseDomain Effective base domain used to parse {handle}[--{branch}].<base>.
+	BaseDomain string `json:"baseDomain"`
+
+	// BaseDomainLocked True when KOTOJI_BASE_DOMAIN is set (env wins; field read-only).
+	BaseDomainLocked bool `json:"baseDomainLocked"`
+
+	// BaseDomainSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	BaseDomainSource DomainConfigSource `json:"baseDomainSource"`
+
+	// ControlBaseURL Effective external URL of the control host.
+	ControlBaseURL string `json:"controlBaseURL"`
+
+	// ControlBaseURLLocked True when KOTOJI_CONTROL_BASE_URL is set (env wins; field read-only).
+	ControlBaseURLLocked bool `json:"controlBaseURLLocked"`
+
+	// ControlBaseURLSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	ControlBaseURLSource DomainConfigSource `json:"controlBaseURLSource"`
+}
+
+// DomainAdminConfigUpdate Partial update of the instance domain/URL config. All fields optional; absent fields are unchanged. A field whose env var is set is rejected with 409 (locked by environment). An empty string reverts that field to the env/derived fallback (deletes the DB key).
+type DomainAdminConfigUpdate struct {
+	// BaseDomain New base domain (valid DNS hostname; empty reverts to env/derived).
+	BaseDomain *string `json:"baseDomain,omitempty"`
+
+	// ControlBaseURL New control base URL (absolute http(s) origin; empty reverts to env/derived).
+	ControlBaseURL *string `json:"controlBaseURL,omitempty"`
+}
+
+// DomainConfigSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+type DomainConfigSource string
+
 // ErrorEnvelope defines model for ErrorEnvelope.
 type ErrorEnvelope struct {
 	Error struct {
@@ -334,8 +374,11 @@ type InstanceConfig struct {
 	AuthMode AuthMode `json:"authMode"`
 
 	// AuthProviders The ENABLED auth providers, in normalized order (oidc, password, none). The login page renders one control per entry, so OIDC + the break-glass password can be offered concurrently. A single legacy KOTOJI_AUTH_MODE value yields a one-element array.
-	AuthProviders      *[]AuthMode `json:"authProviders,omitempty"`
-	BaseDomain         string      `json:"baseDomain"`
+	AuthProviders *[]AuthMode `json:"authProviders,omitempty"`
+	BaseDomain    string      `json:"baseDomain"`
+
+	// ControlBaseURL EFFECTIVE external URL of the control host (WordPress-style precedence: KOTOJI_CONTROL_BASE_URL env OVERRIDES the instance_settings DB value, which overrides a value derived from the incoming request on a fresh install). Drives absolute links and the configured-host display on /settings.
+	ControlBaseURL     string      `json:"controlBaseURL"`
 	DefaultPublishMode PublishMode `json:"defaultPublishMode"`
 
 	// GithubMirrorEnabled True when the instance can mirror to GitHub at all (KOTOJI_GITHUB_MIRROR_ENABLED set AND a push token configured). The GUI keys per-site linking/sync controls off this flag.
@@ -720,6 +763,9 @@ type AuthLoginParams struct {
 	// Next Post-login redirect target (validated server-side).
 	Next *string `form:"next,omitempty" json:"next,omitempty"`
 }
+
+// AdminPutDomainJSONRequestBody defines body for AdminPutDomain for application/json ContentType.
+type AdminPutDomainJSONRequestBody = DomainAdminConfigUpdate
 
 // AdminPutGitHubJSONRequestBody defines body for AdminPutGitHub for application/json ContentType.
 type AdminPutGitHubJSONRequestBody = GitHubAdminConfigUpdate
