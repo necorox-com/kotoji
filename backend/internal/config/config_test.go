@@ -287,3 +287,82 @@ func TestLoad_NoneExclusive(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "exclusive")
 }
+
+// --- kotoji-native on-demand TLS (KOTOJI_TLS_MODE) ---
+
+// TestLoad_TLSDefaultsOff pins the headline invariant: with no TLS env, mode is
+// OFF and ServesTLS is false — today's plain-HTTP behavior is untouched.
+func TestLoad_TLSDefaultsOff(t *testing.T) {
+	cfg, err := LoadFromMap(devBase())
+	require.NoError(t, err)
+	assert.Equal(t, TLSModeOff, cfg.TLSMode)
+	assert.Equal(t, TLSCAProd, cfg.TLSCA)
+	assert.False(t, cfg.ServesTLS(), "off mode must not boot the TLS engine")
+	assert.Equal(t, ":443", cfg.TLSAddr)
+	assert.Equal(t, ":80", cfg.TLSHTTPAddr)
+	// Cert storage is derived under the data dir.
+	assert.Equal(t, "/data/certmagic", cfg.CertMagicStorageDir)
+}
+
+// TestLoad_TLSAutoRequiresRunModeAll: auto mode is rejected unless RUN_MODE=all,
+// since the single :443 listener fronts BOTH planes via Host routing.
+func TestLoad_TLSAutoRequiresRunModeAll(t *testing.T) {
+	for _, mode := range []string{"control", "serve"} {
+		env := devBase()
+		env["KOTOJI_TLS_MODE"] = "auto"
+		env["KOTOJI_RUN_MODE"] = mode
+		_, err := LoadFromMap(env)
+		require.Error(t, err, "auto + run_mode=%s must fail", mode)
+		assert.Contains(t, err.Error(), "KOTOJI_TLS_MODE=auto requires KOTOJI_RUN_MODE=all")
+	}
+}
+
+// TestLoad_TLSAutoAllValid: auto + all loads cleanly and ServesTLS is true.
+func TestLoad_TLSAutoAllValid(t *testing.T) {
+	env := devBase()
+	env["KOTOJI_TLS_MODE"] = "auto" // RUN_MODE defaults to all
+	env["KOTOJI_ACME_EMAIL"] = "ops@example.com"
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.Equal(t, TLSModeAuto, cfg.TLSMode)
+	assert.True(t, cfg.ServesTLS())
+	assert.Equal(t, "ops@example.com", cfg.ACMEEmail)
+}
+
+// TestLoad_TLSStagingToggle: KOTOJI_TLS_CA=staging selects the staging directory.
+func TestLoad_TLSStagingToggle(t *testing.T) {
+	env := devBase()
+	env["KOTOJI_TLS_MODE"] = "auto"
+	env["KOTOJI_TLS_CA"] = "staging"
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.True(t, cfg.TLSStaging())
+	assert.Equal(t, TLSCAStaging, cfg.TLSCA)
+}
+
+// TestLoad_TLSInvalidEnums: bad TLS_MODE / TLS_CA values are rejected at load.
+func TestLoad_TLSInvalidEnums(t *testing.T) {
+	cases := map[string]map[string]string{
+		"bad tls mode": {"KOTOJI_TLS_MODE": "on"},
+		"bad tls ca":   {"KOTOJI_TLS_MODE": "auto", "KOTOJI_TLS_CA": "letsencrypt"},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := devBase()
+			for k, v := range extra {
+				env[k] = v
+			}
+			_, err := LoadFromMap(env)
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestLoad_CertMagicStorageFollowsDataDir: the cert store tracks KOTOJI_DATA_DIR.
+func TestLoad_CertMagicStorageFollowsDataDir(t *testing.T) {
+	env := devBase()
+	env["KOTOJI_DATA_DIR"] = "/srv/kotoji"
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.Equal(t, "/srv/kotoji/certmagic", cfg.CertMagicStorageDir)
+}

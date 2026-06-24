@@ -1,0 +1,53 @@
+# kotoji native on-demand TLS overlay — OPT-IN, the THIRD deployment mode.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# WHAT IT DOES
+# ------------
+# kotoji TERMINATES TLS ITSELF (no external proxy, no wildcard cert, no DNS-01
+# token, no ACME secret in env). The backend binds :443 and :80 and uses CertMagic
+# ON-DEMAND issuance: when a TLS handshake arrives for host H, a per-host cert is
+# obtained on the fly via TLS-ALPN-01 / HTTP-01 — but ONLY for a host this instance
+# is authoritative for (the control host, or an EXISTING hosted site/preview). An
+# admin who merely points DNS at the server gets working HTTPS, all via the Web UI.
+#
+#   :443  ->  the single combined Host-routing handler (control + data planes)
+#   :80   ->  ACME HTTP-01 challenge solver + 301-redirect everything else to https
+#
+# MUTUALLY EXCLUSIVE with docker-compose.edge.yml (Traefik). Pick ONE edge:
+#   - this overlay        -> kotoji is its own edge (per-host on-demand certs).
+#   - edge.yml (Traefik)  -> Traefik is the edge (DNS-01 wildcard cert).
+# Composing BOTH would bind :80/:443 twice and is unsupported.
+#
+# The BASE compose (docker-compose.yml) stays proxy-less/HTTP; this overlay only
+# ADDS the 80/443 host port publishes and flips KOTOJI_TLS_MODE=auto. Cert/key and
+# the ACME account persist under the SAME kotojidata volume (${KOTOJI_DATA_DIR}/
+# certmagic), so issued certs survive restarts.
+
+name: kotoji
+
+services:
+  backend:
+    # Publish the public TLS ports IN ADDITION to the base 8080/8081 (which remain
+    # bound for internal health checks behind the kotoji-native TLS edge). The
+    # base sequence is merged; we append the two new mappings.
+    ports:
+      - "80:80"   # ACME HTTP-01 + HTTPS redirect
+      - "443:443" # combined control + data planes over on-demand TLS
+    environment:
+      # Turn on kotoji-native on-demand TLS. Requires KOTOJI_RUN_MODE=all (the base
+      # already sets it); the backend refuses to boot otherwise.
+      KOTOJI_TLS_MODE: auto
+      # prod (default, real Let's Encrypt certs) | staging (untrusted test certs,
+      # generous rate limits — use this to validate the flow before going live).
+      KOTOJI_TLS_CA: ${KOTOJI_TLS_CA:-prod}
+      # OPTIONAL Let's Encrypt account email. May be empty (on-demand works without
+      # it) and set later via env/UI. Shared name with the edge overlay.
+      KOTOJI_ACME_EMAIL: ${KOTOJI_ACME_EMAIL:-}
+      # Cookies must be Secure now that the public origin is https. Literal (not a
+      # ${...} default) so the secure value is deterministic under compose merge.
+      KOTOJI_COOKIE_SECURE: "true"
+      # kotoji speaks TLS DIRECTLY to the client now, so there is NO trusted proxy
+      # in front: do NOT honor X-Forwarded-* (they would be attacker-controlled).
+      # Literal false so the safe value wins the overlay merge unconditionally.
+      KOTOJI_TRUST_PROXY_HEADERS: "false"

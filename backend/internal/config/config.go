@@ -36,6 +36,35 @@ const (
 	RunModeServe RunMode = "serve"
 )
 
+// TLSMode selects how the binary terminates TLS. See docs/architecture.md §4.5.
+type TLSMode string
+
+const (
+	// TLSModeOff is the DEFAULT: kotoji speaks plain HTTP on the existing
+	// control/serve ports and TLS (if any) is terminated by an external edge
+	// (Cloudflare, the Traefik overlay, NPM, ...). This is today's behavior and
+	// keeps the live, Cloudflare-fronted deployment byte-for-byte unchanged.
+	TLSModeOff TLSMode = "off"
+	// TLSModeAuto makes kotoji TERMINATE TLS ITSELF via CertMagic on-demand:
+	// it binds :443 (single listener fronting both planes via Host routing) and
+	// :80 (HTTP-01 challenge + HTTPS redirect), issuing a per-host cert on the
+	// fly for any host this instance is authoritative for. Requires RUN_MODE=all.
+	TLSModeAuto TLSMode = "auto"
+)
+
+// TLSCA selects which ACME certificate authority on-demand issuance uses.
+type TLSCA string
+
+const (
+	// TLSCAProd is the DEFAULT: the CA's production directory (real, publicly
+	// trusted certs; Let's Encrypt production by default).
+	TLSCAProd TLSCA = "prod"
+	// TLSCAStaging uses the CA's STAGING directory (untrusted test certs, far
+	// higher rate limits) so an operator can validate the on-demand flow end to
+	// end without burning the production issuance budget.
+	TLSCAStaging TLSCA = "staging"
+)
+
 // AuthMode selects the authentication provider implementation.
 type AuthMode string
 
@@ -58,6 +87,9 @@ const AdminPasswordMinLen = 8
 const (
 	defaultControlAddr      = ":8080"
 	defaultServeAddr        = ":8081"
+	defaultTLSAddr          = ":443"      // CertMagic HTTPS listener (KOTOJI_TLS_MODE=auto)
+	defaultTLSHTTPAddr      = ":80"       // ACME HTTP-01 + HTTPS-redirect listener (auto)
+	defaultCertMagicSubdir  = "certmagic" // ${KOTOJI_DATA_DIR}/certmagic for cert/key storage
 	defaultBaseDomain       = "hosting.localhost"
 	defaultControlBaseURL   = "http://hosting.localhost:8080"
 	defaultDBMaxConns       = 10
@@ -150,6 +182,23 @@ type Config struct {
 
 	ControlAddr string
 	ServeAddr   string
+
+	// --- kotoji-native on-demand TLS (KOTOJI_TLS_MODE, §4.5 third deploy mode) ---
+	// TLSMode is "off" (DEFAULT — plain HTTP behind an external edge) or "auto"
+	// (kotoji terminates TLS itself via CertMagic on-demand). In auto mode the
+	// binary additionally binds TLSAddr (:443) + TLSHTTPAddr (:80); off mode is a
+	// pure no-op that leaves the existing :8080/:8081 HTTP path untouched.
+	TLSMode     TLSMode
+	TLSCA       TLSCA  // prod (default) | staging — which ACME directory to use.
+	TLSAddr     string // HTTPS listen addr in auto mode (default :443).
+	TLSHTTPAddr string // ACME HTTP-01 + redirect listen addr in auto mode (default :80).
+	// ACMEEmail is the OPTIONAL Let's Encrypt account email. It may be empty at
+	// boot (the on-demand flow works without it) and set later via env/UI. Shared
+	// name with the edge overlay's KOTOJI_ACME_EMAIL so operators learn one var.
+	ACMEEmail string
+	// CertMagicStorageDir is ${KOTOJI_DATA_DIR}/certmagic — where issued certs/keys
+	// + the ACME account persist so they survive restarts on the existing volume.
+	CertMagicStorageDir string
 
 	BaseDomain     string // base for {handle}[--{branch}].<base> parsing
 	ControlBaseURL string // external URL of the control host
@@ -252,6 +301,15 @@ func (c Config) ServesControl() bool { return c.servesControl() }
 // ServesData reports whether the data plane must boot in this mode.
 func (c Config) ServesData() bool { return c.Mode == RunModeAll || c.Mode == RunModeServe }
 
+// ServesTLS reports whether kotoji-native on-demand TLS must boot: TLS mode is
+// "auto" AND the binary fronts BOTH planes (RUN_MODE=all). It is the single guard
+// the entry point branches on to start the :443/:80 CertMagic listeners; when it
+// is false NOTHING new happens (today's plain-HTTP path is 100% preserved).
+func (c Config) ServesTLS() bool { return c.TLSMode == TLSModeAuto && c.Mode == RunModeAll }
+
+// TLSStaging reports whether the staging ACME directory is selected (safe testing).
+func (c Config) TLSStaging() bool { return c.TLSCA == TLSCAStaging }
+
 // IsProduction reports whether the environment is production.
 func (c Config) IsProduction() bool { return c.Env == EnvProduction }
 
@@ -345,6 +403,26 @@ func load(get getenv) (Config, error) {
 	c.ControlAddr = getString(get, "KOTOJI_CONTROL_ADDR", defaultControlAddr)
 	c.ServeAddr = getString(get, "KOTOJI_SERVE_ADDR", defaultServeAddr)
 
+	// --- kotoji-native on-demand TLS (opt-in; DEFAULT off keeps today's behavior) ---
+	tlsMode := strings.ToLower(getString(get, "KOTOJI_TLS_MODE", string(TLSModeOff)))
+	switch TLSMode(tlsMode) {
+	case TLSModeOff, TLSModeAuto:
+		c.TLSMode = TLSMode(tlsMode)
+	default:
+		return Config{}, fmt.Errorf("KOTOJI_TLS_MODE: invalid value %q (want off|auto)", tlsMode)
+	}
+	tlsCA := strings.ToLower(getString(get, "KOTOJI_TLS_CA", string(TLSCAProd)))
+	switch TLSCA(tlsCA) {
+	case TLSCAProd, TLSCAStaging:
+		c.TLSCA = TLSCA(tlsCA)
+	default:
+		return Config{}, fmt.Errorf("KOTOJI_TLS_CA: invalid value %q (want prod|staging)", tlsCA)
+	}
+	c.TLSAddr = getString(get, "KOTOJI_TLS_ADDR", defaultTLSAddr)
+	c.TLSHTTPAddr = getString(get, "KOTOJI_TLS_HTTP_ADDR", defaultTLSHTTPAddr)
+	// Optional account email; settable later via env/UI. Empty is valid.
+	c.ACMEEmail = getString(get, "KOTOJI_ACME_EMAIL", "")
+
 	// --- domains / URLs ---
 	c.BaseDomain = getString(get, "KOTOJI_BASE_DOMAIN", defaultBaseDomain)
 	c.ControlBaseURL = getString(get, "KOTOJI_CONTROL_BASE_URL", defaultControlBaseURL)
@@ -370,6 +448,10 @@ func load(get getenv) (Config, error) {
 	// --- storage ---
 	c.DataDir = getString(get, "KOTOJI_DATA_DIR", defaultDataDir)
 	c.GitBin = getString(get, "KOTOJI_GIT_BIN", defaultGitBin)
+	// Cert/key + ACME-account storage lives under the existing data volume so
+	// on-demand certs survive restarts. Derived (not its own env) to keep the
+	// persisted material co-located with the rest of /data by construction.
+	c.CertMagicStorageDir = filepath.Join(c.DataDir, defaultCertMagicSubdir)
 
 	// --- auth ---
 	// KOTOJI_AUTH_MODE is a comma-SET of enabled providers (e.g. "oidc,password"
@@ -544,6 +626,14 @@ func (c Config) validate(prod bool) error {
 	}
 	if c.HandleMinLen < 1 || c.HandleMaxLen < c.HandleMinLen {
 		errs = append(errs, fmt.Errorf("KOTOJI_HANDLE_MIN_LEN/MAX_LEN: invalid bounds (%d..%d)", c.HandleMinLen, c.HandleMaxLen))
+	}
+
+	// kotoji-native TLS (auto) requires the all-in-one run mode: the single :443
+	// listener fronts BOTH planes via Host routing, which only exists when both the
+	// control + data planes run in this process. Refuse the nonsensical combination
+	// rather than silently boot a listener that can only ever serve one plane.
+	if c.TLSMode == TLSModeAuto && c.Mode != RunModeAll {
+		errs = append(errs, fmt.Errorf("KOTOJI_TLS_MODE=auto requires KOTOJI_RUN_MODE=all (got %q): the :443 listener fronts both planes via Host routing", c.Mode))
 	}
 
 	// The control plane needs a database for sessions/metadata. The data-plane-only

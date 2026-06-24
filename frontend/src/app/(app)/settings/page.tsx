@@ -19,6 +19,11 @@
  *      issuer / client id / write-only client secret / derived redirect URL /
  *      fail-closed allowlists), persisted via PUT /api/admin/oidc with the same
  *      env-OVERRIDES-DB precedence. Enabling it adds the Google button to /login.
+ *  (A4) TLS / HTTPS — ADMIN ONLY. A read-only informational panel for kotoji-
+ *      native on-demand TLS (the third deploy mode, docs §4.5): how auto-TLS
+ *      works and which host it would cover (derived from controlBaseURL). The
+ *      mode is a DEPLOY choice (docker-compose.tls.yml binds :80/:443); the
+ *      backend exposes no live TLS read endpoint, so the panel is static/honest.
  *  (B) MCP / API トークン — shown to EVERYONE. The user's OWN per-user tokens
  *      (CANONICAL §6, re-architected model): a token is owned by the user and
  *      automatically covers every project they're a member of. Issue (show-once
@@ -37,6 +42,7 @@ import {
   GitHubAdminSection,
   DomainAdminSection,
   OIDCAdminSection,
+  TlsSection,
   AccountTokenPanel,
   McpGuideSection,
 } from "@/components/organisms";
@@ -73,6 +79,14 @@ export default function SettingsPage() {
             allowlists), persisted via PUT /api/admin/oidc. Enabling it adds the
             Google button to the login page (authProviders). */}
         {isAdmin ? <OIDCAdminSection /> : null}
+
+        {/* (A4) TLS / HTTPS — admin only. Read-only informational panel for
+            kotoji-native on-demand TLS (the third deploy mode, docs §4.5): how
+            auto-TLS works + which host it would cover (from controlBaseURL).
+            Enabling auto-TLS is a DEPLOY choice (docker-compose.tls.yml binds
+            :80/:443); the backend exposes no live TLS read endpoint yet, so this
+            panel does not claim the running mode. */}
+        {isAdmin ? <TlsSection /> : null}
 
         {/* (B) Per-user MCP/API tokens — everyone (the user's own tokens). */}
         <AccountTokenPanel canCreateSites={canCreateSites} />

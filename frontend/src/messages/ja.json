@@ -464,7 +464,19 @@
     "mcpToolsTitle": "利用できるツール",
     "mcpToolsBody": "接続後、AIアシスタントは次の操作を実行できます。list_sites と create_site 以外のツールは、対象プロジェクトを指定する site 引数（プロジェクトのハンドル）を取ります。操作できるのは、あなたがメンバーになっているプロジェクトに限られます。",
     "mcpCloudflareTitle": "Cloudflareをお使いの場合",
-    "mcpCloudflareBody": "Cloudflareプロキシ配下では、Bot Fight Mode が /mcp へのアクセスをブロックすることがあります。その場合は /mcp に対するWAFスキップ（除外ルール）を追加してください。"
+    "mcpCloudflareBody": "Cloudflareプロキシ配下では、Bot Fight Mode が /mcp へのアクセスをブロックすることがあります。その場合は /mcp に対するWAFスキップ（除外ルール）を追加してください。",
+    "tlsTitle": "TLS / HTTPS",
+    "tlsDescription": "このインスタンスのHTTPS終端方法です。kotoji は自前のエッジの背後に置くことも、証明書を自分で管理することもできます。",
+    "tlsModeOffTitle": "TLS はプロキシ / Traefik オーバーレイが処理",
+    "tlsModeOffBody": "既定では kotoji はポート上で平文HTTPを話し、前段のリバースプロキシ（自前のプロキシ・Traefik オーバーレイ・Cloudflare など）がTLSを終端します。これが既定であり、Cloudflare 配下のデプロイで使われている構成です。",
+    "tlsModeAutoTitle": "kotoji によるHTTPS自動化（Let's Encrypt）",
+    "tlsModeAutoBody": "kotoji 自身がTLSを終端することもできます。証明書は、このインスタンスが配信できるホスト宛に最初のリクエストが届いた時点で必要に応じて発行されます（Let's Encrypt、ワイルドカード不要、DNSトークン不要）。未知のホストは拒否されます。サーバーにDNSを向けるだけで、発行も更新も完全自動です。",
+    "tlsModeAutoEnable": "HTTPSの自動化を有効にするのはデプロイ時の選択です。{overlay} オーバーレイで起動してください（ポート80・443を公開し {env} を設定します）。リスナーは起動時に確定するため、この画面から切り替えることはできません。",
+    "tlsCoverageTitle": "HTTPS自動化がカバーする範囲",
+    "tlsCoverageBody": "自動モードでは、ホストごとに必要に応じて証明書が取得されます。下記のコントロールホストに加え、公開済みの全サイトとプレビューホストが対象です。DNS以外に設定は不要です。",
+    "tlsControlHost": "コントロールホスト:",
+    "tlsHostUnknown": "未設定",
+    "tlsDocsHint": "TLS / デプロイモードの詳細は{link}を参照してください。"
   },
   "admin": {
     "title": "管理",

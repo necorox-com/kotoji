@@ -578,6 +578,41 @@ everything). The labels encode exactly the §1.1 routing, keyed off `KOTOJI_BASE
 (required for the per-site hosts) and redirects web→websecure. DNS-01 needs a provider token —
 `KOTOJI_ACME_DNS_PROVIDER` (default `cloudflare`) + the provider token env (e.g. `KOTOJI_CF_DNS_API_TOKEN`).
 
+### 4.5 kotoji-native on-demand TLS (third deploy mode — `KOTOJI_TLS_MODE=auto`)
+
+For a single-host self-host where the admin wants HTTPS with **just DNS** — no external proxy, no wildcard
+cert, no DNS-01 token, no ACME secret in env — kotoji can **terminate TLS itself**. A third opt-in overlay
+flips it on:
+
+```
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d   # MUTUALLY EXCLUSIVE with edge.yml
+```
+
+`deploy/docker-compose.tls.yml` publishes `80:80` + `443:443` and sets `KOTOJI_TLS_MODE=auto`. The backend
+(`internal/tlsedge`, CertMagic on-demand) then:
+
+- binds **`:443`** with the **single combined Host-routing handler** (`app.CombinedRouter` — `serve.Handler`
+  with its same-binary `Control` hook wired to the control router, so the resolver dispatches the control host
+  → control plane and every project host → data plane). Requires `KOTOJI_RUN_MODE=all`.
+- binds **`:80`** to solve ACME **HTTP-01** challenges and **301-redirect** everything else to https.
+- issues a **per-host** cert **on the fly** at handshake time via TLS-ALPN-01 / HTTP-01 (NO DNS-01, NO wildcard).
+
+**Abuse prevention (DecisionFunc).** On-demand issuance is gated: kotoji obtains a cert for host `H` **only if**
+`H` is the effective control host **OR** the resolve layer classifies `H` to an **existing** hosted site /
+preview (reusing the live `resolve` classifier + an indexed site-exists lookup). Unknown hosts are **refused**
+with **no issuance attempt** (so an attacker cannot make kotoji burn ACME rate limit on arbitrary names); a DB
+error refuses too (**fail-closed**). The gate is pure + bounded (one classify, one indexed lookup) since it runs
+inside the handshake.
+
+**CA + storage.** Let's Encrypt **production** by default, with a **staging** toggle (`KOTOJI_TLS_CA=staging`) for
+safe testing. The ACME account email (`KOTOJI_ACME_EMAIL`) is **optional** (settable later via env/UI). Issued
+certs/keys + the ACME account persist under **`${KOTOJI_DATA_DIR}/certmagic`** (the existing data volume) so they
+survive restarts.
+
+> **Default is `off`** — the live Cloudflare-fronted deployment (kotoji speaks HTTP behind CF / the Traefik
+> overlay) is **unchanged**. `off` mode starts nothing new; `:8080`/`:8081` stay plain HTTP. The three modes are
+> mutually exclusive edges: **own proxy (base)** · **Traefik overlay (`edge.yml`)** · **kotoji-native TLS (`tls.yml`)**.
+
 ---
 
 ## 5. On-disk storage layout under `/data`
@@ -624,6 +659,11 @@ Notes:
 | `KOTOJI_RUN_MODE` | `all` | – | `all` \| `control` \| `serve`. Selects which http servers boot. |
 | `KOTOJI_CONTROL_ADDR` | `:8080` | – | control plane (api/auth/mcp) listen addr. |
 | `KOTOJI_SERVE_ADDR` | `:8081` | – | data plane listen addr. |
+| `KOTOJI_TLS_MODE` | `off` | – | `off` (plain HTTP behind your own proxy / Traefik overlay) \| `auto` (kotoji terminates TLS itself, §4.5). `auto` requires `KOTOJI_RUN_MODE=all`. |
+| `KOTOJI_TLS_CA` | `prod` | – | `prod` (Let's Encrypt production) \| `staging` (untrusted test certs, generous rate limits). On-demand TLS only. |
+| `KOTOJI_ACME_EMAIL` | (empty) | – | OPTIONAL Let's Encrypt account email for on-demand TLS (settable later via env/UI). Shared name with the edge overlay. |
+| `KOTOJI_TLS_ADDR` | `:443` | – | HTTPS listen addr in `auto` mode (combined control+data handler). |
+| `KOTOJI_TLS_HTTP_ADDR` | `:80` | – | ACME HTTP-01 + HTTPS-redirect listen addr in `auto` mode. |
 | `KOTOJI_BASE_DOMAIN` | `hosting.localhost` | ✓(prod) | base for `{handle}[--{branch}].<base>` parsing. |
 | `KOTOJI_CONTROL_BASE_URL` | `http://hosting.localhost:8080` | ✓(prod) | external URL of control host (OIDC redirect, cookies, links). |
 | `KOTOJI_DATABASE_URL` | – | ✓ | pgx DSN `postgres://user:pass@postgres:5432/kotoji?sslmode=...`. |

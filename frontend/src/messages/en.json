@@ -464,7 +464,19 @@
     "mcpToolsTitle": "Available tools",
     "mcpToolsBody": "Once connected, your AI assistant can perform these actions. Every tool except list_sites and create_site takes a site argument (the project handle); you can only act on projects you're a member of.",
     "mcpCloudflareTitle": "Behind Cloudflare?",
-    "mcpCloudflareBody": "When this instance is behind a Cloudflare proxy, Bot Fight Mode may block requests to /mcp. If so, add a WAF skip (exception rule) for the /mcp path."
+    "mcpCloudflareBody": "When this instance is behind a Cloudflare proxy, Bot Fight Mode may block requests to /mcp. If so, add a WAF skip (exception rule) for the /mcp path.",
+    "tlsTitle": "TLS / HTTPS",
+    "tlsDescription": "How HTTPS is terminated for this instance. kotoji can either sit behind your own edge or manage certificates itself.",
+    "tlsModeOffTitle": "TLS handled by your proxy / the Traefik overlay",
+    "tlsModeOffBody": "By default kotoji speaks plain HTTP on its ports and a reverse proxy in front of it (your own proxy, the Traefik overlay, or Cloudflare) terminates TLS. This is the default and what a Cloudflare-fronted deployment uses.",
+    "tlsModeAutoTitle": "kotoji-managed automatic HTTPS (Let's Encrypt)",
+    "tlsModeAutoBody": "kotoji can terminate TLS itself: certificates are issued on demand for your sites the first time a request arrives for a host this instance can serve (Let's Encrypt, no wildcard, no DNS token). Unknown hosts are refused. Once you point DNS at the server, issuance and renewal are fully automatic.",
+    "tlsModeAutoEnable": "Enabling automatic HTTPS is a deploy choice: run the {overlay} overlay (it publishes ports 80 and 443 and sets {env}). It cannot be toggled from this screen because the listeners are bound at startup.",
+    "tlsCoverageTitle": "What automatic HTTPS would cover",
+    "tlsCoverageBody": "In automatic mode, a certificate is obtained per host on demand: the control host below, plus every published site and preview host. Nothing to configure beyond DNS.",
+    "tlsControlHost": "Control host:",
+    "tlsHostUnknown": "not configured yet",
+    "tlsDocsHint": "See the {link} for the full TLS / deploy-mode reference."
   },
   "admin": {
     "title": "Admin",

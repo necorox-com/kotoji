@@ -11,6 +11,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"path/filepath"
@@ -33,6 +34,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/secretbox"
 	"github.com/necorox-com/kotoji/backend/internal/serve"
 	"github.com/necorox-com/kotoji/backend/internal/site"
+	"github.com/necorox-com/kotoji/backend/internal/tlsedge"
 	"github.com/necorox-com/kotoji/backend/internal/webhook"
 )
 
@@ -395,15 +397,12 @@ func (a *App) controlLimiter() func(http.Handler) http.Handler {
 	return ratelimit.Middleware(lim, keyer, api.WriteRateLimited)
 }
 
-// ServeRouter builds the data-plane handler (Host-resolving static hosting) plus
-// the health probes. The serve package owns resolution, preview authz, and the
-// security/cache header set. Returns nil when the run mode does not serve data.
-func (a *App) ServeRouter() http.Handler {
-	if !a.cfg.ServesData() {
-		return nil
-	}
-
-	res := resolve.NewResolver(resolve.Config{
+// newDataResolver builds the data-plane Host resolver shared by the pure-serve
+// router, the combined (auto-TLS) router, and the on-demand TLS DecisionFunc. It
+// is a single source of truth for the routing classification so the cert gate can
+// never disagree with what the data plane will actually serve.
+func (a *App) newDataResolver() resolve.Resolver {
+	return resolve.NewResolver(resolve.Config{
 		BaseDomain:         a.cfg.BaseDomain,
 		ControlLabel:       "", // bare BaseDomain is the control host
 		EnablePathFallback: true,
@@ -415,7 +414,14 @@ func (a *App) ServeRouter() http.Handler {
 		// resolver consults the effective value (DB > derived) each request.
 		BaseDomainFunc: a.dynamicBaseDomainFunc(),
 	})
+}
 
+// dataHandler builds the serve.Handler (Host-resolving static hosting). control is
+// the optional same-binary control handler: nil for the pure data-plane router
+// (control on its own addr) and the control router for the combined auto-TLS path,
+// where a single listener fronts BOTH planes. res is injected so callers share one
+// resolver instance.
+func (a *App) dataHandler(res resolve.Resolver, control http.Handler) *serve.Handler {
 	// The tree provider reads materialized served worktrees (no git on the request
 	// path). The site service does not expose ResolveRedirect on its frozen
 	// interface, so wrap it with a store-backed redirect resolver to enable
@@ -436,19 +442,22 @@ func (a *App) ServeRouter() http.Handler {
 		az = nil
 	}
 
-	h := serve.NewHandler(serve.Deps{
+	return serve.NewHandler(serve.Deps{
 		Resolver: res,
 		Trees:    tp,
 		Authz:    az,
-		Control:  nil, // pure data-plane mode (control runs on its own addr)
+		Control:  control, // nil => pure data-plane; non-nil => same-binary combined
 		Config: serve.HandlerConfig{
 			Security: serve.DefaultSecurityHeaderConfig(),
 			Cache:    serve.CacheConfig{}, // zero value: ETag ON + base-href injection ON
 		},
 	})
+}
 
-	// Health probes wrap the static handler so the serve plane is independently
-	// monitorable; everything else falls through to the data-plane handler.
+// wrapDataRouter wraps a serve.Handler with the common middleware chain, per-IP
+// rate limiting, and the health probes — the data-plane router envelope shared by
+// ServeRouter and CombinedRouter.
+func (a *App) wrapDataRouter(h *serve.Handler) http.Handler {
 	r := chi.NewRouter()
 	a.commonMiddleware(r)
 	// Per-IP rate limiting on the data plane (architecture.md §8.4.5): a single
@@ -461,6 +470,118 @@ func (a *App) ServeRouter() http.Handler {
 	r.NotFound(h.ServeHTTP)
 	r.MethodNotAllowed(h.ServeHTTP)
 	return r
+}
+
+// ServeRouter builds the data-plane handler (Host-resolving static hosting) plus
+// the health probes. The serve package owns resolution, preview authz, and the
+// security/cache header set. Returns nil when the run mode does not serve data.
+func (a *App) ServeRouter() http.Handler {
+	if !a.cfg.ServesData() {
+		return nil
+	}
+	// Pure data-plane: control runs on its own addr, so no same-binary control.
+	return a.wrapDataRouter(a.dataHandler(a.newDataResolver(), nil))
+}
+
+// CombinedRouter builds the SINGLE Host-routing handler that fronts BOTH planes in
+// one listener — the handler kotoji-native auto-TLS serves on :443. It is the
+// serve.Handler with its same-binary Control hook wired to the control router, so
+// the resolver dispatches the control host to the API/auth/MCP plane and every
+// project host to the data plane. Returns nil unless the run mode serves both
+// planes (RUN_MODE=all); auto-TLS is gated on that mode too.
+func (a *App) CombinedRouter() http.Handler {
+	if !a.cfg.ServesData() || !a.cfg.ServesControl() {
+		return nil
+	}
+	return a.wrapDataRouter(a.dataHandler(a.newDataResolver(), a.ControlRouter()))
+}
+
+// NewTLSEngine builds the kotoji-native on-demand TLS engine for the combined
+// handler, or returns (nil, nil) when auto-TLS is not enabled (KOTOJI_TLS_MODE!=
+// auto or run mode != all) so the caller starts NOTHING new. The DecisionFunc
+// gates issuance to the effective control host OR an EXISTING hosted site/preview,
+// reusing the live resolver + a store-backed existence lookup (fail-closed on a DB
+// error). ca is injected so a test can target a local pebble CA; the production
+// caller passes the zero value (the config-selected CA is applied below) — see the
+// (ca CertAuthority) form via NewTLSEngineWithCA for tests.
+func (a *App) NewTLSEngine() (*tlsedge.Engine, error) {
+	return a.NewTLSEngineWithCA(a.prodCA())
+}
+
+// NewTLSEngineWithCA is NewTLSEngine with the ACME CA injected (the constructor
+// seam the integration test uses to point CertMagic at pebble). Returns (nil, nil)
+// when auto-TLS is disabled.
+func (a *App) NewTLSEngineWithCA(ca tlsedge.CA) (*tlsedge.Engine, error) {
+	if !a.cfg.ServesTLS() {
+		return nil, nil
+	}
+	combined := a.CombinedRouter()
+	if combined == nil {
+		// ServesTLS already implies RUN_MODE=all (config.validate), so this is
+		// defensive; refuse rather than start a listener with no handler.
+		return nil, errTLSNoCombinedHandler
+	}
+	decider, err := tlsedge.NewDecider(a.effectiveControlHost, a.newDataResolver(), a.siteExists)
+	if err != nil {
+		return nil, err
+	}
+	return tlsedge.New(tlsedge.Config{
+		Handler:    combined,
+		Decider:    decider,
+		StorageDir: a.cfg.CertMagicStorageDir,
+		CA:         ca,
+		Email:      a.cfg.ACMEEmail,
+		TLSAddr:    a.cfg.TLSAddr,
+		HTTPAddr:   a.cfg.TLSHTTPAddr,
+		Logger:     a.logger,
+	})
+}
+
+// errTLSNoCombinedHandler is returned when auto-TLS is enabled but the combined
+// handler could not be built (would only happen on a run-mode that config.validate
+// already rejects, so it is defensive).
+var errTLSNoCombinedHandler = errors.New("app: auto-TLS enabled but combined handler unavailable (requires RUN_MODE=all)")
+
+// prodCA maps KOTOJI_TLS_CA onto the Let's Encrypt production/staging directory.
+// The staging directory is selected for safe testing (KOTOJI_TLS_CA=staging).
+func (a *App) prodCA() tlsedge.CA {
+	return tlsedge.LetsEncryptCA(a.cfg.TLSStaging())
+}
+
+// effectiveControlHost returns the EFFECTIVE control host (bare hostname, no port)
+// for the on-demand TLS gate. It resolves via the domaincfg provider with no
+// request (env-locked fast path returns the static host; the dynamic path returns
+// the cached DB/derived value). Empty only on a fresh, wholly-unconfigured install.
+func (a *App) effectiveControlHost() string {
+	if a.domain == nil {
+		return a.cfg.ControlHost
+	}
+	return a.domain.Resolve(context.Background(), nil).ControlHost
+}
+
+// siteExists reports whether handle maps to a servable site on THIS instance — a
+// CURRENT live site OR a FORMER handle that 301-redirects to one. It is the
+// existence half of the on-demand TLS DecisionFunc; an error is propagated so the
+// gate fails CLOSED (refuses issuance) on a DB blip. Both lookups are indexed, so
+// it is bounded for the handshake hot path.
+func (a *App) siteExists(ctx context.Context, handle string) (bool, error) {
+	if a.store == nil {
+		return false, errors.New("app: no metadata store for site-exists lookup")
+	}
+	// Current live handle (the common case).
+	if _, err := a.store.GetSiteByHandle(ctx, handle); err == nil {
+		return true, nil
+	} else if !db.IsNotFound(err) {
+		return false, err // real error => fail closed upstream
+	}
+	// Former handle still served via a 301 redirect: issue a cert so the old host
+	// can redirect over HTTPS.
+	if _, err := a.store.GetSiteByRedirect(ctx, handle); err == nil {
+		return true, nil
+	} else if !db.IsNotFound(err) {
+		return false, err
+	}
+	return false, nil
 }
 
 // dynamicBaseDomainFunc returns the per-request effective-base-domain resolver for

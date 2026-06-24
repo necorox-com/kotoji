@@ -60,6 +60,7 @@ export {
   OIDCAdminSection,
   type OIDCAdminSectionProps,
 } from "./oidc-admin-section";
+export { TlsSection, type TlsSectionProps } from "./tls-section";
 export {
   AccountTokenPanel,
   type AccountTokenPanelProps,

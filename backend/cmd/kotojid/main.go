@@ -18,6 +18,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/app"
 	"github.com/necorox-com/kotoji/backend/internal/config"
 	"github.com/necorox-com/kotoji/backend/internal/observability"
+	"github.com/necorox-com/kotoji/backend/internal/tlsedge"
 )
 
 // shutdownTimeout bounds graceful shutdown so a stuck connection can't hang exit.
@@ -84,22 +85,42 @@ func run() error {
 		slog.String("run_mode", string(cfg.Mode)),
 		slog.Bool("control", cfg.ServesControl()),
 		slog.Bool("serve", cfg.ServesData()),
+		slog.String("tls_mode", string(cfg.TLSMode)),
 	)
+
+	// kotoji-native on-demand TLS (KOTOJI_TLS_MODE=auto, §4.5 third deploy mode).
+	// Off mode (the DEFAULT) returns (nil, nil) and the binary keeps 100% of its
+	// existing plain-HTTP behavior. Auto mode adds a :443 listener (the combined
+	// Host-routing handler over CertMagic on-demand certs) + a :80 listener (ACME
+	// HTTP-01 + HTTPS redirect) ON TOP of the existing :8080/:8081 servers, which
+	// stay bound for internal health checks behind the new TLS edge.
+	tlsEngine, err := application.NewTLSEngine()
+	if err != nil {
+		return err
+	}
 
 	// Launch the background operability scheduler (reaper, gc, startup consistency)
 	// for control|all modes. It runs under the signal-aware context so a shutdown
 	// signal drains it; Close (deferred above) also stops it.
 	application.StartBackground(ctx)
 
-	return serve(ctx, logger, servers)
+	return serve(ctx, logger, servers, tlsEngine)
 }
 
-// serve starts every server and shuts them all down gracefully on ctx
-// cancellation or the first ListenAndServe failure.
-func serve(ctx context.Context, logger *slog.Logger, servers []*http.Server) error {
-	// errCh carries the first non-graceful server error.
-	errCh := make(chan error, len(servers))
+// serve starts every server (plus the optional kotoji-native TLS engine) and shuts
+// them all down gracefully on ctx cancellation or the first listener failure.
+// tlsEngine is nil unless KOTOJI_TLS_MODE=auto; when nil the TLS path is wholly
+// inert and behavior is identical to before.
+func serve(ctx context.Context, logger *slog.Logger, servers []*http.Server, tlsEngine *tlsedge.Engine) error {
+	// errCh carries the first non-graceful error from any server OR the TLS engine.
+	errCh := make(chan error, len(servers)+1)
 	var wg sync.WaitGroup
+
+	// engineCtx lets us stop the TLS engine deterministically: its own Run drains on
+	// ctx-cancel, but a plain-server crash must also bring it down, so we cancel this
+	// derived context in the shutdown path below.
+	engineCtx, cancelEngine := context.WithCancel(ctx)
+	defer cancelEngine()
 
 	for _, srv := range servers {
 		wg.Add(1)
@@ -114,7 +135,19 @@ func serve(ctx context.Context, logger *slog.Logger, servers []*http.Server) err
 		}(srv)
 	}
 
-	// Block until a shutdown signal or a server crashes.
+	// The TLS engine owns its own :443/:80 listeners and graceful drain; it blocks
+	// until engineCtx is cancelled or one of its listeners fails.
+	if tlsEngine != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := tlsEngine.Run(engineCtx); err != nil {
+				errCh <- err
+			}
+		}()
+	}
+
+	// Block until a shutdown signal or a server/engine crashes.
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -123,7 +156,10 @@ func serve(ctx context.Context, logger *slog.Logger, servers []*http.Server) err
 		logger.Error("server error, shutting down", slog.Any("error", runErr))
 	}
 
-	// Gracefully drain all servers within the timeout budget.
+	// Bring the TLS engine down too (no-op when nil); its Run returns on cancel.
+	cancelEngine()
+
+	// Gracefully drain all plain servers within the timeout budget.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	for _, srv := range servers {
