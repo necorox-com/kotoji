@@ -104,6 +104,28 @@ type OIDCConfig struct {
 	AdminEmails []string
 }
 
+// OIDCEnvSet records, per OIDC field, whether the corresponding env var was
+// EXPLICITLY set (non-empty). It gates the WordPress-style precedence (env
+// OVERRIDES DB) the runtime-configurable OIDC config layer (internal/oidccfg)
+// applies: an env-set field WINS and is rendered read-only ("set via environment"),
+// while an env-empty field falls through to the instance_settings DB value. This
+// mirrors config.BaseDomainEnvSet / ControlBaseURLEnvSet for the domain config.
+//
+// AuthModeEnvSet is the analogous flag for KOTOJI_AUTH_MODE: when true the enabled
+// provider SET is pinned by the env (locked) and the GUI cannot toggle OIDC on/off;
+// when false the effective set is { password (always, break-glass) + oidc iff the
+// DB enables it with credentials present } (decision #2).
+type OIDCEnvSet struct {
+	Issuer         bool
+	ClientID       bool
+	ClientSecret   bool
+	RedirectURL    bool
+	AllowedDomains bool
+	AllowedEmails  bool
+	AdminEmails    bool
+	AuthMode       bool
+}
+
 // GitHubMirror holds the optional GitHub mirror/backup settings.
 type GitHubMirror struct {
 	Enabled       bool
@@ -164,8 +186,13 @@ type Config struct {
 	// (a comma-list, e.g. "oidc,password"). A single legacy value parses to a
 	// one-element set. "none" is exclusive (cannot be combined). Order is
 	// normalized (oidc, password, none) so it is stable for the public config.
-	AuthModes     []AuthMode
-	OIDC          OIDCConfig
+	AuthModes []AuthMode
+	OIDC      OIDCConfig
+	// OIDCEnvSet records which OIDC fields (and KOTOJI_AUTH_MODE) were EXPLICITLY
+	// set in the env. The runtime-config layer (internal/oidccfg) uses it for the
+	// per-field env-OVERRIDES-DB precedence + the GUI "locked" flags. An env-set
+	// field is read-only; an env-empty one is editable (DB value applies).
+	OIDCEnvSet    OIDCEnvSet
 	AdminPassword string // bcrypt-checked single-admin password (password provider)
 	AdminEmail    string
 
@@ -348,7 +375,18 @@ func load(get getenv) (Config, error) {
 	// KOTOJI_AUTH_MODE is a comma-SET of enabled providers (e.g. "oidc,password"
 	// for OIDC + break-glass password). A single legacy value ("oidc"/"password"/
 	// "none") parses to a one-element set unchanged. "none" is exclusive.
-	modes, primary, err := parseAuthModes(getString(get, "KOTOJI_AUTH_MODE", string(AuthModeOIDC)))
+	//
+	// PRECEDENCE (decision #2): when KOTOJI_AUTH_MODE is SET it WINS — the enabled
+	// provider set is pinned by the env (locked) and the runtime config layer cannot
+	// toggle providers. When UNSET the default is "password" (break-glass first-run),
+	// and the oidccfg layer ADDS oidc dynamically iff the admin enables it in the DB
+	// with credentials present — so a fresh install with NO auth env boots into the
+	// password setup flow and the admin turns on Google from /settings. The OLD
+	// default was "oidc"; it is intentionally changed to "password" so the zero-env
+	// install is usable (oidc-with-no-credentials would be unbootable).
+	authModeEnvSet := envSet(get, "KOTOJI_AUTH_MODE")
+	c.OIDCEnvSet.AuthMode = authModeEnvSet
+	modes, primary, err := parseAuthModes(getString(get, "KOTOJI_AUTH_MODE", string(AuthModePassword)))
 	if err != nil {
 		return Config{}, err
 	}
@@ -374,6 +412,21 @@ func load(get getenv) (Config, error) {
 		AllowedDomains: lowerCSV(domains),
 		AllowedEmails:  lowerCSV(firstNonEmptyCSV(getCSV(get, "KOTOJI_OIDC_ALLOWED_EMAILS"), getCSV(get, "KOTOJI_AUTH_ALLOWED_EMAILS"))),
 		AdminEmails:    lowerCSV(getCSV(get, "KOTOJI_OIDC_ADMIN_EMAILS")),
+	}
+	// Per-field env-set flags for the WordPress-style env > DB precedence the
+	// oidccfg layer applies. A field counts as env-set when EITHER the new
+	// KOTOJI_OIDC_* name OR its legacy KOTOJI_AUTH_* alias is set (so an existing
+	// env-configured deployment keeps every field locked exactly as today). The hd
+	// alias (KOTOJI_AUTH_GOOGLE_HD) feeds AllowedDomains, so it locks that field too.
+	c.OIDCEnvSet = OIDCEnvSet{
+		Issuer:         envSet(get, "KOTOJI_OIDC_ISSUER") || envSet(get, "KOTOJI_AUTH_OIDC_ISSUER"),
+		ClientID:       envSet(get, "KOTOJI_OIDC_CLIENT_ID") || envSet(get, "KOTOJI_AUTH_OIDC_CLIENT_ID"),
+		ClientSecret:   envSet(get, "KOTOJI_OIDC_CLIENT_SECRET") || envSet(get, "KOTOJI_AUTH_OIDC_CLIENT_SECRET"),
+		RedirectURL:    envSet(get, "KOTOJI_OIDC_REDIRECT_URL") || envSet(get, "KOTOJI_AUTH_OIDC_REDIRECT_URL"),
+		AllowedDomains: envSet(get, "KOTOJI_OIDC_ALLOWED_DOMAINS") || envSet(get, "KOTOJI_AUTH_GOOGLE_HD"),
+		AllowedEmails:  envSet(get, "KOTOJI_OIDC_ALLOWED_EMAILS") || envSet(get, "KOTOJI_AUTH_ALLOWED_EMAILS"),
+		AdminEmails:    envSet(get, "KOTOJI_OIDC_ADMIN_EMAILS"),
+		AuthMode:       authModeEnvSet,
 	}
 	c.AdminPassword = getString(get, "KOTOJI_AUTH_ADMIN_PASSWORD", "")
 	c.AdminEmail = getString(get, "KOTOJI_AUTH_ADMIN_EMAIL", "admin@kotoji.local")

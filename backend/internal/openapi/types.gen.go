@@ -439,6 +439,101 @@ type MirrorResult struct {
 	Pushed bool `json:"pushed"`
 }
 
+// OIDCAdminConfig Secret-safe view of the instance OIDC (Google) config (admin screen). The client secret is NEVER returned — only `clientSecretSet`. Values are the EFFECTIVE config (env OVERRIDES DB, per field) with each field's source ("env"|"db"|"derived") and a `*Locked` flag (env-set => read-only).
+type OIDCAdminConfig struct {
+	// AdminEmails Effective admin-email allowlist (auto-promoted to is_admin on login).
+	AdminEmails       []string `json:"adminEmails"`
+	AdminEmailsLocked bool     `json:"adminEmailsLocked"`
+
+	// AdminEmailsSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	AdminEmailsSource DomainConfigSource `json:"adminEmailsSource"`
+
+	// AllowedDomains Effective hosted-domain allowlist (normalized lowercase).
+	AllowedDomains       []string `json:"allowedDomains"`
+	AllowedDomainsLocked bool     `json:"allowedDomainsLocked"`
+
+	// AllowedDomainsSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	AllowedDomainsSource DomainConfigSource `json:"allowedDomainsSource"`
+
+	// AllowedEmails Effective exact-email allowlist (normalized lowercase).
+	AllowedEmails       []string `json:"allowedEmails"`
+	AllowedEmailsLocked bool     `json:"allowedEmailsLocked"`
+
+	// AllowedEmailsSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	AllowedEmailsSource DomainConfigSource `json:"allowedEmailsSource"`
+
+	// AuthModeLocked True when KOTOJI_AUTH_MODE pins the provider set (the enabled toggle is read-only).
+	AuthModeLocked bool `json:"authModeLocked"`
+
+	// ClientId Effective OAuth2 client id (non-secret; surfaced verbatim).
+	ClientId       string `json:"clientId"`
+	ClientIdLocked bool   `json:"clientIdLocked"`
+
+	// ClientIdSet True when a client id is configured (env or DB).
+	ClientIdSet bool `json:"clientIdSet"`
+
+	// ClientIdSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	ClientIdSource     DomainConfigSource `json:"clientIdSource"`
+	ClientSecretLocked bool               `json:"clientSecretLocked"`
+
+	// ClientSecretSet True when a client secret is configured (env or DB). The secret is never returned.
+	ClientSecretSet bool `json:"clientSecretSet"`
+
+	// ClientSecretSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	ClientSecretSource DomainConfigSource `json:"clientSecretSource"`
+
+	// Enabled Whether OIDC sign-in is configured-enabled (the effective flag, not "usable").
+	Enabled       bool `json:"enabled"`
+	EnabledLocked bool `json:"enabledLocked"`
+
+	// EnabledSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	EnabledSource DomainConfigSource `json:"enabledSource"`
+
+	// Issuer Effective OIDC issuer URL.
+	Issuer       string `json:"issuer"`
+	IssuerLocked bool   `json:"issuerLocked"`
+
+	// IssuerSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	IssuerSource DomainConfigSource `json:"issuerSource"`
+
+	// Providers The effective enabled auth-provider set the current config produces (e.g. ["oidc","password"]). password is always present (break-glass).
+	Providers []AuthMode `json:"providers"`
+
+	// RedirectUrl The explicitly-configured redirect URL, or empty when derived.
+	RedirectUrl string `json:"redirectUrl"`
+
+	// RedirectUrlEffective The redirect URL the flow actually uses — the configured value, or, when none is set, derived from the effective control base URL + /auth/callback.
+	RedirectUrlEffective string `json:"redirectUrlEffective"`
+	RedirectUrlLocked    bool   `json:"redirectUrlLocked"`
+
+	// RedirectUrlSource Where an effective domain/URL value came from: "env" (KOTOJI_* env var, locked), "db" (instance_settings, editable), or "derived" (from the incoming request on a fresh, unconfigured install).
+	RedirectUrlSource DomainConfigSource `json:"redirectUrlSource"`
+}
+
+// OIDCAdminConfigUpdate Partial update of the instance OIDC config. All fields optional; absent fields are unchanged. An empty string on a plain field reverts it to the env/derived fallback. The client secret is write-only: a non-empty value sets/rotates it (stored encrypted at rest); an empty/absent value keeps the stored one; clearClientSecret removes it. A field whose env var is set is rejected with 409. Enabling OIDC requires credentials + an allowlist (422).
+type OIDCAdminConfigUpdate struct {
+	// AdminEmails Admin-email allowlist (replaces the stored list).
+	AdminEmails *[]string `json:"adminEmails,omitempty"`
+
+	// AllowedDomains Hosted-domain allowlist (replaces the stored list).
+	AllowedDomains *[]string `json:"allowedDomains,omitempty"`
+
+	// AllowedEmails Exact-email allowlist (replaces the stored list).
+	AllowedEmails *[]string `json:"allowedEmails,omitempty"`
+
+	// ClearClientSecret When true, remove the stored client secret (reverts to the env secret if any).
+	ClearClientSecret *bool   `json:"clearClientSecret,omitempty"`
+	ClientId          *string `json:"clientId,omitempty"`
+
+	// ClientSecret New OAuth2 client secret (write-only; stored encrypted at rest). Empty/absent keeps the existing one.
+	ClientSecret *string `json:"clientSecret,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	Issuer       *string `json:"issuer,omitempty"`
+
+	// RedirectUrl Explicit redirect URL (absolute http(s)); empty reverts to derived.
+	RedirectUrl *string `json:"redirectUrl,omitempty"`
+}
+
 // PublishConflictEnvelope defines model for PublishConflictEnvelope.
 type PublishConflictEnvelope struct {
 	Error struct {
@@ -769,6 +864,9 @@ type AdminPutDomainJSONRequestBody = DomainAdminConfigUpdate
 
 // AdminPutGitHubJSONRequestBody defines body for AdminPutGitHub for application/json ContentType.
 type AdminPutGitHubJSONRequestBody = GitHubAdminConfigUpdate
+
+// AdminPutOIDCJSONRequestBody defines body for AdminPutOIDC for application/json ContentType.
+type AdminPutOIDCJSONRequestBody = OIDCAdminConfigUpdate
 
 // CreateSiteJSONRequestBody defines body for CreateSite for application/json ContentType.
 type CreateSiteJSONRequestBody = CreateSiteRequest

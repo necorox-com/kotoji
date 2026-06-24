@@ -15,6 +15,10 @@
  *  (A2) ドメイン / URL — ADMIN ONLY. The instance base domain + control base URL
  *      (WordPress-style precedence: env OVERRIDES DB OVERRIDES request-derived),
  *      persisted via PUT /api/admin/domain. Env-locked fields are read-only.
+ *  (A3) サインイン / 認証 — ADMIN ONLY. The instance Google OIDC config (enable /
+ *      issuer / client id / write-only client secret / derived redirect URL /
+ *      fail-closed allowlists), persisted via PUT /api/admin/oidc with the same
+ *      env-OVERRIDES-DB precedence. Enabling it adds the Google button to /login.
  *  (B) MCP / API トークン — shown to EVERYONE. The user's OWN per-user tokens
  *      (CANONICAL §6, re-architected model): a token is owned by the user and
  *      automatically covers every project they're a member of. Issue (show-once
@@ -32,6 +36,7 @@ import { SectionHeading } from "@/components/atoms";
 import {
   GitHubAdminSection,
   DomainAdminSection,
+  OIDCAdminSection,
   AccountTokenPanel,
   McpGuideSection,
 } from "@/components/organisms";
@@ -62,6 +67,12 @@ export default function SettingsPage() {
 
         {/* (A2) Instance domain / URL config — admin only (env > DB > derived). */}
         {isAdmin ? <DomainAdminSection /> : null}
+
+        {/* (A3) Sign-in / 認証 — admin only. Google OIDC config (enable / issuer /
+            client id / write-only secret / derived redirect / fail-closed
+            allowlists), persisted via PUT /api/admin/oidc. Enabling it adds the
+            Google button to the login page (authProviders). */}
+        {isAdmin ? <OIDCAdminSection /> : null}
 
         {/* (B) Per-user MCP/API tokens — everyone (the user's own tokens). */}
         <AccountTokenPanel canCreateSites={canCreateSites} />

@@ -9,6 +9,8 @@ export {
   useUpdateAdminGitHub,
   useAdminDomain,
   useUpdateAdminDomain,
+  useAdminOIDC,
+  useUpdateAdminOIDC,
 } from "./use-admin";
 export {
   useSites,

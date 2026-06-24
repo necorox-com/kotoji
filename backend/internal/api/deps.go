@@ -60,6 +60,13 @@ type MetaStore interface {
 	// Domain provider, not here. *db.Store satisfies it.
 	SetDomainConfig(ctx context.Context, in db.SetDomainConfigInput) error
 
+	// ---- instance OIDC config (admin screen) ----
+	// SetOIDCConfig persists a partial update of the runtime OIDC config (client
+	// secret encrypted + write-only; plain fields revert to env/derived on an empty
+	// value). The GET path reads the EFFECTIVE value via the OIDC provider, not here.
+	// *db.Store satisfies it.
+	SetOIDCConfig(ctx context.Context, in db.SetOIDCConfigInput) error
+
 	// ---- audit (best-effort append) ----
 	InsertAudit(ctx context.Context, arg gen.InsertAuditParams) error
 
@@ -119,6 +126,10 @@ type Deps struct {
 	// derived) and exposes the env-locked flags + cache invalidation for the admin
 	// /api/admin/domain surface. nil only in tests that do not exercise that route.
 	Domain DomainConfigProvider
+	// OIDC resolves the EFFECTIVE OIDC config (env > DB > derived) and owns the
+	// rebuildable provider for the admin /api/admin/oidc surface. nil only in tests
+	// that do not exercise that route.
+	OIDC OIDCConfigProvider
 	// Logger is used for best-effort audit/internal logging.
 	Logger *slog.Logger
 }
@@ -153,5 +164,67 @@ type DomainResolved struct {
 type DomainEffective struct {
 	Value  string
 	Source string // "env" | "db" | "derived"
+	Locked bool
+}
+
+// OIDCConfigProvider is the slice of the effective-OIDC provider the admin
+// /api/admin/oidc handlers need: read the effective config (env > DB > derived) with
+// per-field sources/locked flags + the effective provider list, ask whether the
+// auth-mode set is env-pinned, optionally pre-flight discovery at save time, and
+// invalidate the caches after a successful PUT (so a runtime change applies without
+// a restart). *oidccfg.Provider satisfies it via an adapter; tests stub it.
+type OIDCConfigProvider interface {
+	// Resolve returns the effective OIDC config for r (each field with its value,
+	// source "env"|"db"|"derived", and locked flag). The client secret value is
+	// carried server-side but the handler NEVER echoes it — only clientSecretSet.
+	Resolve(ctx context.Context, r *http.Request) OIDCResolved
+	// Providers returns the effective enabled auth-provider set for r (the admin GET
+	// surfaces it so the GUI shows what login the change will produce).
+	Providers(ctx context.Context, r *http.Request) []string
+	// AuthModeEnvLocked reports whether KOTOJI_AUTH_MODE pins the provider set (so
+	// the enabled toggle is read-only).
+	AuthModeEnvLocked() bool
+	// ValidateDiscovery pre-flights OIDC discovery for the effective config of r
+	// (used at save time to 422 a bad issuer). A nil error means the issuer resolved.
+	ValidateDiscovery(ctx context.Context, r *http.Request) error
+	// InvalidateCache / InvalidateProvider drop the cached DB read / built provider
+	// so the next request reflects the new config (called by the admin PUT).
+	InvalidateCache()
+	InvalidateProvider()
+}
+
+// OIDCResolved mirrors oidccfg.EffectiveOIDC at the api boundary so the package does
+// not import oidccfg directly (keeps the handler unit-testable against a stub). The
+// adapter in the composition root maps the provider's type onto this.
+type OIDCResolved struct {
+	Enabled         OIDCEffectiveBool
+	Issuer          OIDCEffectiveString
+	ClientID        OIDCEffectiveString
+	ClientSecretSet bool   // whether a secret is configured (env or DB); never the value
+	ClientSecretSrc string // "env" | "db" | "derived"
+	ClientSecretLck bool   // env-locked
+	RedirectURL     OIDCEffectiveString
+	AllowedEmails   OIDCEffectiveList
+	AllowedDomains  OIDCEffectiveList
+	AdminEmails     OIDCEffectiveList
+}
+
+// OIDCEffectiveString / OIDCEffectiveList / OIDCEffectiveBool are one resolved
+// setting at the api boundary: value + source + env-locked flag.
+type OIDCEffectiveString struct {
+	Value  string
+	Source string
+	Locked bool
+}
+
+type OIDCEffectiveList struct {
+	Value  []string
+	Source string
+	Locked bool
+}
+
+type OIDCEffectiveBool struct {
+	Value  bool
+	Source string
 	Locked bool
 }

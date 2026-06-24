@@ -178,11 +178,11 @@ func (c *conformantEnv) checkConformance(t *testing.T, method, path string, reqB
 // exactly the documented number of paths.
 func TestSpecLoadsAndIsValid(t *testing.T) {
 	doc := loadSpec(t)
-	// 27 = 23 baseline + POST /api/sites/{handle}/mirror + POST /auth/setup
+	// 28 = 23 baseline + POST /api/sites/{handle}/mirror + POST /auth/setup
 	// (first-run admin-password setup) + /api/admin/github (GET+PUT, one path) +
-	// /api/admin/domain (GET+PUT, one path).
-	if got := doc.Paths.Len(); got != 27 {
-		t.Fatalf("spec paths = %d, want 27", got)
+	// /api/admin/domain (GET+PUT, one path) + /api/admin/oidc (GET+PUT, one path).
+	if got := doc.Paths.Len(); got != 28 {
+		t.Fatalf("spec paths = %d, want 28", got)
 	}
 }
 

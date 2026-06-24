@@ -25,6 +25,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/mcpserver"
 	"github.com/necorox-com/kotoji/backend/internal/migrate"
 	"github.com/necorox-com/kotoji/backend/internal/observability"
+	"github.com/necorox-com/kotoji/backend/internal/oidccfg"
 	"github.com/necorox-com/kotoji/backend/internal/ops"
 	"github.com/necorox-com/kotoji/backend/internal/preview"
 	"github.com/necorox-com/kotoji/backend/internal/ratelimit"
@@ -63,6 +64,13 @@ type App struct {
 	// envs are set it is a pure static fast path (no per-request DB read); shared
 	// by the data-plane resolver, /api/config, and the admin /api/admin/domain API.
 	domain *domaincfg.Provider
+
+	// oidc resolves the EFFECTIVE OIDC config (env > DB > derived) and owns the
+	// RUNTIME-rebuildable OIDC provider (lazy discovery, cache keyed by the effective
+	// issuer/client/secret/redirect, rebuilt on admin change). Shared by the auth
+	// runtime seam, /api/config.authProviders, and the admin /api/admin/oidc API.
+	// nil on the data-plane-only path (no control plane).
+	oidc *oidccfg.Provider
 
 	// opsScheduler runs the background operability jobs (reaper, gc, startup
 	// consistency check). It is started ONLY when the control plane runs (single
@@ -117,6 +125,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		EnvControlSet:     cfg.ControlBaseURLEnvSet,
 	})
 
+	// Effective OIDC provider (WordPress-style env > DB > derived) + the runtime,
+	// rebuildable OIDC provider. The redirect derives from the effective control base
+	// URL (a.domain); the builder (auth.NewOIDCBuilder) performs go-oidc discovery
+	// lazily on first OIDC use and on each admin config change. It is wired on the
+	// auth surface ONLY when KOTOJI_AUTH_MODE is NOT env-pinned (see below): an
+	// env-pinned deployment keeps today's EAGER startup discovery + static provider.
+	a.oidc = oidccfg.New(oidccfg.Config{
+		Store:        store,
+		Domain:       a.domain,
+		Builder:      auth.NewOIDCBuilder(),
+		Env:          cfg.OIDC,
+		EnvSet:       cfg.OIDCEnvSet,
+		EnvAuthModes: cfg.AuthModes,
+	})
+
 	// Provision the schema on boot so a fresh `docker compose up` needs zero manual
 	// migration steps. Advisory-locked (safe across rolling restarts); disable with
 	// KOTOJI_AUTO_MIGRATE=false to manage schema out of band.
@@ -164,6 +187,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		// DB > derived). On the env-set fast path the provider returns the static
 		// values without a DB read; the dynamic path reflects the admin's DB setting.
 		a.auth.SetDomainResolver(a.domain)
+
+		// Wire the RUNTIME OIDC seam UNLESS KOTOJI_AUTH_MODE is env-pinned. When it is
+		// pinned, oidc (if enabled) was already built EAGERLY at startup by ProvidersFor
+		// (today's static fast path: discovery at boot, a static a.interactive provider)
+		// — leaving the runtime seam off keeps that path byte-for-byte equivalent. When
+		// AUTH_MODE is unset, the enabled set is { password always + oidc iff the admin
+		// turned it on in the DB }, so the runtime seam owns the lazy/rebuildable OIDC
+		// provider + the effective /api/config.authProviders.
+		if !cfg.OIDCEnvSet.AuthMode {
+			a.auth.SetOIDCRuntime(auth.NewOIDCRuntimeAdapter(a.oidc))
+		}
 
 		// Background operability scheduler (reaper + gc + startup consistency).
 		// Built only on the control plane: the single replica that owns writes also
@@ -289,6 +323,7 @@ func (a *App) ControlRouter() http.Handler {
 		MCP:          mcpHandler,
 		PreviewGrant: a.previewSigner(), // shares ONE codec with the data-plane verifier
 		Domain:       wrapDomain(a.domain),
+		OIDC:         wrapOIDC(a.oidc),
 		Logger:       a.logger,
 	})
 

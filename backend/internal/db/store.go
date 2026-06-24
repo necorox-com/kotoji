@@ -68,6 +68,34 @@ const (
 	SettingControlBaseURL = "control_base_url"
 )
 
+// OIDC (Google) auth config keys in instance_settings. WordPress-style runtime
+// config of the OIDC provider so an admin enables Google sign-in entirely from the
+// GUI (overriding the KOTOJI_OIDC_* / KOTOJI_AUTH_OIDC_* env at the effective-config
+// layer, internal/oidccfg). The client SECRET is stored ENCRYPTED (AES-256-GCM via
+// secretbox) and is WRITE-ONLY over the API (never returned). Every other field is
+// PLAIN: a feature flag, the issuer/client-id/redirect strings, and the
+// email/domain/admin CSV allowlists. Precedence is resolved by the effective-config
+// layer (env OVERRIDES DB, per field); an absent key falls back to env, then a
+// per-request derived default (redirect URL).
+const (
+	// SettingOIDCEnabled is "true"/"false"; absent => fall back to env/disabled.
+	SettingOIDCEnabled = "oidc_enabled"
+	// SettingOIDCIssuer is the OIDC issuer URL (e.g. https://accounts.google.com).
+	SettingOIDCIssuer = "oidc_issuer"
+	// SettingOIDCClientID is the OAuth2 client id.
+	SettingOIDCClientID = "oidc_client_id"
+	// SettingOIDCClientSecret holds the AES-256-GCM CIPHERTEXT of the OAuth2 client secret.
+	SettingOIDCClientSecret = "oidc_client_secret"
+	// SettingOIDCRedirectURL is the optional explicit redirect URL; empty => derived.
+	SettingOIDCRedirectURL = "oidc_redirect_url"
+	// SettingOIDCAllowedEmails is the CSV exact-email allowlist.
+	SettingOIDCAllowedEmails = "oidc_allowed_emails"
+	// SettingOIDCAllowedDomains is the CSV hosted-domain allowlist.
+	SettingOIDCAllowedDomains = "oidc_allowed_domains"
+	// SettingOIDCAdminEmails is the CSV admin-email allowlist (auto-promote to is_admin).
+	SettingOIDCAdminEmails = "oidc_admin_emails"
+)
+
 // boolTrue / boolFalse are the canonical string encodings for boolean settings.
 const (
 	boolTrue  = "true"
@@ -438,6 +466,167 @@ func (s *Store) SetDomainConfig(ctx context.Context, in SetDomainConfigInput) er
 				return fmt.Errorf("db: set control_base_url: %w", err)
 			}
 		}
+		return nil
+	})
+}
+
+// ---- instance settings (OIDC / Google auth config) ----
+
+// OIDCConfig is the DB-stored OIDC provider configuration. Each field carries a
+// *Set boolean so the effective-config layer (internal/oidccfg) can distinguish
+// "admin explicitly set it" (so it overrides env when env is unset) from "never
+// configured -> fall back to env". The client secret is returned DECRYPTED (or ""
+// with ClientSecretSet=false when absent or undecryptable, e.g. a rotated
+// KOTOJI_SECRET_KEY); the admin API NEVER echoes Secret over the wire — only a
+// ClientSecretSet boolean. CSV fields are returned as the raw stored string (the
+// effective layer splits + normalizes them) so this layer stays parse-free.
+type OIDCConfig struct {
+	Enabled           bool
+	EnabledSet        bool
+	Issuer            string
+	IssuerSet         bool
+	ClientID          string
+	ClientIDSet       bool
+	ClientSecret      string
+	ClientSecretSet   bool
+	RedirectURL       string
+	RedirectURLSet    bool
+	AllowedEmails     string // raw CSV
+	AllowedEmailsSet  bool
+	AllowedDomains    string // raw CSV
+	AllowedDomainsSet bool
+	AdminEmails       string // raw CSV
+	AdminEmailsSet    bool
+}
+
+// SetOIDCConfigInput is the write payload for SetOIDCConfig. Pointer fields are
+// OPTIONAL partial updates: a nil pointer leaves that setting untouched, a non-nil
+// pointer overwrites it (an empty string DELETES the plain keys, reverting to the
+// env/derived fallback). ClientSecret is SPECIAL (write-only, see SetOIDCConfig):
+// a non-nil non-empty value is encrypted + stored; a nil/empty value KEEPS the
+// existing stored secret; ClearClientSecret=true removes it. The caller validates
+// the values before persisting.
+type SetOIDCConfigInput struct {
+	Enabled           *bool
+	Issuer            *string
+	ClientID          *string
+	ClientSecret      *string
+	ClearClientSecret bool
+	RedirectURL       *string
+	AllowedEmails     *string // raw CSV
+	AllowedDomains    *string // raw CSV
+	AdminEmails       *string // raw CSV
+}
+
+// GetOIDCConfig reads the DB-stored OIDC config. Absent keys map to zero values
+// with *Set=false (never an error) so the caller can layer env/derived fallbacks.
+// The client secret is decrypted best-effort via the secretbox; a nil box or a
+// decode/auth failure (rotated KOTOJI_SECRET_KEY) leaves ClientSecretSet=false —
+// treated as "not configured", never a crash (LOCKED policy, mirrors GetGitHubConfig).
+func (s *Store) GetOIDCConfig(ctx context.Context) (OIDCConfig, error) {
+	var cfg OIDCConfig
+
+	if v, found, err := s.getSetting(ctx, SettingOIDCEnabled); err != nil {
+		return OIDCConfig{}, err
+	} else if found {
+		cfg.EnabledSet = true
+		cfg.Enabled = v == boolTrue
+	}
+
+	// Plain string fields: present => *Set true (the empty string is never stored
+	// for these — SetOIDCConfig deletes the key on an empty pointer).
+	for _, f := range []struct {
+		key string
+		dst *string
+		set *bool
+	}{
+		{SettingOIDCIssuer, &cfg.Issuer, &cfg.IssuerSet},
+		{SettingOIDCClientID, &cfg.ClientID, &cfg.ClientIDSet},
+		{SettingOIDCRedirectURL, &cfg.RedirectURL, &cfg.RedirectURLSet},
+		{SettingOIDCAllowedEmails, &cfg.AllowedEmails, &cfg.AllowedEmailsSet},
+		{SettingOIDCAllowedDomains, &cfg.AllowedDomains, &cfg.AllowedDomainsSet},
+		{SettingOIDCAdminEmails, &cfg.AdminEmails, &cfg.AdminEmailsSet},
+	} {
+		if v, found, err := s.getSetting(ctx, f.key); err != nil {
+			return OIDCConfig{}, err
+		} else if found {
+			*f.dst = v
+			*f.set = true
+		}
+	}
+
+	// Client secret: stored as ciphertext; decrypt best-effort. A nil box or a
+	// decode/auth failure leaves ClientSecretSet=false so a rotated key degrades to
+	// "re-enter the secret" rather than crashing.
+	if v, found, err := s.getSetting(ctx, SettingOIDCClientSecret); err != nil {
+		return OIDCConfig{}, err
+	} else if found && v != "" && s.box != nil {
+		if plain, ok := s.box.Open(v); ok {
+			cfg.ClientSecret = plain
+			cfg.ClientSecretSet = true
+		}
+	}
+
+	return cfg, nil
+}
+
+// SetOIDCConfig persists a partial OIDC config update in ONE transaction. Only the
+// non-nil fields are written so the admin GUI can PATCH a subset. The plain string
+// fields follow the "empty pointer reverts to fallback" semantics (an empty value
+// DELETES the key); the client secret is WRITE-ONLY: a non-nil non-empty secret is
+// encrypted + stored, a nil/empty secret LEAVES the stored one in place (so a save
+// that does not re-type the secret keeps it), ClearClientSecret=true removes it.
+// Encrypting a secret without a configured secretbox is an error (refuse to store a
+// plaintext credential — mirrors SetGitHubConfig).
+func (s *Store) SetOIDCConfig(ctx context.Context, in SetOIDCConfigInput) error {
+	return s.WithTx(ctx, func(q *gen.Queries) error {
+		if in.Enabled != nil {
+			val := boolFalse
+			if *in.Enabled {
+				val = boolTrue
+			}
+			if err := q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: SettingOIDCEnabled, Value: val}); err != nil {
+				return fmt.Errorf("db: set oidc_enabled: %w", err)
+			}
+		}
+		// Plain fields: empty value deletes the key (revert to env/derived).
+		for _, f := range []struct {
+			key string
+			val *string
+		}{
+			{SettingOIDCIssuer, in.Issuer},
+			{SettingOIDCClientID, in.ClientID},
+			{SettingOIDCRedirectURL, in.RedirectURL},
+			{SettingOIDCAllowedEmails, in.AllowedEmails},
+			{SettingOIDCAllowedDomains, in.AllowedDomains},
+			{SettingOIDCAdminEmails, in.AdminEmails},
+		} {
+			if f.val != nil {
+				if err := setOrDeleteSetting(ctx, q, f.key, *f.val); err != nil {
+					return fmt.Errorf("db: set %s: %w", f.key, err)
+				}
+			}
+		}
+		// Client secret handling (order: clear wins over set; empty set is a no-op).
+		switch {
+		case in.ClearClientSecret:
+			if err := q.DeleteInstanceSetting(ctx, SettingOIDCClientSecret); err != nil {
+				return fmt.Errorf("db: clear oidc_client_secret: %w", err)
+			}
+		case in.ClientSecret != nil && *in.ClientSecret != "":
+			if s.box == nil {
+				// Refuse to persist a credential we cannot encrypt (no plaintext at rest).
+				return errors.New("db: cannot store oidc client secret without a secret key configured")
+			}
+			ct, err := s.box.Seal(*in.ClientSecret)
+			if err != nil {
+				return fmt.Errorf("db: encrypt oidc_client_secret: %w", err)
+			}
+			if err := q.SetInstanceSetting(ctx, gen.SetInstanceSettingParams{Key: SettingOIDCClientSecret, Value: ct}); err != nil {
+				return fmt.Errorf("db: set oidc_client_secret: %w", err)
+			}
+		}
+		// ClientSecret == nil OR empty (and not clearing): leave the stored secret.
 		return nil
 	})
 }

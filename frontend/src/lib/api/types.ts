@@ -35,6 +35,10 @@ export type DomainAdminConfig = S["DomainAdminConfig"];
 export type DomainAdminConfigUpdate = S["DomainAdminConfigUpdate"];
 export type DomainConfigSource = S["DomainConfigSource"];
 
+// -------- admin (instance OIDC / Google sign-in config) --------
+export type OIDCAdminConfig = S["OIDCAdminConfig"];
+export type OIDCAdminConfigUpdate = S["OIDCAdminConfigUpdate"];
+
 // -------- sites --------
 export type Site = S["Site"];
 export type SiteSummary = S["SiteSummary"];

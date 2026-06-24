@@ -532,6 +532,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/oidc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the instance OIDC (Google) config (admin only; client secret reduced to a boolean)
+         * @description Returns the EFFECTIVE OIDC provider configuration with the WordPress-style precedence per field: KOTOJI_OIDC_* / KOTOJI_AUTH_OIDC_* env vars OVERRIDE the instance_settings DB values, which override package defaults / a redirect derived from the control base URL. Each field carries its source ("env"|"db"|"derived") and a `*Locked` flag (true when the env var is set, making the field read-only). It is SECRET-SAFE: the client secret is NEVER returned — only `clientSecretSet`. `providers` is the effective enabled auth-provider set (e.g. ["oidc","password"]); `authModeLocked` is true when KOTOJI_AUTH_MODE pins the set. Requires is_admin (401 anonymous, 403 non-admin).
+         */
+        get: operations["adminGetOIDC"];
+        /**
+         * Update the instance OIDC (Google) config (admin only; client secret write-only)
+         * @description Persists a PARTIAL update of the instance OIDC config. Every body field is optional: an absent field is left unchanged; an empty string on a plain field reverts it to the env/derived fallback. The client secret is WRITE-ONLY — supply it to set/rotate it; an empty or absent `clientSecret` KEEPS the stored one; set `clearClientSecret: true` to remove it. Validation (FAIL-CLOSED): a field whose env var is SET is REJECTED with 409; ENABLING OIDC requires a client id + secret present (in the request OR already configured) AND at least one access gate (`allowedEmails` OR `allowedDomains`), else 422; a non-empty `redirectUrl` must be an absolute http(s) URL. On success the runtime OIDC provider is rebuilt (discovery re-runs on next sign-in) and the same secret-safe view is returned. Requires is_admin.
+         */
+        put: operations["adminPutOIDC"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -702,6 +726,73 @@ export interface components {
             baseDomain?: string;
             /** @description New control base URL (absolute http(s) origin; empty reverts to env/derived). */
             controlBaseURL?: string;
+        };
+        /** @description Secret-safe view of the instance OIDC (Google) config (admin screen). The client secret is NEVER returned — only `clientSecretSet`. Values are the EFFECTIVE config (env OVERRIDES DB, per field) with each field's source ("env"|"db"|"derived") and a `*Locked` flag (env-set => read-only). */
+        OIDCAdminConfig: {
+            /** @description Whether OIDC sign-in is configured-enabled (the effective flag, not "usable"). */
+            enabled: boolean;
+            /**
+             * @description Effective OIDC issuer URL.
+             * @example https://accounts.google.com
+             */
+            issuer: string;
+            /** @description Effective OAuth2 client id (non-secret; surfaced verbatim). */
+            clientId: string;
+            /** @description True when a client id is configured (env or DB). */
+            clientIdSet: boolean;
+            /** @description True when a client secret is configured (env or DB). The secret is never returned. */
+            clientSecretSet: boolean;
+            /** @description The explicitly-configured redirect URL, or empty when derived. */
+            redirectUrl: string;
+            /**
+             * @description The redirect URL the flow actually uses — the configured value, or, when none is set, derived from the effective control base URL + /auth/callback.
+             * @example https://hosting.example.com/auth/callback
+             */
+            redirectUrlEffective: string;
+            /** @description Effective exact-email allowlist (normalized lowercase). */
+            allowedEmails: string[];
+            /** @description Effective hosted-domain allowlist (normalized lowercase). */
+            allowedDomains: string[];
+            /** @description Effective admin-email allowlist (auto-promoted to is_admin on login). */
+            adminEmails: string[];
+            enabledSource: components["schemas"]["DomainConfigSource"];
+            enabledLocked: boolean;
+            issuerSource: components["schemas"]["DomainConfigSource"];
+            issuerLocked: boolean;
+            clientIdSource: components["schemas"]["DomainConfigSource"];
+            clientIdLocked: boolean;
+            clientSecretSource: components["schemas"]["DomainConfigSource"];
+            clientSecretLocked: boolean;
+            redirectUrlSource: components["schemas"]["DomainConfigSource"];
+            redirectUrlLocked: boolean;
+            allowedEmailsSource: components["schemas"]["DomainConfigSource"];
+            allowedEmailsLocked: boolean;
+            allowedDomainsSource: components["schemas"]["DomainConfigSource"];
+            allowedDomainsLocked: boolean;
+            adminEmailsSource: components["schemas"]["DomainConfigSource"];
+            adminEmailsLocked: boolean;
+            /** @description True when KOTOJI_AUTH_MODE pins the provider set (the enabled toggle is read-only). */
+            authModeLocked: boolean;
+            /** @description The effective enabled auth-provider set the current config produces (e.g. ["oidc","password"]). password is always present (break-glass). */
+            providers: components["schemas"]["AuthMode"][];
+        };
+        /** @description Partial update of the instance OIDC config. All fields optional; absent fields are unchanged. An empty string on a plain field reverts it to the env/derived fallback. The client secret is write-only: a non-empty value sets/rotates it (stored encrypted at rest); an empty/absent value keeps the stored one; clearClientSecret removes it. A field whose env var is set is rejected with 409. Enabling OIDC requires credentials + an allowlist (422). */
+        OIDCAdminConfigUpdate: {
+            enabled?: boolean;
+            issuer?: string;
+            clientId?: string;
+            /** @description New OAuth2 client secret (write-only; stored encrypted at rest). Empty/absent keeps the existing one. */
+            clientSecret?: string;
+            /** @description When true, remove the stored client secret (reverts to the env secret if any). */
+            clearClientSecret?: boolean;
+            /** @description Explicit redirect URL (absolute http(s)); empty reverts to derived. */
+            redirectUrl?: string;
+            /** @description Exact-email allowlist (replaces the stored list). */
+            allowedEmails?: string[];
+            /** @description Hosted-domain allowlist (replaces the stored list). */
+            allowedDomains?: string[];
+            /** @description Admin-email allowlist (replaces the stored list). */
+            adminEmails?: string[];
         };
         Site: {
             /** Format: uuid */
@@ -2113,6 +2204,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DomainAdminConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description A targeted field is locked by the environment (env overrides DB) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: components["responses"]["ValidationFailed"];
+        };
+    };
+    adminGetOIDC: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Effective OIDC config (secret-safe) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OIDCAdminConfig"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    adminPutOIDC: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OIDCAdminConfigUpdate"];
+            };
+        };
+        responses: {
+            /** @description Updated OIDC config (secret-safe) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OIDCAdminConfig"];
                 };
             };
             401: components["responses"]["Unauthorized"];

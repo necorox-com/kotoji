@@ -47,6 +47,11 @@ type fakeMetaStore struct {
 	domain          db.DomainConfig
 	setDomainInputs []db.SetDomainConfigInput
 
+	// oidc is the DB-stored OIDC config the admin-oidc handler reads/writes.
+	// setOIDCInputs records every SetOIDCConfig call for assertions.
+	oidc          db.OIDCConfig
+	setOIDCInputs []db.SetOIDCConfigInput
+
 	failGetRole bool
 }
 
@@ -320,6 +325,49 @@ func (f *fakeMetaStore) SetDomainConfig(_ context.Context, in db.SetDomainConfig
 		} else {
 			f.domain.ControlBaseURL, f.domain.ControlBaseURLSet = *in.ControlBaseURL, true
 		}
+	}
+	return nil
+}
+
+// GetOIDCConfig returns the in-memory DB OIDC config (decrypted secret).
+func (f *fakeMetaStore) GetOIDCConfig(_ context.Context) (db.OIDCConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.oidc, nil
+}
+
+// SetOIDCConfig applies a partial update mirroring the real store's semantics: nil
+// fields untouched, an empty-string pointer DELETES the plain key (reverts to
+// env/derived), the secret is write-only (empty keeps, clear removes). Records the
+// raw input so tests can assert what was written.
+func (f *fakeMetaStore) SetOIDCConfig(_ context.Context, in db.SetOIDCConfigInput) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setOIDCInputs = append(f.setOIDCInputs, in)
+	if in.Enabled != nil {
+		f.oidc.Enabled, f.oidc.EnabledSet = *in.Enabled, true
+	}
+	setStr := func(dst *string, set *bool, p *string) {
+		if p == nil {
+			return
+		}
+		if *p == "" {
+			*dst, *set = "", false
+		} else {
+			*dst, *set = *p, true
+		}
+	}
+	setStr(&f.oidc.Issuer, &f.oidc.IssuerSet, in.Issuer)
+	setStr(&f.oidc.ClientID, &f.oidc.ClientIDSet, in.ClientID)
+	setStr(&f.oidc.RedirectURL, &f.oidc.RedirectURLSet, in.RedirectURL)
+	setStr(&f.oidc.AllowedEmails, &f.oidc.AllowedEmailsSet, in.AllowedEmails)
+	setStr(&f.oidc.AllowedDomains, &f.oidc.AllowedDomainsSet, in.AllowedDomains)
+	setStr(&f.oidc.AdminEmails, &f.oidc.AdminEmailsSet, in.AdminEmails)
+	switch {
+	case in.ClearClientSecret:
+		f.oidc.ClientSecret, f.oidc.ClientSecretSet = "", false
+	case in.ClientSecret != nil && *in.ClientSecret != "":
+		f.oidc.ClientSecret, f.oidc.ClientSecretSet = *in.ClientSecret, true
 	}
 	return nil
 }

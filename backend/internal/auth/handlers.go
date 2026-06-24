@@ -73,6 +73,12 @@ type Auth struct {
 	// (WordPress-style env > DB > derived) for /api/config. nil falls back to the
 	// static cfg values (the env-set fast path / tests that do not wire it).
 	domain DomainResolver
+
+	// oidcRuntime, when non-nil, supplies the RUNTIME-configurable OIDC provider
+	// (built lazily from the effective env > DB config, rebuilt on admin change) and
+	// the effective auth-provider set for /api/config. nil keeps the legacy static
+	// a.interactive provider (the env-set fast path / single-provider unit tests).
+	oidcRuntime OIDCRuntime
 }
 
 // DomainResolver resolves the effective base domain + control base URL for the
@@ -286,8 +292,16 @@ func (a *Auth) LoginStart(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.URL.Query().Get("next"))
 
 	// Resolve which provider this GET should drive. Default order: the interactive
-	// (oidc) provider, else the non-interactive dev provider for instant login.
-	prov := a.selectStartProvider(r.URL.Query().Get("provider"))
+	// (oidc) provider, else the non-interactive dev provider for instant login. When
+	// the runtime OIDC seam is wired, the interactive provider is built lazily from
+	// the effective env > DB config (a discovery failure surfaces as a clear error).
+	prov, derr := a.selectStartProvider(r, r.URL.Query().Get("provider"))
+	if derr != nil {
+		// OIDC is configured but the issuer discovery failed (e.g. unreachable). Tell
+		// the admin clearly rather than crashing; the password break-glass still works.
+		writeError(w, r, http.StatusBadGateway, codeInternal, "sign-in provider is misconfigured: "+derr.Error())
+		return
+	}
 	if prov == nil {
 		// No GET-capable provider is enabled (only password). Tell the caller to
 		// POST credentials; this never affects the still-mounted POST path.
@@ -334,31 +348,39 @@ func (a *Auth) LoginStart(w http.ResponseWriter, r *http.Request) {
 // selectStartProvider resolves which provider the GET /auth/login path drives. An
 // explicit `?provider=` key selects that enabled provider IF it is GET-capable
 // (interactive oidc or the dev no-auth provider); otherwise it falls back to the
-// default order: the interactive provider first (the primary human path), then the
-// dev no-auth provider. It returns nil when no GET-capable provider is enabled
-// (only the password break-glass provider) so the caller can 400 without
-// disabling the still-mounted POST path.
-func (a *Auth) selectStartProvider(requested string) AuthProvider {
+// default order: the interactive OIDC provider first (the primary human path), then
+// the dev no-auth provider. It returns (nil, nil) when no GET-capable provider is
+// enabled (only the password break-glass provider) so the caller can 400 without
+// disabling the still-mounted POST path. A non-nil error means OIDC is configured
+// but its discovery failed (the caller surfaces a clear admin error).
+//
+// The interactive OIDC provider is resolved via the runtime seam when wired (lazy,
+// effective env > DB config); otherwise the static a.interactive is used.
+func (a *Auth) selectStartProvider(r *http.Request, requested string) (AuthProvider, error) {
+	// Resolve the effective interactive OIDC provider (runtime seam or static).
+	oidcProv, err := a.resolveInteractiveOIDC(r.Context(), r)
+	if err != nil {
+		return nil, err
+	}
+
 	if requested != "" {
-		if p, ok := a.providers[requested]; ok && a.getCapable(p) {
-			return p
+		// An explicit provider request: OIDC routes to the resolved interactive one;
+		// the dev no-auth provider is GET-capable too.
+		if requested == oidcProviderKey && oidcProv != nil {
+			return oidcProv, nil
+		}
+		if p, ok := a.providers[requested]; ok && p.Key() == devProviderKey {
+			return p, nil
 		}
 	}
-	if a.interactive != nil {
-		return a.interactive
+	if oidcProv != nil {
+		return oidcProv, nil
 	}
 	// The dev no-auth provider is non-interactive but GET-capable (instant login).
 	if a.password != nil && a.password.Key() == devProviderKey {
-		return a.password
+		return a.password, nil
 	}
-	return nil
-}
-
-// getCapable reports whether a provider can be driven by GET /auth/login: the
-// interactive (oidc) one, or the dev no-auth instant-login provider. The password
-// provider is NOT (it needs the credential POST).
-func (a *Auth) getCapable(p AuthProvider) bool {
-	return p.Interactive() || p.Key() == devProviderKey
+	return nil, nil
 }
 
 // LoginPassword handles the non-interactive credential submit (POST), i.e. the
@@ -403,7 +425,15 @@ func (a *Auth) LoginPassword(w http.ResponseWriter, r *http.Request) {
 // exchange the code, then materialize the session. It drives the interactive
 // provider; with no interactive provider enabled it 403s (no open callback).
 func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
-	if a.interactive == nil {
+	// Resolve the effective interactive OIDC provider (runtime seam or static). A
+	// discovery failure here means the issuer became unreachable between Start and
+	// callback; surface it clearly instead of crashing.
+	prov, derr := a.resolveInteractiveOIDC(r.Context(), r)
+	if derr != nil {
+		writeError(w, r, http.StatusBadGateway, codeInternal, "sign-in provider is misconfigured: "+derr.Error())
+		return
+	}
+	if prov == nil {
 		writeError(w, r, http.StatusForbidden, codeForbidden, "no redirect-based login is enabled")
 		return
 	}
@@ -426,7 +456,7 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.completeLogin(w, r, a.interactive, code, ls.Verifier, ls.Nonce, ls.Next)
+	a.completeLogin(w, r, prov, code, ls.Verifier, ls.Nonce, ls.Next)
 }
 
 // completeLogin is the shared tail of every login path: prov.Exchange ->
@@ -661,11 +691,14 @@ func (a *Auth) PublicConfig(w http.ResponseWriter, r *http.Request) {
 		BaseDomain:        baseDomain,
 		ControlBaseURL:    controlBaseURL,
 		// AuthMode is the LEGACY single representative (back-compat). AuthProviders
-		// is the full ENABLED set so the login page renders EACH provider (e.g.
-		// ["oidc","password"] for the break-glass config). Existing clients that
-		// only read authMode keep working unchanged.
+		// is the EFFECTIVE enabled set so the login page renders EACH provider (e.g.
+		// ["oidc","password"] for the break-glass config). When the runtime OIDC seam
+		// is wired this reflects the env-pinned set OR { password always + oidc iff
+		// the admin enabled it in the DB with credentials } (decision #2); otherwise
+		// it is the static config set. Existing clients that only read authMode keep
+		// working unchanged.
 		AuthMode:           string(a.cfg.AuthMode),
-		AuthProviders:      a.cfg.AuthModeStrings(),
+		AuthProviders:      a.effectiveProviders(r.Context(), r),
 		DefaultPublishMode: "direct",
 		// The instance can mirror only when the feature is enabled AND a push token
 		// is configured; the GUI keys per-site linking/sync controls off this so a

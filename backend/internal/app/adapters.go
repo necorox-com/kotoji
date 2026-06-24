@@ -9,6 +9,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/api"
 	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/domaincfg"
+	"github.com/necorox-com/kotoji/backend/internal/oidccfg"
 	"github.com/necorox-com/kotoji/backend/internal/serve"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
@@ -94,4 +95,54 @@ func (d domainAdapter) InvalidateCache()              { d.p.InvalidateCache() }
 // toAPIEffective maps one resolved setting onto the api boundary type.
 func toAPIEffective(e domaincfg.Effective) api.DomainEffective {
 	return api.DomainEffective{Value: e.Value, Source: string(e.Source), Locked: e.Locked}
+}
+
+// compile-time guarantee the adapter satisfies the api seam the admin
+// /api/admin/oidc handlers depend on.
+var _ api.OIDCConfigProvider = oidcAdapter{}
+
+// oidcAdapter maps the concrete *oidccfg.Provider onto api.OIDCConfigProvider,
+// translating oidccfg.EffectiveOIDC -> api.OIDCResolved so the api package never
+// imports oidccfg. It is the single bridge for the admin OIDC surface (the secret
+// VALUE is intentionally dropped here — only the *Set boolean crosses the boundary).
+type oidcAdapter struct{ p *oidccfg.Provider }
+
+// wrapOIDC adapts the effective-OIDC provider for the api Deps.
+func wrapOIDC(p *oidccfg.Provider) api.OIDCConfigProvider { return oidcAdapter{p: p} }
+
+func (o oidcAdapter) Resolve(ctx context.Context, r *http.Request) api.OIDCResolved {
+	eff := o.p.Resolve(ctx, r)
+	return api.OIDCResolved{
+		Enabled:  api.OIDCEffectiveBool{Value: eff.Enabled.Value, Source: string(eff.Enabled.Source), Locked: eff.Enabled.Locked},
+		Issuer:   toAPIOIDCString(eff.Issuer),
+		ClientID: toAPIOIDCString(eff.ClientID),
+		// The secret VALUE never crosses to the api layer — only its provenance +
+		// "configured" boolean (write-only over the API).
+		ClientSecretSet: eff.ClientSecret.Value != "",
+		ClientSecretSrc: string(eff.ClientSecret.Source),
+		ClientSecretLck: eff.ClientSecret.Locked,
+		RedirectURL:     toAPIOIDCString(eff.RedirectURL),
+		AllowedEmails:   toAPIOIDCList(eff.AllowedEmails),
+		AllowedDomains:  toAPIOIDCList(eff.AllowedDomains),
+		AdminEmails:     toAPIOIDCList(eff.AdminEmails),
+	}
+}
+
+func (o oidcAdapter) Providers(ctx context.Context, r *http.Request) []string {
+	return o.p.Providers(ctx, r)
+}
+func (o oidcAdapter) AuthModeEnvLocked() bool { return o.p.AuthModeEnvLocked() }
+func (o oidcAdapter) ValidateDiscovery(ctx context.Context, r *http.Request) error {
+	return o.p.ValidateDiscovery(ctx, o.p.Resolve(ctx, r))
+}
+func (o oidcAdapter) InvalidateCache()    { o.p.InvalidateCache() }
+func (o oidcAdapter) InvalidateProvider() { o.p.InvalidateProvider() }
+
+// toAPIOIDCString / toAPIOIDCList map one resolved OIDC setting onto the api type.
+func toAPIOIDCString(e oidccfg.FieldString) api.OIDCEffectiveString {
+	return api.OIDCEffectiveString{Value: e.Value, Source: string(e.Source), Locked: e.Locked}
+}
+
+func toAPIOIDCList(e oidccfg.FieldList) api.OIDCEffectiveList {
+	return api.OIDCEffectiveList{Value: e.Value, Source: string(e.Source), Locked: e.Locked}
 }

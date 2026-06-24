@@ -17,6 +17,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/config"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/domaincfg"
+	"github.com/necorox-com/kotoji/backend/internal/oidccfg"
 	"github.com/necorox-com/kotoji/backend/internal/site"
 )
 
@@ -30,6 +31,7 @@ type testEnv struct {
 	sessions *fakeSessionStore
 	cfg      config.Config
 	domain   *testDomainProvider
+	oidc     *testOIDCProvider
 }
 
 // testConfig is the minimal config for the API surface in tests: dev auth, no
@@ -84,6 +86,18 @@ type configForTest struct {
 	// provider (defaults come from testConfig when these are empty).
 	BaseDomain     string
 	ControlBaseURL string
+
+	// OIDC env-set knobs for the admin-oidc "env-locked" tests. AuthModeEnvSet
+	// simulates KOTOJI_AUTH_MODE being pinned; the per-field flags + values simulate
+	// KOTOJI_OIDC_* being set (so the field is read-only). EnvAuthModes is the env set
+	// the AuthMode lock applies (e.g. oidc,password).
+	AuthModeEnvSet bool
+	EnvAuthModes   []config.AuthMode
+	OIDCEnvSet     config.OIDCEnvSet
+	EnvOIDC        config.OIDCConfig
+	// OIDCDiscoveryErr forces the fake OIDC builder to fail (issuer unreachable) so
+	// the discovery-failure paths can be exercised.
+	OIDCDiscoveryErr error
 }
 
 // newTestEnvWithConfig builds a testEnv after applying mutate to a configForTest,
@@ -113,6 +127,12 @@ func newTestEnvWith(t *testing.T, overrides *configForTest) *testEnv {
 		}
 		cfg.BaseDomainEnvSet = overrides.BaseDomainEnvSet
 		cfg.ControlBaseURLEnvSet = overrides.ControlBaseURLEnvSet
+		cfg.OIDCEnvSet = overrides.OIDCEnvSet
+		cfg.OIDCEnvSet.AuthMode = overrides.AuthModeEnvSet
+		cfg.OIDC = overrides.EnvOIDC
+		if len(overrides.EnvAuthModes) > 0 {
+			cfg.AuthModes = overrides.EnvAuthModes
+		}
 	}
 	svc := site.NewFakeService()
 	store := newFakeMetaStore()
@@ -127,15 +147,25 @@ func newTestEnvWith(t *testing.T, overrides *configForTest) *testEnv {
 	domain := newTestDomainProvider(cfg, store)
 	authSvc.SetDomainResolver(domain)
 
+	// OIDC provider over the fake store + a FAKE builder (no network discovery): the
+	// builder yields a stub BuiltProvider, or fails when OIDCDiscoveryErr is set. It
+	// satisfies api.OIDCConfigProvider without importing the app adapter (cycle).
+	var discoErr error
+	if overrides != nil {
+		discoErr = overrides.OIDCDiscoveryErr
+	}
+	oidc := newTestOIDCProvider(cfg, store, domain, discoErr)
+
 	router := NewRouter(Deps{
 		Config: cfg,
 		Site:   svc,
 		Store:  store,
 		Auth:   WrapAuth(authSvc),
 		Domain: domain,
+		OIDC:   oidc,
 	})
 
-	return &testEnv{t: t, router: router, svc: svc, store: store, sessions: sessions, cfg: cfg, domain: domain}
+	return &testEnv{t: t, router: router, svc: svc, store: store, sessions: sessions, cfg: cfg, domain: domain, oidc: oidc}
 }
 
 // testDomainProvider wraps a real *domaincfg.Provider and translates its Resolved
@@ -162,14 +192,90 @@ func (d *testDomainProvider) Resolve(ctx context.Context, r *http.Request) Domai
 	}
 }
 
-func (d *testDomainProvider) EnvBaseDomainLocked() bool          { return d.p.EnvBaseDomainLocked() }
-func (d *testDomainProvider) EnvControlBaseURLLocked() bool      { return d.p.EnvControlBaseURLLocked() }
-func (d *testDomainProvider) InvalidateCache()                   { d.p.InvalidateCache() }
+func (d *testDomainProvider) EnvBaseDomainLocked() bool     { return d.p.EnvBaseDomainLocked() }
+func (d *testDomainProvider) EnvControlBaseURLLocked() bool { return d.p.EnvControlBaseURLLocked() }
+func (d *testDomainProvider) InvalidateCache()              { d.p.InvalidateCache() }
 func (d *testDomainProvider) BaseDomainFor(r *http.Request) string {
 	return d.p.BaseDomainFor(r)
 }
 func (d *testDomainProvider) ControlBaseURLFor(r *http.Request) string {
 	return d.p.ControlBaseURLFor(r)
+}
+
+// testOIDCProvider wraps a real *oidccfg.Provider (over the fake store + a FAKE
+// discovery builder) and translates its EffectiveOIDC onto the api boundary type, so
+// it satisfies api.OIDCConfigProvider without importing the app adapter (cycle). The
+// builder records build attempts so the rebuild-cache tests can assert discovery ran.
+type testOIDCProvider struct {
+	p        *oidccfg.Provider
+	builds   int
+	discoErr error
+}
+
+// fakeBuiltProvider is a stub oidccfg.BuiltProvider the test builder yields (no
+// network). Its Exchange is a no-op success — the admin OIDC tests exercise the
+// CONFIG/cache paths, not the OIDC handshake (that is covered in internal/auth).
+type fakeBuiltProvider struct{ key string }
+
+func (f fakeBuiltProvider) Key() string                 { return f.key }
+func (f fakeBuiltProvider) Interactive() bool           { return true }
+func (f fakeBuiltProvider) Start(_, _, _ string) string { return "https://idp/auth" }
+func (f fakeBuiltProvider) Exchange(context.Context, string, string, string) (oidccfg.Claims, error) {
+	return oidccfg.Claims{}, nil
+}
+
+func newTestOIDCProvider(cfg config.Config, store oidccfg.Store, domain oidccfg.DomainResolver, discoErr error) *testOIDCProvider {
+	tp := &testOIDCProvider{discoErr: discoErr}
+	tp.p = oidccfg.New(oidccfg.Config{
+		Store:  store,
+		Domain: domain,
+		Builder: func(_ context.Context, _ oidccfg.EffectiveOIDC) (oidccfg.BuiltProvider, error) {
+			tp.builds++
+			if tp.discoErr != nil {
+				return nil, tp.discoErr
+			}
+			return fakeBuiltProvider{key: "oidc"}, nil
+		},
+		Env:          cfg.OIDC,
+		EnvSet:       cfg.OIDCEnvSet,
+		EnvAuthModes: cfg.AuthModes,
+	})
+	return tp
+}
+
+func (o *testOIDCProvider) Resolve(ctx context.Context, r *http.Request) OIDCResolved {
+	eff := o.p.Resolve(ctx, r)
+	return OIDCResolved{
+		Enabled:         OIDCEffectiveBool{Value: eff.Enabled.Value, Source: string(eff.Enabled.Source), Locked: eff.Enabled.Locked},
+		Issuer:          OIDCEffectiveString{Value: eff.Issuer.Value, Source: string(eff.Issuer.Source), Locked: eff.Issuer.Locked},
+		ClientID:        OIDCEffectiveString{Value: eff.ClientID.Value, Source: string(eff.ClientID.Source), Locked: eff.ClientID.Locked},
+		ClientSecretSet: eff.ClientSecret.Value != "",
+		ClientSecretSrc: string(eff.ClientSecret.Source),
+		ClientSecretLck: eff.ClientSecret.Locked,
+		RedirectURL:     OIDCEffectiveString{Value: eff.RedirectURL.Value, Source: string(eff.RedirectURL.Source), Locked: eff.RedirectURL.Locked},
+		AllowedEmails:   OIDCEffectiveList{Value: eff.AllowedEmails.Value, Source: string(eff.AllowedEmails.Source), Locked: eff.AllowedEmails.Locked},
+		AllowedDomains:  OIDCEffectiveList{Value: eff.AllowedDomains.Value, Source: string(eff.AllowedDomains.Source), Locked: eff.AllowedDomains.Locked},
+		AdminEmails:     OIDCEffectiveList{Value: eff.AdminEmails.Value, Source: string(eff.AdminEmails.Source), Locked: eff.AdminEmails.Locked},
+	}
+}
+
+func (o *testOIDCProvider) Providers(ctx context.Context, r *http.Request) []string {
+	return o.p.Providers(ctx, r)
+}
+func (o *testOIDCProvider) AuthModeEnvLocked() bool { return o.p.AuthModeEnvLocked() }
+func (o *testOIDCProvider) ValidateDiscovery(ctx context.Context, r *http.Request) error {
+	return o.p.ValidateDiscovery(ctx, o.p.Resolve(ctx, r))
+}
+func (o *testOIDCProvider) InvalidateCache()    { o.p.InvalidateCache() }
+func (o *testOIDCProvider) InvalidateProvider() { o.p.InvalidateProvider() }
+
+// ctx / bgReq are tiny helpers for tests that drive the OIDC provider directly
+// (outside the router) to assert the rebuild cache.
+func (e *testEnv) ctx() context.Context { return context.Background() }
+func (e *testEnv) bgReq() *http.Request {
+	r := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	r.Host = "example.com"
+	return r
 }
 
 // user creates a seeded user with a live session and returns it plus the session

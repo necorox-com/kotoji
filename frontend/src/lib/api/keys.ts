@@ -25,6 +25,11 @@ export const queryKeys = {
   // base URL with their source ("env"|"db"|"derived") and env-locked flags.
   adminDomain: () => ["admin", "domain"] as const,
 
+  // Instance OIDC (Google sign-in) config (admin-only; secret-safe view): the
+  // effective provider config with per-field source/locked flags + the effective
+  // enabled auth-provider set.
+  adminOIDC: () => ["admin", "oidc"] as const,
+
   // -------- tokens (per-user, account-level) --------
   // The current user's MCP/API tokens (membership-capped; span all the user's
   // projects). Owned by the user, not a site, so this lives at the top level

@@ -37,6 +37,9 @@ func (s *server) mountAdmin(r chi.Router) {
 		// Instance domain/URL config (WordPress-style env > DB > derived; non-secret).
 		r.Method(http.MethodGet, "/domain", auth.RequireAdmin(http.HandlerFunc(s.adminGetDomain)))
 		r.Method(http.MethodPut, "/domain", auth.RequireAdmin(http.HandlerFunc(s.adminPutDomain)))
+		// Instance OIDC (Google) config (env > DB > derived; client secret write-only).
+		r.Method(http.MethodGet, "/oidc", auth.RequireAdmin(http.HandlerFunc(s.adminGetOIDC)))
+		r.Method(http.MethodPut, "/oidc", auth.RequireAdmin(http.HandlerFunc(s.adminPutOIDC)))
 	})
 }
 

@@ -46,7 +46,9 @@ services:
       KOTOJI_DB_MAX_CONNS: ${KOTOJI_DB_MAX_CONNS:-10}
       KOTOJI_DATA_DIR: /data
       KOTOJI_GIT_BIN: git
-      KOTOJI_AUTH_MODE: ${KOTOJI_AUTH_MODE:-oidc}
+      # Unset => password break-glass + UI-controlled providers (enable Google in
+      # /settings). A comma-set like "oidc,password" pins providers via env (locked).
+      KOTOJI_AUTH_MODE: ${KOTOJI_AUTH_MODE:-}
       KOTOJI_AUTH_OIDC_ISSUER: ${KOTOJI_AUTH_OIDC_ISSUER:-https://accounts.google.com}
       KOTOJI_AUTH_OIDC_CLIENT_ID: ${KOTOJI_AUTH_OIDC_CLIENT_ID:-}
       KOTOJI_AUTH_OIDC_CLIENT_SECRET: ${KOTOJI_AUTH_OIDC_CLIENT_SECRET:-}

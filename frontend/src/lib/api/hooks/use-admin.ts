@@ -24,6 +24,8 @@ import type {
   GitHubAdminConfigUpdate,
   DomainAdminConfig,
   DomainAdminConfigUpdate,
+  OIDCAdminConfig,
+  OIDCAdminConfigUpdate,
 } from "../types";
 
 /**
@@ -88,6 +90,45 @@ export function useUpdateAdminDomain() {
       call(() => apiClient.PUT("/api/admin/domain", { body })),
     onSuccess: (config) => {
       qc.setQueryData(queryKeys.adminDomain(), config);
+      qc.invalidateQueries({ queryKey: queryKeys.config() });
+    },
+  });
+}
+
+/**
+ * Read the EFFECTIVE instance OIDC (Google sign-in) config. WordPress-style
+ * precedence: KOTOJI_OIDC_* / KOTOJI_AUTH_* env vars OVERRIDE the DB values, which
+ * override package defaults / a redirect derived from the control base URL. Each
+ * field carries a `*Source` ("env"|"db"|"derived") + a `*Locked` flag (true when
+ * the env var is set → read-only in the GUI). SECRET-SAFE: the client secret is
+ * NEVER returned, only `clientSecretSet`. Admin-only: a non-admin hits 403, so
+ * callers must only enable this when `me.user.isAdmin`.
+ */
+export function useAdminOIDC(enabled = true) {
+  return useQuery<OIDCAdminConfig>({
+    queryKey: queryKeys.adminOIDC(),
+    queryFn: () => call(() => apiClient.GET("/api/admin/oidc")),
+    enabled,
+  });
+}
+
+/**
+ * Update the instance OIDC config (partial — absent fields unchanged; an empty
+ * string reverts a plain field to the env/derived fallback). The client secret is
+ * WRITE-ONLY: a non-empty `clientSecret` sets/rotates it, an empty/absent value
+ * keeps the stored one, `clearClientSecret:true` removes it. The server fails
+ * CLOSED: enabling OIDC requires a client id + secret AND at least one allowlist
+ * (allowedEmails OR allowedDomains), else 422; a field whose env var is set is
+ * rejected with 409 (locked). On success the runtime OIDC provider is rebuilt; we
+ * seed the admin view with the authoritative response AND invalidate the public
+ * ["config"] so authProviders (→ the login page's Google button) refreshes.
+ */
+export function useUpdateAdminOIDC() {
+  const qc = useQueryClient();
+  return useMutation<OIDCAdminConfig, Error, OIDCAdminConfigUpdate>({
+    mutationFn: (body) => call(() => apiClient.PUT("/api/admin/oidc", { body })),
+    onSuccess: (config) => {
+      qc.setQueryData(queryKeys.adminOIDC(), config);
       qc.invalidateQueries({ queryKey: queryKeys.config() });
     },
   });

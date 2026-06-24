@@ -57,6 +57,10 @@ export {
   type DomainAdminSectionProps,
 } from "./domain-admin-section";
 export {
+  OIDCAdminSection,
+  type OIDCAdminSectionProps,
+} from "./oidc-admin-section";
+export {
   AccountTokenPanel,
   type AccountTokenPanelProps,
 } from "./account-token-panel";
