@@ -1,6 +1,7 @@
 package api
 
 import (
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -112,6 +113,17 @@ func (s *server) adminPutOIDC(w http.ResponseWriter, r *http.Request) {
 		if cur.Issuer.Locked {
 			writeOIDCLocked(w, "issuer", "KOTOJI_OIDC_ISSUER")
 			return
+		}
+		// S2 (SSRF): the issuer is fetched server-side by go-oidc discovery, so a
+		// non-empty value MUST be an absolute https URL pointing at a PUBLIC host —
+		// reject internal/loopback/link-local/private hosts and IP-literals at the
+		// write boundary so an admin can never aim discovery at an internal endpoint.
+		// An empty issuer reverts to the env/derived default and is validated there.
+		if *body.Issuer != "" {
+			if reason := validateOIDCIssuer(*body.Issuer); reason != "" {
+				writeError(w, http.StatusUnprocessableEntity, codeValidation, "invalid issuer URL", validationDetails{Field: "issuer", Reason: reason})
+				return
+			}
 		}
 		in.Issuer = body.Issuer
 	}
@@ -309,6 +321,84 @@ func oidcInputHasWrite(in db.SetOIDCConfigInput) bool {
 	return in.Enabled != nil || in.Issuer != nil || in.ClientID != nil ||
 		in.ClientSecret != nil || in.ClearClientSecret || in.RedirectURL != nil ||
 		in.AllowedEmails != nil || in.AllowedDomains != nil || in.AdminEmails != nil
+}
+
+// validateOIDCIssuer returns "" when s is a safe OIDC issuer to hand to server-side
+// discovery, else a human-safe reason for the 422 field detail (S2 SSRF defense).
+// Rules (fail-closed): absolute https URL, a real hostname (NOT an IP literal), and
+// the hostname must not resolve to / be a loopback, link-local, private, or
+// otherwise non-global address. The hostname check is best-effort (DNS can change
+// between validation and fetch — a TOCTOU window the defanged discovery dialer in
+// auth/oidc.go closes by re-checking the dialed IP), but it blocks the obvious
+// `http://169.254.169.254`, `https://localhost`, `https://10.x` style payloads at
+// the admin boundary.
+func validateOIDCIssuer(s string) string {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return "not a valid URL"
+	}
+	// HTTPS only: OIDC discovery + JWKS must be authenticated transport; an http
+	// issuer is both insecure and a common SSRF target shape.
+	if strings.ToLower(u.Scheme) != "https" {
+		return "must use the https scheme"
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "must include a host"
+	}
+	// Reject IP-literals outright: a legitimate IdP is addressed by hostname, and an
+	// IP literal is the canonical SSRF payload (e.g. the cloud metadata endpoint).
+	if ip := net.ParseIP(host); ip != nil {
+		return "must be a hostname, not an IP address"
+	}
+	// Reject hostnames that are obviously local or resolve only to non-global IPs.
+	if isInternalHost(host) {
+		return "must be a public host (internal/loopback/private hosts are not allowed)"
+	}
+	return ""
+}
+
+// isInternalHost reports whether host is a known-local name or resolves to any
+// loopback/link-local/private/unspecified address. It is the host gate shared by
+// the issuer validator. A resolution failure is treated as NOT-internal (fail-open
+// on resolution, because a transient DNS error must not let a public IdP be wrongly
+// rejected) — the defanged dialer at fetch time is the hard, fail-closed control.
+func isInternalHost(host string) bool {
+	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	switch h {
+	case "localhost":
+		return true
+	}
+	// `.localhost` and the link-local metadata name are never public.
+	if strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false // cannot resolve now; the dialer re-checks at fetch time
+	}
+	for _, ip := range ips {
+		if !isGlobalUnicast(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGlobalUnicast reports whether ip is a routable, public address — i.e. NOT
+// loopback, link-local (incl. the 169.254.169.254 metadata range), private
+// (RFC1918 / ULA fc00::/7), unspecified, or multicast. It is the single predicate
+// both the admin issuer validator and the discovery dialer (auth/oidc.go) use so
+// "what counts as internal" is defined once.
+func isGlobalUnicast(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	if ip.IsPrivate() { // RFC1918 (v4) + ULA fc00::/7 (v6)
+		return false
+	}
+	return true
 }
 
 // validateRedirectURL returns "" when s is an absolute http(s) URL with a host, else

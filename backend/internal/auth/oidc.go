@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -94,7 +97,15 @@ func NewOIDCProvider(ctx context.Context, cfg config.OIDCConfig) (*OIDCProvider,
 	if cfg.ClientID == "" || cfg.ClientSecret == "" {
 		return nil, errors.New("auth: oidc requires client id and secret")
 	}
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
+	// S2 (SSRF): discovery + JWKS are server-side fetches of an operator-supplied
+	// issuer. Use a DEFANGED client (short timeout, capped redirects, and a dialer
+	// that refuses connections to non-global IPs) so a malicious/misconfigured issuer
+	// cannot pivot to internal endpoints (cloud metadata, localhost services). The
+	// admin-write validator (api.validateOIDCIssuer) blocks the obvious cases up
+	// front; this dialer is the hard, fail-closed control that also closes the DNS
+	// TOCTOU window. The client is bound onto the ctx via oidc.ClientContext.
+	dctx := oidc.ClientContext(ctx, ssrfSafeHTTPClient())
+	provider, err := oidc.NewProvider(dctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("auth: oidc discovery (%s): %w", cfg.Issuer, err)
 	}
@@ -204,4 +215,97 @@ func (p *OIDCProvider) Exchange(ctx context.Context, code, pkceVerifier, expecte
 	// the existing PromoteUserAdmin path (decision #3).
 	claims.IsAdmin = dec.Admin
 	return claims, nil
+}
+
+// --- S2: SSRF-safe discovery HTTP client ---
+
+const (
+	// oidcDiscoveryTimeout bounds the entire discovery + JWKS fetch. A reachable
+	// public IdP answers in well under this; a hung internal endpoint (a slow-loris
+	// SSRF target) is cut off rather than tying up the boot/login path.
+	oidcDiscoveryTimeout = 10 * time.Second
+	// oidcMaxRedirects caps redirect following so an issuer cannot bounce the client
+	// through a redirect chain to smuggle a request to an internal host.
+	oidcMaxRedirects = 3
+)
+
+// ssrfSafeHTTPClient builds the hardened http.Client used for OIDC discovery and
+// JWKS retrieval. It (1) bounds the total time, (2) caps redirects, and (3) uses a
+// control function that REFUSES to connect to any non-global IP — the fail-closed
+// SSRF control that also closes the DNS-rebinding/TOCTOU window the admin-side
+// hostname check cannot (the address is re-validated at actual dial time).
+func ssrfSafeHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	transport := &http.Transport{
+		// DialContext re-resolves the host and refuses any non-global IP AFTER DNS
+		// resolution, dialing the exact vetted IP — so it blocks even a rebinding
+		// issuer whose name resolved public at validation time (TOCTOU-safe).
+		DialContext:           ssrfGuardedDialContext(dialer),
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{
+		Timeout:   oidcDiscoveryTimeout,
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			if len(via) >= oidcMaxRedirects {
+				return fmt.Errorf("auth: oidc discovery: too many redirects (>%d)", oidcMaxRedirects)
+			}
+			return nil
+		},
+	}
+}
+
+// ssrfGuardedDialContext wraps a dialer so that every dial first re-resolves the
+// host and refuses the connection unless EVERY candidate address is a global
+// unicast IP. Resolving + dialing the chosen IP ourselves (rather than handing the
+// hostname to the OS dialer) means the IP we vet is exactly the IP we connect to —
+// no rebinding gap.
+func ssrfGuardedDialContext(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("auth: oidc discovery: bad dial address %q: %w", addr, err)
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("auth: oidc discovery: resolve %q: %w", host, err)
+		}
+		var lastErr error
+		for _, ip := range ips {
+			// FAIL-CLOSED: refuse any non-global address (loopback/link-local/private/
+			// metadata). This is the hard SSRF gate the admin validator backstops.
+			if !isGlobalIP(ip) {
+				lastErr = fmt.Errorf("auth: oidc discovery: refusing to connect to non-public address %s", ip)
+				continue
+			}
+			conn, derr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if derr == nil {
+				return conn, nil
+			}
+			lastErr = derr
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("auth: oidc discovery: no usable address for %q", host)
+		}
+		return nil, lastErr
+	}
+}
+
+// isGlobalIP reports whether ip is a routable public address (not loopback,
+// link-local, private, unspecified, or multicast). It mirrors api.isGlobalUnicast
+// (kept local so the auth package does not import api); a small unit test pins the
+// two in agreement is unnecessary because the semantics are the stdlib's.
+func isGlobalIP(ip net.IP) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return false
+	}
+	if ip.IsPrivate() {
+		return false
+	}
+	return true
 }

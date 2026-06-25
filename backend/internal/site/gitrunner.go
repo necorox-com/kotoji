@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"time"
 )
 
 // gitRunner is the thin os/exec seam UNDER the Service. gitService depends on it
@@ -22,28 +23,52 @@ type gitRunner interface {
 // with ARG ARRAYS only (never a shell string — no injection surface), a scrubbed
 // environment, and per-call author/committer identity injected by the caller.
 type execRunner struct {
-	gitBin string   // resolved "git" path; the Docker image MUST include the binary
-	env    []string // base scrubbed environment shared by every invocation
+	gitBin  string        // resolved "git" path; the Docker image MUST include the binary
+	env     []string      // base scrubbed environment shared by every invocation
+	timeout time.Duration // T1: hard server-side deadline per git child process (0 => none)
 }
 
 // newExecRunner builds an execRunner. gitBin defaults to "git" (resolved via
-// PATH by exec) when empty. The base environment is scrubbed to a deterministic
-// minimum that disables every interactive/credential prompt so a misconfigured
-// remote can never hang a request waiting on a terminal.
-func newExecRunner(gitBin string) *execRunner {
+// PATH by exec) when empty. timeout (T1) is the hard server-side deadline applied
+// to every git child process, independent of the request context; a value <= 0
+// disables it. The base environment is scrubbed to a deterministic minimum that
+// disables every interactive/credential prompt so a misconfigured remote can never
+// hang a request waiting on a terminal.
+func newExecRunner(gitBin string, timeout time.Duration) *execRunner {
 	if gitBin == "" {
 		gitBin = "git"
 	}
 	return &execRunner{
-		gitBin: gitBin,
-		env:    scrubbedEnv(),
+		gitBin:  gitBin,
+		env:     scrubbedEnv(),
+		timeout: timeout,
 	}
+}
+
+// boundedContext (T1) derives a child context carrying the runner's hard git-op
+// deadline ON TOP OF the inbound ctx. Because it is layered, the EFFECTIVE deadline
+// is the earlier of the two: a tighter request deadline still wins, while a request
+// with no/loose deadline is still bounded so a hung network git call cannot block a
+// worker forever. The returned cancel MUST be called by the caller (defer) to free
+// the timer; a zero/negative timeout returns ctx unchanged with a no-op cancel.
+func (r *execRunner) boundedContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.timeout)
 }
 
 // scrubbedEnv is the deterministic base environment for every git invocation.
 // GIT_TERMINAL_PROMPT=0 and the askpass/no-prompt settings guarantee git never
 // blocks on credential input; a fixed config-nosystem keeps host git config out
 // of the picture. PATH is preserved minimally so git can find its helpers.
+//
+// S1 protocol hardening: GIT_ALLOW_PROTOCOL restricts the transports git will use
+// to https + ssh, so even a remote URL that somehow slipped past validateRemoteURL
+// cannot drive the dangerous file:// (local-file read) or ext:: (command exec)
+// transports — git refuses them outright. GIT_PROTOCOL_FROM_USER=0 additionally
+// forbids any protocol that was NOT set by git's own config from being used by a
+// user-provided URL (belt-and-suspenders against URL-driven SSRF / local reads).
 func scrubbedEnv() []string {
 	return []string{
 		"GIT_TERMINAL_PROMPT=0",             // never prompt on the terminal for creds
@@ -53,6 +78,8 @@ func scrubbedEnv() []string {
 		"HOME=/nonexistent",                 // no home-dir config / credential cache
 		"GIT_FLUSH=1",                       // deterministic flushing for captured output
 		"LC_ALL=C",                          // stable, locale-independent git messages
+		"GIT_ALLOW_PROTOCOL=https:ssh",      // only https/ssh transports (no file://, ext::, …)
+		"GIT_PROTOCOL_FROM_USER=0",          // a user-supplied URL may not pick the protocol
 		"PATH=/usr/local/bin:/usr/bin:/bin", // git + its subcommands
 	}
 }
@@ -62,6 +89,10 @@ func scrubbedEnv() []string {
 // context error (preserved for errors.Is). A non-zero exit becomes a *GitError
 // carrying argv + exit code + stderr.
 func (r *execRunner) Run(ctx context.Context, repoDir string, stdin []byte, args ...string) ([]byte, error) {
+	// T1: bound the child's lifetime by the server-side git-op deadline (in addition
+	// to any request deadline) so a hung fetch/push cannot run unbounded.
+	ctx, cancel := r.boundedContext(ctx)
+	defer cancel()
 	// Prepend "-C repoDir" so the working directory is explicit and we never rely
 	// on (or mutate) the process cwd — important for concurrent sites.
 	full := append([]string{"-C", repoDir}, args...)
@@ -137,6 +168,9 @@ type envRunner interface {
 // RunEnv runs git with additional environment entries layered over the scrubbed
 // base (used to inject the commit author/committer identity per call).
 func (r *execRunner) RunEnv(ctx context.Context, repoDir string, extraEnv []string, stdin []byte, args ...string) ([]byte, error) {
+	// T1: same server-side deadline as Run (commit/merge/fetch via env all bounded).
+	ctx, cancel := r.boundedContext(ctx)
+	defer cancel()
 	full := append([]string{"-C", repoDir}, args...)
 	cmd := exec.CommandContext(ctx, r.gitBin, full...)
 	cmd.Env = append(append([]string(nil), r.env...), extraEnv...)

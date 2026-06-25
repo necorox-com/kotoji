@@ -23,6 +23,15 @@ const (
 	// readHeaderTimeout matches the plain-HTTP servers; it bounds slow-loris on the
 	// :80 challenge/redirect listener (the :443 listener gets it too).
 	readHeaderTimeout = 10 * time.Second
+	// D1: the remaining connection-phase caps, mirroring cmd/kotojid. ReadHeaderTimeout
+	// alone leaves body-read, response-write, and idle keep-alive unbounded, so a
+	// slow-body / slow-read / idle-hoard client can pin the TLS edge. readTimeout bounds
+	// the whole request read; writeTimeout is generous because the :443 combined handler
+	// carries MCP Streamable-HTTP streaming yet still caps the slow-read drain; idle
+	// keep-alives are bounded by idleTimeout.
+	readTimeout  = 30 * time.Second
+	writeTimeout = 120 * time.Second
+	idleTimeout  = 120 * time.Second
 )
 
 // CA identifies which ACME directory on-demand issuance targets. The production
@@ -196,14 +205,26 @@ func New(cfg Config) (*Engine, error) {
 		issuer: acmeIssuer,
 		logger: logger,
 		tlsSrv: &http.Server{
-			Addr:              tlsAddr,
-			Handler:           cfg.Handler,
+			Addr: tlsAddr,
+			// HS1: in auto-TLS mode kotoji terminates TLS itself, so it OWNS the HSTS
+			// header. Wrap the combined handler so every HTTPS response on :443 carries
+			// Strict-Transport-Security (off/dev mode never reaches here, so a proxy
+			// deployment is unaffected and keeps owning its own HSTS).
+			Handler: hstsHandler(cfg.Handler),
+			// D1: bound every connection phase (not just headers).
 			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
 		},
 		httpSrv: &http.Server{
-			Addr:              httpAddr,
-			Handler:           httpHandler,
+			Addr:    httpAddr,
+			Handler: httpHandler,
+			// D1: bound every connection phase on the :80 challenge/redirect listener.
 			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
 		},
 	}, nil
 }
@@ -283,6 +304,25 @@ func (e *Engine) shutdown(runErr *error) {
 		}
 		// Stop the cache's maintenance goroutine + release storage locks.
 		e.cache.Stop()
+	})
+}
+
+// hstsValue is the Strict-Transport-Security header emitted on the :443 listener in
+// auto-TLS mode (HS1). One-year max-age with subdomains (every project host is a
+// subdomain kotoji serves over HTTPS in this mode) but NO preload by default — preload
+// is an irreversible commitment a self-hoster must opt into deliberately, not a default.
+const hstsValue = "max-age=31536000; includeSubDomains"
+
+// hstsHandler wraps next so every response served over the auto-TLS :443 listener
+// carries Strict-Transport-Security (HS1). It is applied ONLY here, so it is emitted
+// solely when kotoji terminates TLS itself (KOTOJI_TLS_MODE=auto). In off/dev mode the
+// engine is never constructed, so plain-HTTP and proxy-fronted deployments never see
+// it — the fronting proxy keeps sole ownership of HSTS there. The header is set before
+// next runs so it survives even when a downstream handler writes its own headers.
+func hstsHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", hstsValue)
+		next.ServeHTTP(w, r)
 	})
 }
 

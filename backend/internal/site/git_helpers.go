@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -81,7 +84,12 @@ func (g *gitService) checkBaseSHA(ctx context.Context, id uuid.UUID, branch Bran
 // payload). Best-effort: on any git error it returns nil so a conflict is still
 // reported with empty ChangedPaths.
 func (g *gitService) changedPaths(ctx context.Context, id uuid.UUID, a, b string) []string {
-	out, err := g.run(ctx, id, "diff", "--name-only", a, b)
+	// `a` is the caller-supplied baseSHA (ATTACKER-CONTROLLED) and may legitimately
+	// be a now-stale SHA, so we cannot pre-resolve it via revParse without losing
+	// the conflict payload. Instead "--end-of-options" forces git to treat every
+	// following token as a revision/pathspec, never an option — so a crafted
+	// baseSHA like "--output=/x" can never inject a git option here (H1 hardening).
+	out, err := g.run(ctx, id, "diff", "--name-only", "--end-of-options", a, b)
 	if err != nil {
 		return nil
 	}
@@ -564,6 +572,113 @@ func normalizeRemoteURL(repo string) string {
 		return repo
 	}
 	return "https://github.com/" + strings.TrimSuffix(repo, ".git") + ".git"
+}
+
+// ownerRepoRe matches the GitHub "owner/repo" path grammar (a single owner
+// segment and a single repo segment, each restricted to the characters GitHub
+// permits). Anchored so no extra path segments — and therefore no traversal or
+// smuggled host — can slip through. An optional trailing ".git" is tolerated.
+var ownerRepoRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$`)
+
+// validateRemoteURL is the STRICT allowlist gate for a mirror remote (S1). A
+// tenant-set github_repo is otherwise handed straight to `git remote add` and
+// then to `git fetch/push`, so without this gate a value like "file:///etc",
+// "http://169.254.169.254/…", or "https://attacker.internal/repo" would become a
+// remote git reads — a local-file/cross-tenant disclosure and blind-SSRF surface.
+// We allow ONLY:
+//   - the "owner/repo" shorthand (normalized to github.com https),
+//   - https://github.com/owner/repo(.git) (and *.github.com / GitHub Enterprise),
+//   - the git@github.com:owner/repo(.git) ssh shorthand.
+//
+// Everything else — file://, http://, ssh:// to a raw host, any non-GitHub or
+// IP-literal/link-local/private host — is REJECTED with ErrValidation. An empty
+// url means "clear the remote" and is handled by the caller (not validated here).
+func validateRemoteURL(raw string) error {
+	repo := strings.TrimSpace(raw)
+	if repo == "" {
+		return &ValidationError{Field: "githubRepo", Reason: "must not be empty"}
+	}
+	if strings.ContainsAny(repo, "\x00\n\r \t") {
+		return &ValidationError{Field: "githubRepo", Reason: "must not contain whitespace or control characters"}
+	}
+	// Reject anything that could be parsed as a git option had the -- discipline
+	// been bypassed (defense in depth; the SetRemote argv already uses --).
+	if strings.HasPrefix(repo, "-") {
+		return &ValidationError{Field: "githubRepo", Reason: "must not begin with a dash"}
+	}
+
+	// git@github.com:owner/repo(.git) ssh shorthand (scp-like syntax).
+	if strings.HasPrefix(repo, "git@") {
+		const prefix = "git@"
+		rest := repo[len(prefix):]
+		host, path, ok := strings.Cut(rest, ":")
+		if !ok || !isAllowedGitHubHost(host) {
+			return &ValidationError{Field: "githubRepo", Reason: "ssh remote must be git@github.com:owner/repo"}
+		}
+		if !ownerRepoRe.MatchString(strings.TrimSuffix(path, ".git")) {
+			return &ValidationError{Field: "githubRepo", Reason: "must match owner/repo"}
+		}
+		return nil
+	}
+
+	// A value with no scheme is the bare "owner/repo" shorthand.
+	if !strings.Contains(repo, "://") {
+		if !ownerRepoRe.MatchString(strings.TrimSuffix(repo, ".git")) {
+			return &ValidationError{Field: "githubRepo", Reason: "must match owner/repo"}
+		}
+		return nil
+	}
+
+	// A scheme is present: ONLY https is permitted (never file/http/ssh/ext/git).
+	u, err := url.Parse(repo)
+	if err != nil {
+		return &ValidationError{Field: "githubRepo", Reason: "is not a valid URL"}
+	}
+	if u.Scheme != "https" {
+		return &ValidationError{Field: "githubRepo", Reason: "only https GitHub remotes are allowed"}
+	}
+	if u.User != nil {
+		// Userinfo in a remote URL is a credential-smuggling / confusion vector.
+		return &ValidationError{Field: "githubRepo", Reason: "must not embed credentials"}
+	}
+	if !isAllowedGitHubHost(u.Hostname()) {
+		return &ValidationError{Field: "githubRepo", Reason: "host is not an allowed GitHub host"}
+	}
+	// Path must be exactly /owner/repo(.git) — no extra segments, no traversal.
+	p := strings.TrimPrefix(u.EscapedPath(), "/")
+	if !ownerRepoRe.MatchString(strings.TrimSuffix(p, ".git")) {
+		return &ValidationError{Field: "githubRepo", Reason: "must match /owner/repo"}
+	}
+	return nil
+}
+
+// isAllowedGitHubHost reports whether host is github.com, a github.com subdomain,
+// or a GitHub Enterprise host — and is NOT an IP literal (IP literals bypass the
+// hostname allowlist and are the classic SSRF/link-local vector: 169.254.169.254,
+// 127.0.0.1, 10.x, ::1, …). We deliberately allowlist by hostname only.
+func isAllowedGitHubHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".") // tolerate a trailing FQDN dot
+	if host == "" {
+		return false
+	}
+	// An IP literal (v4 or bracket-stripped v6) is NEVER allowed — it can never be
+	// a GitHub host and is the primary SSRF/link-local target.
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		return false
+	}
+	// github.com and any subdomain of it (e.g. ssh.github.com).
+	if host == "github.com" || strings.HasSuffix(host, ".github.com") {
+		return true
+	}
+	// GitHub Enterprise Cloud lives under the GitHub-managed *.ghe.com domain. We
+	// keep the enterprise allowance to this GitHub-owned suffix only; a self-hosted
+	// GHE on an arbitrary corporate host is intentionally NOT auto-allowed here, to
+	// avoid widening the allowlist to attacker-influenced "github"-ish hostnames.
+	if strings.HasSuffix(host, ".ghe.com") {
+		return true
+	}
+	return false
 }
 
 // isUniqueViolation reports whether err looks like a Postgres unique-constraint

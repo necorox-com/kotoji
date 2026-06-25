@@ -24,6 +24,63 @@ import (
 // shutdownTimeout bounds graceful shutdown so a stuck connection can't hang exit.
 const shutdownTimeout = 15 * time.Second
 
+// HTTP server timeouts (D1: Slowloris / slow-read / slow-write mitigation). Setting
+// only ReadHeaderTimeout leaves the body read, the response write, and idle keep-
+// alive connections unbounded, so a client that trickles a request body, drains the
+// response one byte at a time, or just parks idle keep-alives can pin server
+// resources indefinitely. These caps bound every phase of a connection's lifetime.
+const (
+	// readTimeout bounds the whole request read (headers + body). Generous enough
+	// for legitimate uploads (the upload caps are enforced at the handler) yet small
+	// enough that a slow-body client cannot hold a connection open for minutes.
+	readTimeout = 30 * time.Second
+	// writeTimeout bounds how long a response may take to write. The data/serve plane
+	// (and the combined :443 handler) carry MCP Streamable-HTTP, which can stream a
+	// long-running tool call, so it gets a deliberately generous window rather than a
+	// hard 60s cut. This still bounds the slow-read drain attack (minutes/hours -> a
+	// fixed ceiling) without truncating legitimate streaming responses.
+	writeTimeout = 120 * time.Second
+	// controlWriteTimeout bounds the control plane's response write. The control plane
+	// is request/response JSON (no streaming) so a tighter 60s ceiling is safe and
+	// blocks slow-read resource exhaustion sooner.
+	controlWriteTimeout = 60 * time.Second
+	// idleTimeout bounds how long an idle keep-alive connection is kept open. Without
+	// it a client can open many connections and hold them idle to exhaust the pool.
+	idleTimeout = 120 * time.Second
+	// readHeaderTimeout bounds just the request-header read (the original cap, kept).
+	readHeaderTimeout = 10 * time.Second
+)
+
+// newControlServer builds the control-plane http.Server with the full D1 timeout set.
+// The control plane is request/response JSON (no streaming) so it takes the tighter
+// controlWriteTimeout.
+func newControlServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:    addr,
+		Handler: h,
+		// D1: bound every connection phase (header read, full read, write, idle).
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      controlWriteTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
+
+// newServeServer builds the data-plane http.Server with the full D1 timeout set. The
+// data plane may carry streaming (MCP Streamable-HTTP in same-binary modes), so it
+// takes the generous writeTimeout, which still caps the slow-read drain attack.
+func newServeServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:    addr,
+		Handler: h,
+		// D1: bound every connection phase (header read, full read, write, idle).
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		// Logger may not exist yet on a config failure; use a plain stderr line.
@@ -66,18 +123,10 @@ func run() error {
 	// for a plane this mode does not serve, so we guard against a nil handler.
 	var servers []*http.Server
 	if h := application.ControlRouter(); h != nil {
-		servers = append(servers, &http.Server{
-			Addr:              cfg.ControlAddr,
-			Handler:           h,
-			ReadHeaderTimeout: 10 * time.Second,
-		})
+		servers = append(servers, newControlServer(cfg.ControlAddr, h))
 	}
 	if h := application.ServeRouter(); h != nil {
-		servers = append(servers, &http.Server{
-			Addr:              cfg.ServeAddr,
-			Handler:           h,
-			ReadHeaderTimeout: 10 * time.Second,
-		})
+		servers = append(servers, newServeServer(cfg.ServeAddr, h))
 	}
 
 	logger.Info("starting kotojid",

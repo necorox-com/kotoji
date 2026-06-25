@@ -52,6 +52,13 @@ type Config struct {
 	// KOTOJI_SITE_QUOTA_BYTES). A value <= 0 disables the check (unbounded). Unlike
 	// the per-import zip caps, this bounds CUMULATIVE growth across many imports.
 	SiteQuotaBytes int64
+	// GitOpTimeout (T1) is the server-side hard deadline applied to EVERY git child
+	// process, independent of the inbound request context. A slow/hung network
+	// fetch/push (or any wedged git invocation) is bounded by this so a request can
+	// never block a worker indefinitely. A value <= 0 falls back to
+	// defaultGitOpTimeout via withDefaults; the deadline is the MIN of this and any
+	// shorter request deadline, so callers that pass a tighter ctx still win.
+	GitOpTimeout time.Duration
 }
 
 // ZipConfig holds the ImportZip security limits (CANONICAL / site-service.md §7).
@@ -74,6 +81,10 @@ const (
 	DefaultMaxCompressionRatio  = 100      // uncompressed/compressed per entry
 	defaultLogLimit             = 50
 	defaultMaxLogLimit          = 500
+	// defaultGitOpTimeout (T1) bounds any single git child process server-side so a
+	// hung network fetch/push cannot block a worker forever. 120s is generous for a
+	// large clone/fetch yet finite. Operators can raise/lower it via Config.
+	defaultGitOpTimeout = 120 * time.Second
 )
 
 // withDefaults fills unset Config fields so a zero/partial Config is valid.
@@ -101,6 +112,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Zip.MaxCompressionRatio == 0 {
 		c.Zip.MaxCompressionRatio = DefaultMaxCompressionRatio
+	}
+	if c.GitOpTimeout <= 0 {
+		c.GitOpTimeout = defaultGitOpTimeout
 	}
 	return c
 }
@@ -186,9 +200,14 @@ func (g *gitService) runEnv(ctx context.Context, id uuid.UUID, a Actor, stdin []
 }
 
 // revParse resolves a ref (branch/SHA) to a full commit SHA. A non-existent ref
-// is mapped to ErrNotFound (git exits non-zero with "unknown revision").
+// is mapped to ErrNotFound (git exits non-zero with "unknown revision"). This is
+// the central laundering chokepoint: callers funnel ATTACKER-CONTROLLED ref text
+// (pagination cursors, diff endpoints, rollback targets) through here to obtain a
+// resolved hex SHA. "--end-of-options" forces git to treat ref as a revision and
+// never an option, so a leading-dash ref (e.g. "-foo", "--output=x") cannot inject
+// a git option even before it resolves (H1 hardening / defense in depth).
 func (g *gitService) revParse(ctx context.Context, id uuid.UUID, ref string) (string, error) {
-	out, err := g.run(ctx, id, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	out, err := g.run(ctx, id, "rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
 	sha := strings.TrimSpace(out)
 	if err != nil || sha == "" {
 		return "", ErrNotFound
@@ -252,6 +271,15 @@ func (g *gitService) withReadLock(id uuid.UUID, fn func() error) error {
 func (g *gitService) CreateSite(ctx context.Context, in CreateSiteInput) (Site, error) {
 	if err := ValidateHandle(in.Handle); err != nil {
 		return Site{}, err
+	}
+	// S1: a tenant-supplied mirror repo is validated up front (before it is stored
+	// or fed to `git remote add` in initRepo) against the strict GitHub-only
+	// allowlist, so a file:// / internal-IP / non-GitHub remote can never be
+	// persisted at create time. Empty means "no mirror" and is allowed.
+	if in.GitHubRepo != "" {
+		if err := validateRemoteURL(in.GitHubRepo); err != nil {
+			return Site{}, err
+		}
 	}
 	visibility := in.Visibility
 	if visibility == "" {
@@ -594,7 +622,11 @@ func (g *gitService) ListFiles(ctx context.Context, in ListFilesInput) ([]FileEn
 		if in.Recursive {
 			args = append(args, "-r")
 		}
-		args = append(args, sha)
+		// sha is a laundered (revParse'd) commit SHA — never option text. The "--"
+		// separator guarantees the dir pathspec that follows can never be parsed as a
+		// git option even if validateDir's leading-dash guard were ever bypassed
+		// (defense in depth, consistent with GetDiff/GetLog).
+		args = append(args, sha, "--")
 		if in.Dir != "" {
 			// ls-tree expects the dir with a trailing slash to list its contents.
 			args = append(args, strings.TrimSuffix(in.Dir, "/")+"/")
@@ -991,18 +1023,38 @@ func (g *gitService) GetLog(ctx context.Context, in LogOptions) ([]CommitInfo, e
 	}
 	var commits []CommitInfo
 	err := g.withReadLock(in.SiteID, func() error {
-		ref := string(in.Branch)
-		if in.Before != "" {
-			// Strictly older than Before: log Before^ ..., but Before may be the tip;
-			// use the parent range so Before itself is excluded.
-			ref = in.Before + "^"
-		}
+		// Resolve the branch tip first (and validate the branch exists).
 		if _, e := g.revParse(ctx, in.SiteID, string(in.Branch)); e != nil {
 			return ErrNotFound
 		}
-		args := []string{"log", "-n", strconv.Itoa(limit), logFormat, ref}
+		// The revision we feed to `git log`. Default to the branch name (a validated
+		// BranchName, never user-controlled option text).
+		ref := string(in.Branch)
+		if in.Before != "" {
+			// H1: the pagination cursor in.Before is ATTACKER-CONTROLLED. Passed raw
+			// (e.g. "--output=/path" or a crafted "-foo" ref) it would be parsed by git
+			// as an OPTION — an argument-injection / arbitrary-file-write surface. We
+			// LAUNDER it through revParse (exactly as GetDiff does its endpoints): the
+			// returned value is a resolved 40-hex commit SHA that can never begin with a
+			// dash nor smuggle an option. We FAIL CLOSED — an unresolvable/malicious
+			// cursor is rejected as ErrNotFound rather than reaching the git invocation.
+			beforeSHA, e := g.revParse(ctx, in.SiteID, in.Before)
+			if e != nil {
+				return ErrNotFound
+			}
+			// Strictly older than Before: log Before^ ..., but Before may be the tip;
+			// use the parent range so Before itself is excluded. beforeSHA is hex, so
+			// appending "^" yields a safe revision expression (still no leading dash).
+			ref = beforeSHA + "^"
+		}
+		// "--" separates the revision from any pathspec so no user value (here the
+		// already-laundered ref, and the structurally-validated in.Path) is ever
+		// parsed as an option. The ref precedes "--" because it is a revision, not a
+		// path; it is safe because it is either a validated BranchName or a laundered
+		// SHA(^).
+		args := []string{"log", "-n", strconv.Itoa(limit), logFormat, ref, "--"}
 		if in.Path != "" {
-			args = append(args, "--", in.Path)
+			args = append(args, in.Path)
 		}
 		out, e := g.run(ctx, in.SiteID, args...)
 		if e != nil {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -155,5 +156,70 @@ func TestResolveKeyDerivedDiffersFromExplicit(t *testing.T) {
 	enc, _ := b1.Seal("tok")
 	if _, ok := b2.Open(enc); ok {
 		t.Fatal("rotated derived key should not open the old ciphertext")
+	}
+}
+
+// --- H2: ExplicitKeyProvided + seal-disabled box ---
+
+func TestExplicitKeyProvided(t *testing.T) {
+	raw := newKey(t)
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "empty", in: "", want: false},
+		{name: "short", in: "abcd", want: false},
+		{name: "hex 32B", in: hex.EncodeToString(raw), want: true},
+		{name: "base64 32B", in: base64.StdEncoding.EncodeToString(raw), want: true},
+		{name: "undecodable", in: "%%% not a key %%%", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExplicitKeyProvided(tc.in); got != tc.want {
+				t.Fatalf("ExplicitKeyProvided(%q) = %v want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNewSealDisabledRefusesSeal: a seal-disabled box (production + derived key,
+// H2) must REFUSE to Seal a new secret, returning ErrSealDerivedKeyProd.
+func TestNewSealDisabledRefusesSeal(t *testing.T) {
+	box, err := NewSealDisabled(newKey(t))
+	if err != nil {
+		t.Fatalf("NewSealDisabled: %v", err)
+	}
+	if _, err := box.Seal("ghp_token"); !errors.Is(err, ErrSealDerivedKeyProd) {
+		t.Fatalf("Seal on a seal-disabled box = %v, want ErrSealDerivedKeyProd", err)
+	}
+}
+
+// TestNewSealDisabledStillOpens: the seal-disabled box must still Open ciphertext
+// sealed earlier under the same key (the decrypt + re-key escape hatch). A normal
+// box seals; a seal-disabled box built from the SAME key opens it.
+func TestNewSealDisabledStillOpens(t *testing.T) {
+	key := newKey(t)
+	sealer, _ := New(key)
+	enc, err := sealer.Seal("ghp_token")
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	opener, err := NewSealDisabled(key)
+	if err != nil {
+		t.Fatalf("NewSealDisabled: %v", err)
+	}
+	got, ok := opener.Open(enc)
+	if !ok || got != "ghp_token" {
+		t.Fatalf("seal-disabled Open = (%q, %v), want (\"ghp_token\", true)", got, ok)
+	}
+}
+
+// TestNewIsNotSealDisabled: the ordinary New box (explicit key / dev derived key)
+// seals normally — the H2 refusal is opt-in via NewSealDisabled only.
+func TestNewIsNotSealDisabled(t *testing.T) {
+	box, _ := New(newKey(t))
+	if _, err := box.Seal("ok"); err != nil {
+		t.Fatalf("New box Seal returned %v, want nil", err)
 	}
 }

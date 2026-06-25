@@ -72,6 +72,14 @@ func validatePathWith(p string, extOK func(string) bool) error {
 		case gitDirSegment:
 			return &ValidationError{Field: "path", Reason: `must not reference the ".git" directory`}
 		}
+		// P1: reject any segment beginning with a dash. filepath.IsLocal is
+		// dash-blind, so a path like "-foo" or "dir/--output=x" passes every check
+		// above yet, if it reached an ls-tree / add sink as a positional, git would
+		// parse it as an OPTION (argument injection). We reject it here independent of
+		// any call-site "--" discipline so the validator alone closes the surface.
+		if strings.HasPrefix(seg, "-") {
+			return &ValidationError{Field: "path", Reason: "path segments must not begin with a dash"}
+		}
 	}
 	if extOK != nil && !extOK(clean) {
 		return &ValidationError{Field: "path", Reason: "file extension is not allowed"}

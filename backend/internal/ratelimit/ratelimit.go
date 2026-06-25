@@ -162,19 +162,58 @@ func Middleware(l *Limiter, key KeyFunc, onDenied Denied) func(http.Handler) htt
 	}
 }
 
-// ClientIP extracts the best-effort client IP from a request: the first
-// X-Forwarded-For hop when proxy headers are trusted, else the RemoteAddr host.
-// It is the data-plane keyer and the control-plane fallback (anonymous requests).
+// defaultTrustedProxyHops is the number of trusted reverse-proxy hops in the
+// documented kotoji topology (Cloudflare/NPM/VPS nginx -> the binary): exactly
+// ONE proxy appends a hop to X-Forwarded-For. ClientIP walks back this many hops
+// from the right to find the address the FIRST trusted proxy actually saw — the
+// rightmost token is the address that proxy appended (its own peer, i.e. the next
+// hop in), so with N=1 we take the rightmost token. Anything to the LEFT of the
+// trusted hops is client-controlled and MUST NOT be trusted (R1).
+const defaultTrustedProxyHops = 1
+
+// ClientIP extracts the best-effort client IP used as the per-IP limiter key.
+//
+// R1 (XFF spoofing -> rate-limit bypass): a client fully controls the LEFT-most
+// X-Forwarded-For tokens, so keying on the left-most token let an attacker rotate
+// the limiter key per request and bypass the per-IP limit (and, combined with R2,
+// brute-force the password). Instead, when proxy headers are trusted (the
+// documented single-reverse-proxy topology) we take the RIGHT-most hop — the
+// address the trusted proxy itself appended — which the client cannot forge
+// without controlling the proxy. trustedHops lets an operator account for >1
+// trusted proxy by skipping that many tokens from the right.
+//
+// When trustForwarded is false we IGNORE forwarded headers entirely and key on
+// RemoteAddr only (no proxy is in front, so any XFF is attacker-supplied).
 func ClientIP(r *http.Request, trustForwarded bool) string {
+	return ClientIPHops(r, trustForwarded, defaultTrustedProxyHops)
+}
+
+// ClientIPHops is ClientIP with an explicit trusted-proxy hop count. trustedHops
+// is the number of reverse proxies known to sit in front of this binary, each of
+// which appends one X-Forwarded-For token; the client IP is the token trustedHops
+// from the RIGHT (the address the OUTERMOST trusted proxy observed). A value < 1
+// is treated as 1 (at least one proxy when forwarding is trusted). If XFF has
+// fewer than trustedHops tokens the chain is shorter than configured (or absent)
+// and we fall back to RemoteAddr — never to a client-controlled left-most token.
+func ClientIPHops(r *http.Request, trustForwarded bool, trustedHops int) string {
 	if trustForwarded {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			// The left-most token is the original client (NPM appends hops).
-			if i := indexComma(xff); i >= 0 {
-				return trimSpace(xff[:i])
-			}
-			return trimSpace(xff)
+		if trustedHops < 1 {
+			trustedHops = 1
 		}
-		if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Walk back trustedHops tokens from the RIGHT. The right-most token is the
+			// address our nearest trusted proxy appended; with N trusted proxies the
+			// client-facing one observed the token N-from-the-right. Tokens further left
+			// are client-supplied and ignored.
+			if ip := nthFromRight(xff, trustedHops); ip != "" {
+				return ip
+			}
+			// Fewer hops than configured: the chain is shorter than the trusted topology
+			// (or spoofed-short). Do NOT fall back to a left-most (client) token — use
+			// RemoteAddr (the actual TCP peer) instead.
+		} else if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
+			// X-Real-IP carries a single value set by the trusted proxy (not a client-
+			// appendable list), so it is safe to use directly when forwarding is trusted.
 			return trimSpace(xrip)
 		}
 	}
@@ -185,9 +224,29 @@ func ClientIP(r *http.Request, trustForwarded bool) string {
 	return host
 }
 
-// indexComma returns the index of the first comma, or -1.
-func indexComma(s string) int {
-	for i := 0; i < len(s); i++ {
+// nthFromRight returns the n-th comma-separated token counting from the RIGHT
+// (n=1 is the right-most), trimmed, or "" when the list has fewer than n tokens
+// or that token is empty. It avoids importing strings for this hot-path helper.
+func nthFromRight(s string, n int) string {
+	end := len(s)
+	for n > 0 {
+		i := lastIndexComma(s, end)
+		tok := trimSpace(s[i+1 : end])
+		n--
+		if n == 0 {
+			return tok
+		}
+		if i < 0 {
+			return "" // ran out of tokens before reaching the n-th hop
+		}
+		end = i
+	}
+	return ""
+}
+
+// lastIndexComma returns the index of the last comma in s[:end], or -1.
+func lastIndexComma(s string, end int) int {
+	for i := end - 1; i >= 0; i-- {
 		if s[i] == ',' {
 			return i
 		}

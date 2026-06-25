@@ -6,6 +6,8 @@
 package config
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -672,6 +674,18 @@ func (c Config) validate(prod bool) error {
 		if !c.CookieSecure {
 			errs = append(errs, errors.New("KOTOJI_COOKIE_SECURE=false is not allowed in production"))
 		}
+		// H2 FAIL-CLOSED: in production REQUIRE an explicit, high-entropy
+		// KOTOJI_SECRET_KEY whenever at-rest secrets can be stored. Without it the
+		// at-rest AES-256-GCM key is DERIVED (sha256) from low-entropy, partly-public
+		// config inputs (admin-pw-hash | oidc-secret | control-base-url | base-domain),
+		// so an attacker who learns those inputs can reproduce the key and decrypt the
+		// stored GitHub PAT / OIDC client secret. At-rest secret storage is reachable on
+		// every control-plane instance (the admin GitHub mirror + OIDC config write
+		// through secretbox.Seal), so we require the key whenever the control plane runs.
+		// The derived fallback remains valid in DEVELOPMENT only.
+		if c.ServesControl() && !explicitSecretKey(c.SecretKey) {
+			errs = append(errs, errors.New("KOTOJI_SECRET_KEY is required in production: it is the at-rest encryption key for stored secrets (GitHub PAT, OIDC client secret). Generate one with: openssl rand -hex 32"))
+		}
 	}
 
 	// Auth-provider-specific requirements (enforced whenever the control plane
@@ -894,4 +908,36 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// secretKeyMinBytes is the minimum decoded length an explicit KOTOJI_SECRET_KEY
+// must yield to count as a real (non-derived) key — AES-256 needs 32 bytes. It
+// MUST match secretbox.KeySize; secretbox.decodeExplicitKey applies the same gate.
+// Centralized here so the H2 production check and the crypto layer agree on what
+// counts as "an explicit key was provided".
+const secretKeyMinBytes = 32
+
+// explicitSecretKey reports whether KOTOJI_SECRET_KEY decodes (hex OR base64) to
+// at least 32 bytes — i.e. secretbox.ResolveKey would use the operator-supplied
+// key rather than the DERIVED fallback. It mirrors secretbox.decodeExplicitKey
+// exactly, but is re-implemented here (not imported) so the config package stays
+// free of the crypto dependency (it only needs hex/base64 decoding). The H2
+// production validation gates on this: a blank/short/undecodable value is treated
+// as "no explicit key" and rejected in production.
+func explicitSecretKey(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+	// Hex first: a 64-char hex string is the canonical 32-byte key form.
+	if b, err := hex.DecodeString(v); err == nil && len(b) >= secretKeyMinBytes {
+		return true
+	}
+	// base64 (std then raw/url) fallback — same set secretbox accepts.
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(v); err == nil && len(b) >= secretKeyMinBytes {
+			return true
+		}
+	}
+	return false
 }

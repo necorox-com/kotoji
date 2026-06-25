@@ -57,6 +57,14 @@ func (s *server) handler() http.Handler {
 		r.Use(observability.RequestLogger(s.deps.Logger))
 		r.Use(observability.Recoverer(s.deps.Logger))
 	}
+	// CH1: control-plane security headers. The control plane serves API/JSON + auth +
+	// MCP (the Next.js frontend is a SEPARATE origin), so a STRICT, locked-down policy
+	// is correct here. Placed after Recoverer and BEFORE CORS so the headers ride on
+	// every control response (including CORS preflights and error responses). The data
+	// plane — mounted as the NotFound/MethodNotAllowed catch-all in same-binary mode —
+	// re-Sets its OWN (permissive, app-appropriate) header set per response, so these
+	// strict values never leak onto served project content.
+	r.Use(controlSecurityHeaders)
 	r.Use(s.corsMiddleware())
 	// SessionAuth loads the user onto the context (NON-fatal: anonymous if absent)
 	// so /api/config stays public while protected routes enforce presence.
@@ -148,6 +156,30 @@ func (s *server) mountAPI(r chi.Router) {
 
 	// instance admin (is_admin only).
 	s.mountAdmin(r)
+}
+
+// controlPlaneCSP is the STRICT Content-Security-Policy for the control plane (CH1).
+// The control plane returns API/JSON, auth redirects, and the MCP endpoint — it serves
+// NO HTML application of its own (the dashboard frontend is a separate origin), so a
+// near-empty policy is appropriate: deny all subresource origins, forbid framing, and
+// forbid being framed. If a self-hoster later serves the dashboard FROM the control
+// origin this is the one value to revisit; for the API surface it is correct and safe.
+const controlPlaneCSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+// controlSecurityHeaders sets the baseline security headers on EVERY control-plane
+// response (CH1). It runs as early middleware so the headers are present even on CORS
+// preflights and error paths. The data plane (mounted as the NotFound catch-all in
+// same-binary mode) overrides every one of these keys with its own per-response set,
+// so served project content is unaffected by these strict control-plane values.
+func controlSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", controlPlaneCSP)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // corsMiddleware builds the CORS handler from the configured allowlist. Cookie

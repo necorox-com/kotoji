@@ -13,5 +13,9 @@ import "github.com/necorox-com/kotoji/backend/internal/db"
 // cfg.Root MUST be the writable sites base dir (CANONICAL §1: /data/sites). The
 // caller fills cfg from internal/config (DataDir+"/sites", GitBin, zip limits).
 func NewProductionService(store *db.Store, cfg Config) Service {
-	return NewService(NewStore(store), newExecRunner(cfg.GitBin), cfg)
+	// Apply Config defaults here too so the runner receives the RESOLVED git-op
+	// timeout (T1): NewService defaults cfg for the service, but the runner is built
+	// from cfg before that, so a zero GitOpTimeout must be defaulted before use.
+	cfg = cfg.withDefaults()
+	return NewService(NewStore(store), newExecRunner(cfg.GitBin, cfg.GitOpTimeout), cfg)
 }

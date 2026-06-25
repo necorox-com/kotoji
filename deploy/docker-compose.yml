@@ -68,6 +68,9 @@ services:
       KOTOJI_OIDC_ADMIN_EMAILS: ${KOTOJI_OIDC_ADMIN_EMAILS:-}
       KOTOJI_AUTH_ADMIN_PASSWORD: ${KOTOJI_AUTH_ADMIN_PASSWORD:-}
       KOTOJI_AUTH_ADMIN_EMAIL: ${KOTOJI_AUTH_ADMIN_EMAIL:-admin@kotoji.local}
+      # At-rest encryption key for stored secrets (GitHub PAT, OIDC client secret).
+      # REQUIRED in production (control plane) — generate with: openssl rand -hex 32.
+      KOTOJI_SECRET_KEY: ${KOTOJI_SECRET_KEY:-}
       KOTOJI_SESSION_COOKIE_DOMAIN: ${KOTOJI_SESSION_COOKIE_DOMAIN:-}
       KOTOJI_COOKIE_SECURE: ${KOTOJI_COOKIE_SECURE:-true}
       KOTOJI_MCP_ENABLED: ${KOTOJI_MCP_ENABLED:-true}

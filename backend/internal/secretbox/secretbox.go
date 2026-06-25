@@ -34,11 +34,25 @@ const KeySize = 32
 // base64-decoded blob layout: prefixByte || nonce || gcmSealed.
 const versionByte byte = 1
 
+// ErrSealDerivedKeyProd is returned by Seal when the Box was built with the
+// DERIVED at-rest key while in production (H2). The derived key is computed from
+// low-entropy, partly-public config inputs, so an attacker who learns them can
+// reproduce the key and decrypt stored secrets. Refusing to Seal fail-closed
+// means no NEW secret is ever written under a weak key in production; the
+// operator must set an explicit high-entropy KOTOJI_SECRET_KEY first. Open still
+// works (so an instance mis-deployed once can still decrypt + re-key).
+var ErrSealDerivedKeyProd = errors.New("secretbox: refusing to seal a secret under the derived key in production — set KOTOJI_SECRET_KEY")
+
 // Box is a configured AES-256-GCM sealer/opener bound to one 32-byte key. It is
 // safe for concurrent use (the underlying cipher.AEAD is stateless across calls;
 // each Seal mints a fresh random nonce).
 type Box struct {
 	aead cipher.AEAD
+	// sealDisabled, when true, makes Seal fail-closed with ErrSealDerivedKeyProd.
+	// It is set when a production instance was built from the DERIVED key (H2): we
+	// still permit Open (decrypt + re-key path) but never write a NEW secret under
+	// the weak key. Open is unaffected so the failure policy below is preserved.
+	sealDisabled bool
 }
 
 // New builds a Box from a 32-byte key. A key of the wrong length is a programming
@@ -46,6 +60,21 @@ type Box struct {
 // KOTOJI_SECRET_KEY), so it is reported as an error the composition root surfaces
 // at boot rather than swallowed.
 func New(key []byte) (*Box, error) {
+	return newBox(key, false)
+}
+
+// NewSealDisabled builds a Box that can Open but REFUSES to Seal (returning
+// ErrSealDerivedKeyProd). The composition root uses it in production when the
+// at-rest key was DERIVED rather than supplied via KOTOJI_SECRET_KEY (H2):
+// existing ciphertext stays decryptable, but no new secret is written under the
+// weak key. config.validate independently fails the boot in that case, so this
+// is defense-in-depth for any path that reaches the box directly.
+func NewSealDisabled(key []byte) (*Box, error) {
+	return newBox(key, true)
+}
+
+// newBox is the shared constructor parameterized over the seal-disabled policy.
+func newBox(key []byte, sealDisabled bool) (*Box, error) {
 	if len(key) != KeySize {
 		return nil, errors.New("secretbox: key must be exactly 32 bytes")
 	}
@@ -57,7 +86,7 @@ func New(key []byte) (*Box, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Box{aead: aead}, nil
+	return &Box{aead: aead, sealDisabled: sealDisabled}, nil
 }
 
 // Seal authenticates+encrypts plaintext and returns a base64 (std) string safe to
@@ -65,6 +94,10 @@ func New(key []byte) (*Box, error) {
 // ciphertext+tag. A fresh CSPRNG nonce is generated per call (GCM is catastrophic
 // under nonce reuse — never derive the nonce from the plaintext or a counter).
 func (b *Box) Seal(plaintext string) (string, error) {
+	// H2 fail-closed: never write a NEW secret under the derived key in production.
+	if b.sealDisabled {
+		return "", ErrSealDerivedKeyProd
+	}
 	nonce := make([]byte, b.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err

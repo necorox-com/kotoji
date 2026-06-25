@@ -129,7 +129,7 @@ func TestContract_Git(t *testing.T) {
 		store := newMemStore()
 		clk := fixedClock()
 		store.clock = clk
-		return NewServiceWithClock(store, newExecRunner("git"), Config{Root: root}, clk)
+		return NewServiceWithClock(store, newExecRunner("git", defaultGitOpTimeout), Config{Root: root}, clk)
 	})
 }
 

@@ -101,13 +101,20 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	a.store = store
 	a.ready = store // /readyz pings the DB
 
-	// At-rest secret box: encrypts the DB-stored GitHub PAT. The key is resolved
-	// from KOTOJI_SECRET_KEY (validated hex/base64 >=32 bytes) else derived via
-	// sha256 over the same stable server seed the preview-grant key uses. A short/
-	// undecodable env key silently falls back to the derived key (secretbox owns
-	// that policy). Construction only fails on a non-32-byte resolved key, which the
-	// resolver guarantees — so this is defensive, surfaced at boot rather than later.
-	box, berr := secretbox.New(secretKey(cfg))
+	// At-rest secret box: encrypts the DB-stored GitHub PAT / OIDC client secret.
+	// The key is resolved from KOTOJI_SECRET_KEY (validated hex/base64 >=32 bytes)
+	// else derived via sha256 over the same stable server seed the preview-grant key
+	// uses. A short/undecodable env key silently falls back to the derived key
+	// (secretbox owns that policy). Construction only fails on a non-32-byte resolved
+	// key, which the resolver guarantees — so this is defensive, surfaced at boot.
+	//
+	// H2 defense-in-depth: in PRODUCTION with a DERIVED key (no explicit
+	// KOTOJI_SECRET_KEY) the box is built seal-DISABLED so it can still Open existing
+	// ciphertext (decrypt + re-key path) but NEVER writes a new secret under the weak,
+	// publicly-derivable key. config.validate already FAILS the boot in this case, so
+	// in practice prod always reaches here with an explicit key; this guard protects
+	// any code path that constructs the box without re-validating.
+	box, berr := newSecretBox(cfg)
 	if berr != nil {
 		store.Close()
 		return nil, berr
@@ -304,6 +311,20 @@ func secretKey(cfg config.Config) []byte {
 	return secretbox.ResolveKey(cfg.SecretKey, cfg.AdminPassword, cfg.OIDC.ClientSecret, cfg.ControlBaseURL, cfg.BaseDomain)
 }
 
+// newSecretBox builds the at-rest secret box, applying the H2 production policy:
+// when the key was DERIVED (no explicit KOTOJI_SECRET_KEY) AND the environment is
+// production, the box is seal-DISABLED (Open works, Seal refuses) so no new secret
+// is ever written under the publicly-derivable key. In development the derived key
+// is fully usable (zero-config local stack). config.validate already rejects this
+// combination at boot in production; this is the matching crypto-layer guard.
+func newSecretBox(cfg config.Config) (*secretbox.Box, error) {
+	key := secretKey(cfg)
+	if cfg.IsProduction() && !secretbox.ExplicitKeyProvided(cfg.SecretKey) {
+		return secretbox.NewSealDisabled(key)
+	}
+	return secretbox.New(key)
+}
+
 // ControlRouter builds the control-plane handler (REST API + /auth + /mcp) plus
 // the health probes. The api package owns the full middleware chain (request-id,
 // slog, recover, CORS, session-auth, CSRF) and the route tree, so this wraps it
@@ -399,6 +420,8 @@ func (a *App) controlLimiter() func(http.Handler) http.Handler {
 		if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
 			return "sess:" + c.Value
 		}
+		// R1: ClientIP keys on the RIGHT-most XFF hop (the address the trusted proxy
+		// appended) so a client-supplied left-most token cannot rotate the limiter key.
 		return "ip:" + ratelimit.ClientIP(r, trust)
 	}
 	return ratelimit.Middleware(lim, keyer, api.WriteRateLimited)
@@ -618,6 +641,8 @@ func (a *App) serveLimiter() func(http.Handler) http.Handler {
 	}
 	lim := ratelimit.New(ratelimit.Config{RPS: float64(a.cfg.RateLimitServeRPS)})
 	trust := a.cfg.TrustProxyHeaders
+	// R1: key on the RIGHT-most XFF hop (the trusted proxy's appended address), not
+	// the client-controlled left-most token, so the per-IP limiter cannot be rotated.
 	keyer := func(r *http.Request) string { return ratelimit.ClientIP(r, trust) }
 	denied := func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "too many requests", http.StatusTooManyRequests)

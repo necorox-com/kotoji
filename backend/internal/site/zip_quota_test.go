@@ -25,7 +25,7 @@ func newQuotaService(t *testing.T, quotaBytes int64) *gitService {
 	clk := fixedClock()
 	store.clock = clk
 	cfg := Config{Root: t.TempDir(), SiteQuotaBytes: quotaBytes}
-	return NewServiceWithClock(store, newExecRunner("git"), cfg, clk)
+	return NewServiceWithClock(store, newExecRunner("git", defaultGitOpTimeout), cfg, clk)
 }
 
 // incompressible returns n bytes of deterministic pseudo-random data that does
@@ -175,7 +175,7 @@ func craftLyingZip(t *testing.T, declaredUncompressed, declaredCompressed uint64
 // OLD ratio guard skipped). Both must now be REJECTED as ErrZipTooLarge by the
 // declared-size pre-checks — the entry never reaches the real-byte read.
 func TestValidateAndReadZip_DeclaredOverflow(t *testing.T) {
-	g := NewServiceWithClock(newMemStore(), newExecRunner("git"),
+	g := NewServiceWithClock(newMemStore(), newExecRunner("git", defaultGitOpTimeout),
 		Config{Root: t.TempDir()}, fixedClock())
 
 	t.Run("huge declared size above int64 max does not wrap negative", func(t *testing.T) {

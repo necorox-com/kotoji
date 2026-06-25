@@ -65,7 +65,7 @@ func TestGitService_RevParseArgs(t *testing.T) {
 	assert.Equal(t, "abc123", sha)
 	call, ok := fr.findCall("rev-parse")
 	require.True(t, ok, "rev-parse must be invoked")
-	assert.Equal(t, []string{"rev-parse", "--verify", "--quiet", "draft^{commit}"}, call)
+	assert.Equal(t, []string{"rev-parse", "--verify", "--quiet", "--end-of-options", "draft^{commit}"}, call)
 }
 
 // TestGitService_CommitInjectsAuthorEnv asserts the commit path injects the
@@ -229,7 +229,7 @@ func TestExecRunner_ArgArrayNoShell(t *testing.T) {
 		t.Skip("git binary not available")
 	}
 	dir := t.TempDir()
-	r := newExecRunner("git")
+	r := newExecRunner("git", defaultGitOpTimeout)
 	_, err := r.Run(context.Background(), dir, nil, "init", "-b", "draft")
 	require.NoError(t, err)
 	// A malicious "ref" with shell metacharacters must NOT execute; rev-parse just

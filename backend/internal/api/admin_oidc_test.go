@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -242,6 +243,51 @@ func TestAdminOIDCConfig(t *testing.T) {
 		}
 	})
 
+	// S2 (SSRF): the issuer is fetched server-side by discovery, so an internal /
+	// non-https / IP-literal issuer must be rejected at the admin-write boundary and
+	// MUST NOT be persisted.
+	t.Run("PUT internal/non-https issuer is 422 and not written", func(t *testing.T) {
+		bad := []string{
+			"http://accounts.example.com",    // non-https
+			"https://localhost/issuer",       // loopback name
+			"https://127.0.0.1",              // loopback IP literal
+			"https://169.254.169.254/latest", // link-local metadata IP
+			"https://10.0.0.5",               // private IP literal
+			"https://[::1]",                  // IPv6 loopback literal
+			"file:///etc/passwd",             // non-http scheme
+			"https://foo.localhost",          // .localhost suffix
+		}
+		for _, iss := range bad {
+			e := newTestEnv(t)
+			admin := e.newUser(withAdmin)
+			rec := e.request(http.MethodPut, "/api/admin/oidc").as(admin).
+				json(map[string]any{"issuer": iss}).do()
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("issuer %q: status = %d, want 422 (body=%s)", iss, rec.Code, rec.Body.String())
+			}
+			env := errEnvelope(t, rec)
+			if env.Error.Code != codeValidation {
+				t.Fatalf("issuer %q: error code = %q, want validation", iss, env.Error.Code)
+			}
+			if len(e.store.setOIDCInputs) != 0 {
+				t.Fatalf("issuer %q: rejected PUT must not write", iss)
+			}
+		}
+	})
+
+	t.Run("PUT valid https public issuer is accepted", func(t *testing.T) {
+		e := newTestEnv(t)
+		admin := e.newUser(withAdmin)
+		rec := e.request(http.MethodPut, "/api/admin/oidc").as(admin).
+			json(map[string]any{"issuer": "https://accounts.google.com"}).do()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+		}
+		if e.store.oidc.Issuer != "https://accounts.google.com" {
+			t.Fatalf("valid issuer not persisted: %q", e.store.oidc.Issuer)
+		}
+	})
+
 	t.Run("PUT to an env-locked field is 409", func(t *testing.T) {
 		// KOTOJI_OIDC_CLIENT_ID env-set => clientId locked.
 		e := newTestEnvWithConfig(t, func(c *configForTest) {
@@ -343,5 +389,71 @@ func TestAdminOIDCDiscoveryValidate(t *testing.T) {
 	}
 	if err := e.oidc.ValidateDiscovery(e.ctx(), e.bgReq()); err == nil {
 		t.Fatal("ValidateDiscovery should surface the discovery error")
+	}
+}
+
+// TestValidateOIDCIssuer is the pure S2 issuer validator: https-only, hostname
+// (not IP literal), and not an internal/loopback/private host.
+func TestValidateOIDCIssuer(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{name: "valid public https", in: "https://accounts.google.com", wantErr: false},
+		{name: "valid public https with path", in: "https://login.microsoftonline.com/common/v2.0", wantErr: false},
+		{name: "http rejected", in: "http://accounts.google.com", wantErr: true},
+		{name: "loopback name rejected", in: "https://localhost", wantErr: true},
+		{name: "dot-localhost rejected", in: "https://idp.localhost", wantErr: true},
+		{name: "loopback ipv4 literal rejected", in: "https://127.0.0.1", wantErr: true},
+		{name: "metadata ip rejected", in: "https://169.254.169.254/latest/meta-data", wantErr: true},
+		{name: "private ipv4 literal rejected", in: "https://10.1.2.3", wantErr: true},
+		{name: "private ipv4 172 literal rejected", in: "https://172.16.0.1", wantErr: true},
+		{name: "ipv6 loopback literal rejected", in: "https://[::1]", wantErr: true},
+		{name: "public ip literal still rejected (must be a hostname)", in: "https://8.8.8.8", wantErr: true},
+		{name: "file scheme rejected", in: "file:///etc/passwd", wantErr: true},
+		{name: "no host rejected", in: "https://", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := validateOIDCIssuer(tc.in)
+			if tc.wantErr && reason == "" {
+				t.Fatalf("validateOIDCIssuer(%q) = ok, want a rejection reason", tc.in)
+			}
+			if !tc.wantErr && reason != "" {
+				t.Fatalf("validateOIDCIssuer(%q) = %q, want ok", tc.in, reason)
+			}
+		})
+	}
+}
+
+// TestIsGlobalUnicast pins the internal-IP predicate used by both the issuer
+// validator and (mirrored) the discovery dialer.
+func TestIsGlobalUnicast(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want bool
+	}{
+		{ip: "8.8.8.8", want: true},
+		{ip: "1.1.1.1", want: true},
+		{ip: "2606:4700:4700::1111", want: true},
+		{ip: "127.0.0.1", want: false},
+		{ip: "::1", want: false},
+		{ip: "169.254.169.254", want: false}, // link-local (cloud metadata)
+		{ip: "10.0.0.1", want: false},
+		{ip: "192.168.1.1", want: false},
+		{ip: "172.16.5.4", want: false},
+		{ip: "fc00::1", want: false},   // ULA
+		{ip: "0.0.0.0", want: false},   // unspecified
+		{ip: "224.0.0.1", want: false}, // multicast
+	}
+	for _, tc := range cases {
+		ip := net.ParseIP(tc.ip)
+		if ip == nil {
+			t.Fatalf("bad test IP %q", tc.ip)
+		}
+		if got := isGlobalUnicast(ip); got != tc.want {
+			t.Fatalf("isGlobalUnicast(%s) = %v want %v", tc.ip, got, tc.want)
+		}
 	}
 }

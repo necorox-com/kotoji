@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +84,8 @@ func TestLoad_ProductionRequiresEssentials(t *testing.T) {
 	assert.Contains(t, msg, "KOTOJI_DATABASE_URL")
 	assert.Contains(t, msg, "KOTOJI_BASE_DOMAIN")
 	assert.Contains(t, msg, "KOTOJI_CONTROL_BASE_URL")
+	// H2: the at-rest encryption key is now a production essential too.
+	assert.Contains(t, msg, "KOTOJI_SECRET_KEY")
 }
 
 // TestLoad_PasswordModeAllowsEmptyEnvPassword is the first-run setup contract:
@@ -241,13 +245,17 @@ func TestLoad_ZipMaxEntryBytes(t *testing.T) {
 }
 
 // productionEnv returns a production env with the non-auth essentials filled in,
-// so individual tests can isolate auth-specific failures.
+// so individual tests can isolate auth-specific failures. It includes a valid
+// KOTOJI_SECRET_KEY (H2: production hard-requires an explicit at-rest key) so the
+// helper alone yields a bootable prod config.
 func productionEnv() map[string]string {
 	return map[string]string{
 		"KOTOJI_ENV":              "production",
 		"KOTOJI_DATABASE_URL":     "postgres://u:p@db:5432/kotoji?sslmode=require",
 		"KOTOJI_BASE_DOMAIN":      "hosting.example.com",
 		"KOTOJI_CONTROL_BASE_URL": "https://kotoji.example.com",
+		// 64 hex chars = 32 bytes (a valid explicit key). Test-only fixed value.
+		"KOTOJI_SECRET_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
 }
 
@@ -432,4 +440,99 @@ func TestLoad_CertMagicStorageFollowsDataDir(t *testing.T) {
 	cfg, err := LoadFromMap(env)
 	require.NoError(t, err)
 	assert.Equal(t, "/srv/kotoji/certmagic", cfg.CertMagicStorageDir)
+}
+
+// --- H2: production REQUIRES an explicit high-entropy KOTOJI_SECRET_KEY ---
+
+// TestLoad_ProductionRequiresSecretKey: a prod control-plane env WITHOUT
+// KOTOJI_SECRET_KEY (so the at-rest key would be derived from public inputs) is
+// rejected fail-closed.
+func TestLoad_ProductionRequiresSecretKey(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "password"
+	delete(env, "KOTOJI_SECRET_KEY")
+	_, err := LoadFromMap(env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "KOTOJI_SECRET_KEY")
+}
+
+// TestLoad_ProductionRejectsShortDerivableSecretKey: a value that does NOT decode
+// to >= 32 bytes is treated as "no explicit key" (it would fall back to the derived
+// key) and is rejected in production.
+func TestLoad_ProductionRejectsShortDerivableSecretKey(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "password"
+	env["KOTOJI_SECRET_KEY"] = "tooshort" // < 32 decoded bytes
+	_, err := LoadFromMap(env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "KOTOJI_SECRET_KEY")
+}
+
+// TestLoad_ProductionAcceptsExplicitSecretKey: hex and base64 keys that decode to
+// >= 32 bytes satisfy the requirement and boot cleanly.
+func TestLoad_ProductionAcceptsExplicitSecretKey(t *testing.T) {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i + 1)
+	}
+	cases := map[string]string{
+		"hex":    hex.EncodeToString(raw),
+		"base64": base64.StdEncoding.EncodeToString(raw),
+	}
+	for name, key := range cases {
+		t.Run(name, func(t *testing.T) {
+			env := productionEnv()
+			env["KOTOJI_AUTH_MODE"] = "password"
+			env["KOTOJI_SECRET_KEY"] = key
+			cfg, err := LoadFromMap(env)
+			require.NoError(t, err)
+			assert.Equal(t, key, cfg.SecretKey)
+		})
+	}
+}
+
+// TestLoad_DevelopmentAllowsDerivedSecretKey: in DEV the derived fallback is fine —
+// no KOTOJI_SECRET_KEY is required (zero-config local stack).
+func TestLoad_DevelopmentAllowsDerivedSecretKey(t *testing.T) {
+	env := devBase()
+	_, ok := env["KOTOJI_SECRET_KEY"]
+	require.False(t, ok, "dev base must not set a secret key")
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.SecretKey, "dev derives the key; no explicit key needed")
+}
+
+// TestLoad_ProductionServeModeSkipsSecretKey: a data-plane-only (serve) prod
+// instance does not run the control plane, so it never stores secrets and does not
+// require the key. (It still requires the other prod essentials.)
+func TestLoad_ProductionServeModeSkipsSecretKey(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_RUN_MODE"] = "serve"
+	delete(env, "KOTOJI_SECRET_KEY")
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.False(t, cfg.ServesControl())
+}
+
+// TestExplicitSecretKey is the pure predicate the H2 check gates on.
+func TestExplicitSecretKey(t *testing.T) {
+	raw := make([]byte, 32)
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "empty", in: "", want: false},
+		{name: "blank", in: "   ", want: false},
+		{name: "short hex", in: "abcd", want: false},
+		{name: "valid hex 32B", in: hex.EncodeToString(raw), want: true},
+		{name: "valid base64 32B", in: base64.StdEncoding.EncodeToString(raw), want: true},
+		{name: "valid raw base64 32B", in: base64.RawStdEncoding.EncodeToString(raw), want: true},
+		{name: "undecodable", in: "!!! not a key !!!", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, explicitSecretKey(tc.in))
+		})
+	}
 }

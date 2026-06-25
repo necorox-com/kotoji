@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/config"
 	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
+	"github.com/necorox-com/kotoji/backend/internal/ratelimit"
 )
 
 // adminPasswordHashKey is the instance_settings key for the first-run admin
@@ -80,6 +82,12 @@ type Auth struct {
 	// the effective auth-provider set for /api/config. nil keeps the legacy static
 	// a.interactive provider (the env-set fast path / single-provider unit tests).
 	oidcRuntime OIDCRuntime
+
+	// lockout is the R2 per-source brute-force tracker: after N consecutive password
+	// failures from one source key the key is locked out (exponential backoff) BEFORE
+	// the bcrypt compare runs, so an attacker can neither brute-force the password nor
+	// burn bcrypt CPU. It is always non-nil (built in NewWithProviders).
+	lockout *loginLockout
 }
 
 // DomainResolver resolves the effective base domain + control base URL for the
@@ -134,6 +142,9 @@ func NewWithProviders(cfg config.Config, store StoreDeps, providers ...AuthProvi
 		upserter:  &storeUpserter{store: store},
 		store:     store,
 		signKey:   deriveSignKey(cfg),
+		// R2: brute-force lockout for the password POST. Real clock in production;
+		// tests reach the unexported field to inject a fake clock.
+		lockout: newLoginLockout(nil),
 	}
 	for _, p := range providers {
 		if p == nil {
@@ -311,8 +322,9 @@ func (a *Auth) LoginStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !prov.Interactive() {
-		// Dev no-auth (AUTH_MODE=none): instant login, no IdP redirect.
-		a.completeLogin(w, r, prov, "", "", "", next)
+		// Dev no-auth (AUTH_MODE=none): instant login, no IdP redirect. No credential
+		// is checked here, so the R2 lockout does not apply (nil result hook).
+		a.completeLogin(w, r, prov, "", "", "", next, nil)
 		return
 	}
 
@@ -401,6 +413,18 @@ func (a *Auth) LoginPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, codeValidation, "this instance uses redirect-based login")
 		return
 	}
+	// R2: reject a locked-out source BEFORE reading/comparing the credential, so a
+	// brute-force attempt cannot even reach the (deliberately slow) bcrypt compare.
+	// The dev no-auth provider has no credential, so only gate the real password
+	// provider; the source key is the R1-safe client IP.
+	srcKey := a.lockoutKey(r)
+	gated := prov.Key() == passwordProviderKey
+	if gated {
+		if locked, retryAfter := a.lockout.locked(srcKey); locked {
+			a.writeLockedOut(w, r, retryAfter)
+			return
+		}
+	}
 	next := safeNext(r.URL.Query().Get("next"))
 
 	var password string
@@ -424,7 +448,19 @@ func (a *Auth) LoginPassword(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	a.completeLogin(w, r, prov, password, "", "", next)
+	// Observe the credential outcome so the R2 lockout counts only the password
+	// provider's real bad-credential results (a success resets the backoff).
+	var onResult func(badPassword bool)
+	if gated {
+		onResult = func(badPassword bool) {
+			if badPassword {
+				a.lockout.recordFailure(srcKey)
+				return
+			}
+			a.lockout.recordSuccess(srcKey)
+		}
+	}
+	a.completeLogin(w, r, prov, password, "", "", next, onResult)
 }
 
 // Callback completes the interactive (OIDC) login: verify the state cookie,
@@ -464,8 +500,9 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 
 	// Re-sanitize the stored next: the value rode through the signed login-state
 	// cookie since Start, so we never trust it blindly here — run it back through
-	// safeNext before the final redirect (open-redirect defense, M4).
-	a.completeLogin(w, r, prov, code, ls.Verifier, ls.Nonce, safeNext(ls.Next))
+	// safeNext before the final redirect (open-redirect defense, M4). OIDC carries
+	// no password, so the R2 lockout hook is nil.
+	a.completeLogin(w, r, prov, code, ls.Verifier, ls.Nonce, safeNext(ls.Next), nil)
 }
 
 // completeLogin is the shared tail of every login path: prov.Exchange ->
@@ -474,16 +511,25 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 // password (break-glass), ignored by the dev provider. prov is the specific
 // provider this path used, so the identity is linked under the right key and the
 // admin decision uses the right signal.
-func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, prov AuthProvider, credential, verifier, nonce, next string) {
+// onCredentialResult, when non-nil, is invoked exactly once with whether the
+// Exchange failed with ErrBadPassword (a real bad credential). It drives the R2
+// lockout bookkeeping for the password path; OIDC/dev pass nil.
+func (a *Auth) completeLogin(w http.ResponseWriter, r *http.Request, prov AuthProvider, credential, verifier, nonce, next string, onCredentialResult func(badPassword bool)) {
 	claims, err := prov.Exchange(r.Context(), credential, verifier, nonce)
 	if err != nil {
 		// Distinguish a bad password (401) from an access/verify reject (403).
 		if errors.Is(err, ErrBadPassword) {
+			if onCredentialResult != nil {
+				onCredentialResult(true) // R2: count the failure toward lockout
+			}
 			writeError(w, r, http.StatusUnauthorized, codeUnauthenticated, "invalid credentials")
 			return
 		}
 		writeError(w, r, http.StatusForbidden, codeForbidden, "login was rejected")
 		return
+	}
+	if onCredentialResult != nil {
+		onCredentialResult(false) // R2: a valid credential resets the backoff
 	}
 
 	var avatar *string // OIDC profile may carry a picture; left nil here (least data)
@@ -984,7 +1030,11 @@ func (a *Auth) rejectCrossOrigin(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // clientIP returns the best-effort client IP for the audit/session row. When the
-// proxy is trusted, the first X-Forwarded-For hop is used; else RemoteAddr.
+// proxy is trusted, the first X-Forwarded-For hop is used; else RemoteAddr. This
+// is INFORMATIONAL (audit/session display) so it keeps the original-client
+// (left-most) hop — it is not a security key. The brute-force lockout instead
+// uses lockoutKey (the R1-safe right-most hop) so a spoofed left-most token cannot
+// dodge the lockout.
 func clientIP(r *http.Request, trustProxy bool) string {
 	if trustProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
@@ -995,6 +1045,29 @@ func clientIP(r *http.Request, trustProxy bool) string {
 		}
 	}
 	return r.RemoteAddr
+}
+
+// lockoutKey derives the R2 brute-force-lockout source key. It reuses the
+// R1-hardened ratelimit.ClientIP (right-most trusted XFF hop) so a client cannot
+// rotate the key with a spoofed left-most token and escape the lockout. An empty
+// key (no usable signal) is treated as "never locked" by the tracker (fail-open
+// hardening layer).
+func (a *Auth) lockoutKey(r *http.Request) string {
+	return ratelimit.ClientIP(r, a.cfg.TrustProxyHeaders)
+}
+
+// writeLockedOut emits the R2 429 for a locked-out source. The message is generic
+// (it never confirms whether the account exists) and a Retry-After header tells a
+// well-behaved client when to retry. retryAfter is rounded UP to whole seconds so
+// a sub-second remainder never renders as "0".
+func (a *Auth) writeLockedOut(w http.ResponseWriter, r *http.Request, retryAfter time.Duration) {
+	secs := int((retryAfter + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeError(w, r, http.StatusTooManyRequests, codeRateLimited,
+		"too many failed login attempts; try again later")
 }
 
 // deriveSignKey produces the HMAC key for the login-state cookie. It binds to the

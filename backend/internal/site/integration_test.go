@@ -48,7 +48,7 @@ func newRealService(t *testing.T) (*gitService, *memStore) {
 	store := newMemStore()
 	clk := fixedClock()
 	store.clock = clk
-	g := NewServiceWithClock(store, newExecRunner("git"), Config{Root: t.TempDir()}, clk)
+	g := NewServiceWithClock(store, newExecRunner("git", defaultGitOpTimeout), Config{Root: t.TempDir()}, clk)
 	return g, store
 }
 

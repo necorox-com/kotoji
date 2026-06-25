@@ -33,6 +33,17 @@ func ResolveKey(secretKeyEnv, adminPwSeed, oidcSecret, controlBaseURL, baseDomai
 	return sum[:]
 }
 
+// ExplicitKeyProvided reports whether KOTOJI_SECRET_KEY decodes to a usable
+// (>= 32-byte) explicit key — i.e. ResolveKey would return the operator-supplied
+// key rather than the derived fallback. It is the single predicate both the
+// config validator (H2 fail-closed: production REQUIRES an explicit key) and the
+// composition root use, so "what counts as a real key" is defined in exactly one
+// place. A blank/short/undecodable value returns false (derived path).
+func ExplicitKeyProvided(secretKeyEnv string) bool {
+	_, ok := decodeExplicitKey(secretKeyEnv)
+	return ok
+}
+
 // decodeExplicitKey decodes an operator-supplied KOTOJI_SECRET_KEY. It accepts
 // hex or standard/raw base64; the chosen encoding must yield AT LEAST 32 bytes
 // (only the first 32 are used). A shorter/blank/undecodable value returns

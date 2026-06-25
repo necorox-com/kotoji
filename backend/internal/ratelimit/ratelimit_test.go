@@ -140,7 +140,10 @@ func TestClientIP(t *testing.T) {
 		remote string
 		want   string
 	}{
-		{name: "xff first hop trusted", trust: true, xff: "1.2.3.4, 5.6.7.8", remote: "10.0.0.1:9999", want: "1.2.3.4"},
+		// R1: with a single trusted proxy the RIGHT-most hop (the address the proxy
+		// appended) is the real client — NOT the left-most token the client controls.
+		{name: "xff rightmost hop trusted", trust: true, xff: "1.2.3.4, 5.6.7.8", remote: "10.0.0.1:9999", want: "5.6.7.8"},
+		{name: "xff single hop trusted", trust: true, xff: "1.2.3.4", remote: "10.0.0.1:9999", want: "1.2.3.4"},
 		{name: "xff ignored when untrusted", trust: false, xff: "1.2.3.4", remote: "10.0.0.1:9999", want: "10.0.0.1"},
 		{name: "x-real-ip fallback", trust: true, xrip: "9.9.9.9", remote: "10.0.0.1:9999", want: "9.9.9.9"},
 		{name: "remoteaddr host", trust: true, remote: "203.0.113.7:443", want: "203.0.113.7"},
@@ -159,5 +162,52 @@ func TestClientIP(t *testing.T) {
 				t.Fatalf("ClientIP = %q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestClientIP_SpoofedLeftMostDoesNotChangeKey is the core R1 regression: an
+// attacker who prepends arbitrary spoofed tokens to X-Forwarded-For must NOT be
+// able to change the limiter key. Behind a single trusted proxy the key is fixed
+// to the right-most (proxy-appended) hop regardless of how many tokens the client
+// prepends.
+func TestClientIP_SpoofedLeftMostDoesNotChangeKey(t *testing.T) {
+	const trustedProxyHop = "5.6.7.8" // what the trusted proxy actually appended
+
+	// Three requests from the same real client, each prepending a DIFFERENT spoofed
+	// left-most token in an attempt to rotate the limiter key.
+	spoofs := []string{
+		"9.9.9.9, " + trustedProxyHop,
+		"8.8.8.8, 7.7.7.7, " + trustedProxyHop,
+		"1.1.1.1, " + trustedProxyHop,
+	}
+	for _, xff := range spoofs {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = "10.0.0.1:9999"
+		r.Header.Set("X-Forwarded-For", xff)
+		if got := ClientIP(r, true); got != trustedProxyHop {
+			t.Fatalf("spoofed XFF %q changed the key: ClientIP = %q want %q", xff, got, trustedProxyHop)
+		}
+	}
+}
+
+// TestClientIPHops_MultipleTrustedProxies covers an operator-configured >1 trusted
+// proxy chain: with 2 trusted hops the client IP is the 2nd token from the right,
+// and a spoofed left-most token still cannot reach it.
+func TestClientIPHops_MultipleTrustedProxies(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "10.0.0.1:9999"
+	// client , proxyA(appended client) , proxyB(appended proxyA). With 2 trusted
+	// proxies (A,B) the real client is the token 2-from-the-right: "2.2.2.2".
+	r.Header.Set("X-Forwarded-For", "9.9.9.9, 2.2.2.2, 3.3.3.3")
+	if got := ClientIPHops(r, true, 2); got != "2.2.2.2" {
+		t.Fatalf("ClientIPHops(2) = %q want %q", got, "2.2.2.2")
+	}
+
+	// Fewer tokens than trusted hops => fall back to RemoteAddr, never a client token.
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = "203.0.113.7:443"
+	r2.Header.Set("X-Forwarded-For", "9.9.9.9") // only 1 token, but 2 hops configured
+	if got := ClientIPHops(r2, true, 2); got != "203.0.113.7" {
+		t.Fatalf("short chain ClientIPHops(2) = %q want RemoteAddr host %q", got, "203.0.113.7")
 	}
 }

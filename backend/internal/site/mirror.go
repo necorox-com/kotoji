@@ -23,6 +23,15 @@ func (g *gitService) SetRemote(ctx context.Context, id uuid.UUID, url string) er
 	if !found || rec.DeletedAt != nil {
 		return ErrNotFound
 	}
+	// S1: validate the tenant-supplied remote BEFORE it is laundered/stored or fed
+	// to git. An empty url means "clear" (handled below); any non-empty value must
+	// pass the strict GitHub-only allowlist so a file:// / internal-IP / non-GitHub
+	// remote can never be configured (local-file read / cross-tenant / SSRF gate).
+	if url != "" {
+		if err := validateRemoteURL(url); err != nil {
+			return err
+		}
+	}
 	return g.withWriteLock(id, func() error {
 		if url == "" {
 			// Clear: remove the remote (ignore "no such remote") + null the column.

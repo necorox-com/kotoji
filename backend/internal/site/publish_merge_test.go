@@ -51,7 +51,7 @@ func TestPublish_MergeCommit(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store := newMemStore()
-	g := NewServiceWithClock(store, newExecRunner("git"), Config{Root: root}, fixedClock())
+	g := NewServiceWithClock(store, newExecRunner("git", defaultGitOpTimeout), Config{Root: root}, fixedClock())
 
 	s, err := g.CreateSite(ctx, CreateSiteInput{Handle: "merge-clean", OwnerID: uuid.New(), Actor: testActor()})
 	require.NoError(t, err)
@@ -91,7 +91,7 @@ func TestPublish_MergeConflict(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	store := newMemStore()
-	g := NewServiceWithClock(store, newExecRunner("git"), Config{Root: root}, fixedClock())
+	g := NewServiceWithClock(store, newExecRunner("git", defaultGitOpTimeout), Config{Root: root}, fixedClock())
 
 	s, err := g.CreateSite(ctx, CreateSiteInput{Handle: "merge-conflict", OwnerID: uuid.New(), Actor: testActor()})
 	require.NoError(t, err)
