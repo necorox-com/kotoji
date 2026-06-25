@@ -288,6 +288,11 @@ type fakeProvider struct {
 	exchangeReply Claims
 	exchangeErr   error
 
+	// mu guards the captured-handshake fields. Start/Exchange may run concurrently
+	// in the callback-level concurrency tests (double-submit of the SAME state), so
+	// the writes below must be synchronized — otherwise the race detector flags the
+	// TEST fake, not the production single-use guard under test.
+	mu sync.Mutex
 	// captured handshake args for assertions.
 	gotState    string
 	gotNonce    string
@@ -299,12 +304,16 @@ func (p *fakeProvider) Key() string       { return p.key }
 func (p *fakeProvider) Interactive() bool { return p.interactive }
 
 func (p *fakeProvider) Start(state, nonce, verifier string) string {
+	p.mu.Lock()
 	p.gotState, p.gotNonce, p.gotVerifier = state, nonce, verifier
+	p.mu.Unlock()
 	return p.startURL
 }
 
 func (p *fakeProvider) Exchange(_ context.Context, code, verifier, nonce string) (Claims, error) {
+	p.mu.Lock()
 	p.gotCode, p.gotVerifier, p.gotNonce = code, verifier, nonce
+	p.mu.Unlock()
 	if p.exchangeErr != nil {
 		return Claims{}, p.exchangeErr
 	}

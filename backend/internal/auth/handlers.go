@@ -89,6 +89,15 @@ type Auth struct {
 	// the bcrypt compare runs, so an attacker can neither brute-force the password nor
 	// burn bcrypt CPU. It is always non-nil (built in NewWithProviders).
 	lockout *loginLockout
+
+	// singleUse is the server-side SINGLE-USE guard for the OIDC login handshake: it
+	// records each login state ONCE so a captured login-state cookie cannot be
+	// REPLAYED within loginStateTTL (the OAuth code is single-use at the IdP, but the
+	// state/nonce binding in the cookie is otherwise replayable). It is always
+	// non-nil (the in-memory default is built in NewWithProviders). SWAPPABLE: a
+	// multi-node deployment can supply a shared (DB/Redis) SingleUseStore so the
+	// first-use decision is atomic across processes — see singleuse.go.
+	singleUse SingleUseStore
 }
 
 // DomainResolver resolves the effective base domain + control base URL for the
@@ -104,6 +113,17 @@ type DomainResolver interface {
 // Optional: a nil resolver (or never calling this) keeps the static cfg behavior,
 // so existing tests / the env-set fast path are unaffected.
 func (a *Auth) SetDomainResolver(d DomainResolver) { a.domain = d }
+
+// SetSingleUseStore swaps the server-side single-use guard used by the OIDC
+// callback (replay defense). Optional: NewWithProviders already installs the
+// in-memory default. A multi-node deployment uses this to inject a shared
+// (DB/Redis-backed) SingleUseStore so the first-use decision is atomic ACROSS
+// processes. A nil argument is ignored so a stray call can never disable the guard.
+func (a *Auth) SetSingleUseStore(s SingleUseStore) {
+	if s != nil {
+		a.singleUse = s
+	}
+}
 
 // UserUpserter is the atomic "match-or-create user + link identity" seam used at
 // callback. *db.Store satisfies it via StoreUpserter; tests inject a fake.
@@ -146,6 +166,10 @@ func NewWithProviders(cfg config.Config, store StoreDeps, providers ...AuthProvi
 		// R2: brute-force lockout for the password POST. Real clock in production;
 		// tests reach the unexported field to inject a fake clock.
 		lockout: newLoginLockout(nil),
+		// Server-side single-use guard for the OIDC handshake (replay defense). The
+		// in-memory default is fine for a single-node / sticky-proxy deployment; a
+		// multi-node deployment can swap this for a shared store (see singleuse.go).
+		singleUse: newMemSingleUseStore(nil),
 	}
 	for _, p := range providers {
 		if p == nil {
@@ -491,6 +515,18 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 	}
 	// State must match the value bound in the cookie at Start (CSRF on callback).
 	if state == "" || subtle.ConstantTimeCompare([]byte(state), []byte(ls.State)) != 1 {
+		writeError(w, r, http.StatusForbidden, codeForbidden, "login state mismatch")
+		return
+	}
+	// SERVER-SIDE SINGLE-USE: the state matched the cookie, but a captured login-state
+	// cookie could be REPLAYED within loginStateTTL (the IdP single-uses the code, not
+	// our state/nonce binding). Atomically record this state ONCE keyed by its 256-bit
+	// random value: firstUse=false means it was already consumed -> reject as a replay
+	// using the SAME error shape + 403 as a state mismatch (no info leak; the cookie is
+	// already cleared by readLoginState above). A store error is treated as "not first
+	// use" (fail closed: never honor a callback we could not single-use). The TTL
+	// matches the cookie lifetime so the entry self-expires alongside the cookie.
+	if firstUse, err := a.singleUse.Consume(r.Context(), "oidc-state:"+state, loginStateTTL); err != nil || !firstUse {
 		writeError(w, r, http.StatusForbidden, codeForbidden, "login state mismatch")
 		return
 	}
