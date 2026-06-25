@@ -587,7 +587,8 @@ var ownerRepoRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z
 // remote git reads — a local-file/cross-tenant disclosure and blind-SSRF surface.
 // We allow ONLY:
 //   - the "owner/repo" shorthand (normalized to github.com https),
-//   - https://github.com/owner/repo(.git) (and *.github.com / GitHub Enterprise),
+//   - https://github.com/owner/repo(.git) (the exact host the mirror credential
+//     authenticates to — see isAllowedGitHubHost / git_auth.go githubBase),
 //   - the git@github.com:owner/repo(.git) ssh shorthand.
 //
 // Everything else — file://, http://, ssh:// to a raw host, any non-GitHub or
@@ -652,10 +653,20 @@ func validateRemoteURL(raw string) error {
 	return nil
 }
 
-// isAllowedGitHubHost reports whether host is github.com, a github.com subdomain,
-// or a GitHub Enterprise host — and is NOT an IP literal (IP literals bypass the
-// hostname allowlist and are the classic SSRF/link-local vector: 169.254.169.254,
-// 127.0.0.1, 10.x, ::1, …). We deliberately allowlist by hostname only.
+// isAllowedGitHubHost reports whether host is EXACTLY github.com — and is NOT an
+// IP literal (IP literals bypass the hostname allowlist and are the classic
+// SSRF/link-local vector: 169.254.169.254, 127.0.0.1, 10.x, ::1, …). We
+// deliberately allowlist by hostname only.
+//
+// The allowlist is intentionally narrowed to the single host that the mirror
+// credential actually covers: the auth extraHeader is scoped to exactly
+// https://github.com (git_auth.go githubBase). Previously this also admitted
+// *.github.com and *.ghe.com (GitHub Enterprise) hosts that the credential is
+// NEVER attached to, so a tenant configuring such a mirror could only ever
+// push/fetch UNAUTHENTICATED and would silently fail on private repos. Matching
+// the allowlist exactly to what the credential covers removes that footgun; we
+// do NOT instead broaden the credential to arbitrary enterprise hosts (that
+// would widen the secret's exposure to attacker-influenced hostnames).
 func isAllowedGitHubHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	host = strings.TrimSuffix(host, ".") // tolerate a trailing FQDN dot
@@ -667,18 +678,9 @@ func isAllowedGitHubHost(host string) bool {
 	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
 		return false
 	}
-	// github.com and any subdomain of it (e.g. ssh.github.com).
-	if host == "github.com" || strings.HasSuffix(host, ".github.com") {
-		return true
-	}
-	// GitHub Enterprise Cloud lives under the GitHub-managed *.ghe.com domain. We
-	// keep the enterprise allowance to this GitHub-owned suffix only; a self-hosted
-	// GHE on an arbitrary corporate host is intentionally NOT auto-allowed here, to
-	// avoid widening the allowlist to attacker-influenced "github"-ish hostnames.
-	if strings.HasSuffix(host, ".ghe.com") {
-		return true
-	}
-	return false
+	// Only the exact github.com host: this is the sole host the mirror credential
+	// (githubBase = https://github.com) authenticates to.
+	return host == "github.com"
 }
 
 // isUniqueViolation reports whether err looks like a Postgres unique-constraint

@@ -24,6 +24,7 @@ import (
 	"github.com/necorox-com/kotoji/backend/internal/db"
 	"github.com/necorox-com/kotoji/backend/internal/db/gen"
 	"github.com/necorox-com/kotoji/backend/internal/ratelimit"
+	"github.com/necorox-com/kotoji/backend/internal/secretbox"
 )
 
 // adminPasswordHashKey is the instance_settings key for the first-run admin
@@ -1070,19 +1071,39 @@ func (a *Auth) writeLockedOut(w http.ResponseWriter, r *http.Request, retryAfter
 		"too many failed login attempts; try again later")
 }
 
-// deriveSignKey produces the HMAC key for the login-state cookie. It binds to the
-// admin password (when present) so restarts with the same config keep cookies
-// valid; otherwise a per-process random key is used (login-state is short-lived,
-// so a key roll only invalidates in-flight logins).
+// deriveSignKey produces the HMAC key for the login-state cookie. It is derived
+// from secretbox.ResolveKey — the SINGLE source of truth for key material — so an
+// explicit KOTOJI_SECRET_KEY (REQUIRED in production by the H2 policy) makes this
+// HMAC as strong as the at-rest key. Without an explicit key, ResolveKey falls
+// back to a sha256 over the same stable server seed (admin password | oidc secret
+// | control base url | base domain), so restarts with identical config keep
+// in-flight cookies valid. The base key is domain-separated here via HMAC with the
+// "kotoji-login-state|" prefix so the login-state key never collides with the
+// at-rest or preview-grant derivations that share those inputs.
+//
+// The per-process random fallback is kept ONLY when there is genuinely no key
+// material at all (no explicit key AND an empty seed — i.e. dev). login-state is
+// short-lived (loginStateTTL), so even that key roll only invalidates in-flight
+// logins.
 func deriveSignKey(cfg config.Config) []byte {
-	seed := cfg.AdminPassword + "|" + cfg.OIDC.ClientSecret + "|" + cfg.ControlBaseURL
-	if strings.Trim(seed, "|") == "" {
+	// base key = the single source of truth; consumes the explicit KOTOJI_SECRET_KEY
+	// when present, else derives from the stable server seed.
+	base := secretbox.ResolveKey(cfg.SecretKey, cfg.AdminPassword, cfg.OIDC.ClientSecret, cfg.ControlBaseURL, cfg.BaseDomain)
+
+	// No key material whatsoever (no explicit key AND empty seed) => dev: use a
+	// per-process random key rather than a publicly-derivable constant.
+	seed := cfg.AdminPassword + "|" + cfg.OIDC.ClientSecret + "|" + cfg.ControlBaseURL + "|" + cfg.BaseDomain
+	if !secretbox.ExplicitKeyProvided(cfg.SecretKey) && strings.Trim(seed, "|") == "" {
 		b := make([]byte, 32)
 		_, _ = rand.Read(b)
 		return b
 	}
-	sum := sha256.Sum256([]byte("kotoji-login-state|" + seed))
-	return sum[:]
+
+	// Domain-separate the login-state key from the at-rest / preview-grant keys
+	// (which share the same base inputs) via HMAC with a distinct label.
+	mac := hmac.New(sha256.New, base)
+	mac.Write([]byte("kotoji-login-state|" + seed))
+	return mac.Sum(nil)
 }
 
 // ProviderFor builds the single AuthProvider matching cfg.AuthMode (the LEGACY

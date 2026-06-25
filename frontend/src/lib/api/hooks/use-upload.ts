@@ -58,8 +58,11 @@ function uploadZipRequest(
     xhr.open("POST", url, true);
     // Send the session cookie (mirrors openapi-fetch credentials:"include").
     xhr.withCredentials = true;
-    // CSRF double-submit on this mutating request.
-    const csrf = readCookie(CSRF_COOKIE);
+    // CSRF double-submit on this mutating request. In production (Secure
+    // cookies) the backend names the cookie with the `__Host-` prefix; in
+    // insecure dev it uses the bare name. Try both so the header is always set
+    // (mirrors the openapi-fetch csrfMiddleware in client.ts).
+    const csrf = readCookie(`__Host-${CSRF_COOKIE}`) || readCookie(CSRF_COOKIE);
     if (csrf) xhr.setRequestHeader(CSRF_HEADER, csrf);
     // Hint we accept JSON so the error envelope is returned as JSON.
     xhr.setRequestHeader("Accept", "application/json");

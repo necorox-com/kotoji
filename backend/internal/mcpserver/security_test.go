@@ -100,6 +100,47 @@ func TestSecurity_MembershipDowngrade_LimitsTokenImmediately(t *testing.T) {
 	assert.Equal(t, codeForbidden, decodeErrBody(t, res.StructuredContent).Code)
 }
 
+// TestSecurity_MembershipRemoval_DeniesNextCall proves the membership is re-read
+// per call with NO cached role: a member removed from a site mid-session is denied
+// on the VERY NEXT tool call with a not_found (no existence leak), on BOTH a read
+// and a write tool. This is the removal counterpart to the downgrade test above —
+// authorizeSite's GetRole returns pgx.ErrNoRows after removal, which is a 404.
+func TestSecurity_MembershipRemoval_DeniesNextCall(t *testing.T) {
+	fake := site.NewFakeService()
+	user := uuid.New()
+	r := newTestRegistry(fake)
+	s, base := seedSiteR(t, r, user, "removed") // starts as owner/member
+	c := claims(user, scopePublish, false)      // full-scope token, membership-capped
+
+	// While a member: read and list_sites both work and the site is visible.
+	_, _, err := r.readFile(context.Background(), c, ReadFileArgs{Site: string(s.Handle), Path: "index.html"})
+	require.NoError(t, err)
+	_, ls, err := r.listSites(context.Background(), c, ListSitesArgs{})
+	require.NoError(t, err)
+	require.Len(t, ls.Sites, 1, "member should see exactly their one site")
+
+	// Remove the user from the site (e.g. owner removes them) mid-session.
+	fakeMembersOf(r).revoke(s, user)
+
+	// NEXT read call: denied with not_found (no cached role; GetRole now ErrNoRows).
+	rRead, _, err := r.readFile(context.Background(), c, ReadFileArgs{Site: string(s.Handle), Path: "index.html"})
+	require.NoError(t, err)
+	require.True(t, rRead.IsError)
+	assert.Equal(t, codeNotFound, decodeErrBody(t, rRead.StructuredContent).Code,
+		"removed member must get not_found (no existence leak), not forbidden")
+
+	// NEXT write call: equally denied with not_found.
+	rWrite, _, err := r.writeFile(context.Background(), c, WriteFileArgs{Site: string(s.Handle), Path: "index.html", Content: "x", BaseSHA: base})
+	require.NoError(t, err)
+	require.True(t, rWrite.IsError)
+	assert.Equal(t, codeNotFound, decodeErrBody(t, rWrite.StructuredContent).Code)
+
+	// list_sites now returns NOTHING for this user (the membership row is gone).
+	_, ls2, err := r.listSites(context.Background(), c, ListSitesArgs{})
+	require.NoError(t, err)
+	assert.Empty(t, ls2.Sites, "removed member must no longer enumerate the site")
+}
+
 // TestSecurity_RevokeMidSession proves verification happens per call (not cached
 // indefinitely): a token authenticates once, is revoked, and the next Verify
 // fails. The handler enforces this because the SDK calls Verify on every request.

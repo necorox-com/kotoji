@@ -655,7 +655,7 @@ func (a *App) serveLimiter() func(http.Handler) http.Handler {
 // control plane (api's /preview-grant endpoint) use ONE identical key — grants
 // minted by the API are accepted by the data-plane verifier without format drift.
 func previewSecret(cfg config.Config) []byte {
-	return preview.Secret(cfg.AdminPassword, cfg.OIDC.ClientSecret, cfg.ControlBaseURL, cfg.BaseDomain)
+	return preview.Secret(cfg.SecretKey, cfg.AdminPassword, cfg.OIDC.ClientSecret, cfg.ControlBaseURL, cfg.BaseDomain)
 }
 
 // commonMiddleware applies the cross-cutting chain (request-id -> slog -> recover)

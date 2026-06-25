@@ -97,7 +97,11 @@ func TestValidateRemoteURL_RejectsDangerous(t *testing.T) {
 		"https://[::1]/owner/repo",                // ipv6 loopback
 		"https://attacker.internal/owner/repo",    // non-GitHub host
 		"https://github.com.evil.com/owner/repo",  // host-confusion suffix
-		"https://evilgithub.com/owner/repo",       // not a github.com subdomain
+		"https://evilgithub.com/owner/repo",       // not the github.com host
+		"https://sub.github.com/owner/repo",       // subdomain: credential is NOT scoped here
+		"https://www.github.com/owner/repo",       // www subdomain: credential is NOT scoped here
+		"https://my-co.ghe.com/owner/repo.git",    // GitHub Enterprise: credential is NOT scoped here
+		"git@x.ghe.com:owner/repo",                // GHE ssh shorthand: credential is NOT scoped here
 		"ssh://git@github.com/owner/repo",         // ssh:// scheme not allowed (only https + scp shorthand)
 		"ext::sh -c touch /tmp/pwned",             // ext transport (command exec)
 		"https://user:pass@github.com/owner/repo", // embedded credentials
@@ -115,9 +119,13 @@ func TestValidateRemoteURL_RejectsDangerous(t *testing.T) {
 }
 
 // TestValidateRemoteURL_AcceptsGitHub proves the allowlist accepts the legitimate
-// GitHub forms: the owner/repo shorthand, github.com https (with/without .git),
-// github.com subdomains, the *.ghe.com enterprise suffix, and the
-// git@github.com:owner/repo ssh shorthand.
+// GitHub forms: the owner/repo shorthand and the exact github.com host (https
+// with/without .git, plus the git@github.com:owner/repo ssh shorthand). The
+// allowlist is intentionally narrowed to exactly the host the mirror credential
+// authenticates to (git_auth.go githubBase = https://github.com) — *.github.com
+// subdomains and *.ghe.com enterprise hosts are NOT accepted, since the
+// credential is never attached there and such a mirror could only ever fail
+// unauthenticated; those rejections are asserted in the dangerous-URL test.
 func TestValidateRemoteURL_AcceptsGitHub(t *testing.T) {
 	good := []string{
 		"owner/repo",
@@ -125,13 +133,69 @@ func TestValidateRemoteURL_AcceptsGitHub(t *testing.T) {
 		"my-org/my.repo_name",
 		"https://github.com/owner/repo",
 		"https://github.com/owner/repo.git",
-		"https://www.github.com/owner/repo",
-		"https://my-co.ghe.com/owner/repo.git",
 		"git@github.com:owner/repo",
 		"git@github.com:owner/repo.git",
 	}
 	for _, u := range good {
 		assert.NoErrorf(t, validateRemoteURL(u), "remote URL %q must be accepted", u)
+	}
+}
+
+// TestIsAllowedGitHubHost_ExactGitHubOnly pins the host allowlist to EXACTLY
+// github.com — the single host the mirror credential (git_auth.go githubBase =
+// https://github.com) authenticates to. Subdomains (sub./www.github.com) and the
+// *.ghe.com GitHub Enterprise suffix are deliberately NOT allowed: the credential
+// is never scoped there, so admitting them would only let a tenant configure a
+// mirror that silently fails unauthenticated on private repos. IP literals (the
+// SSRF/link-local vector) and non-GitHub hosts stay rejected.
+func TestIsAllowedGitHubHost_ExactGitHubOnly(t *testing.T) {
+	allowed := []string{
+		"github.com",
+		"GitHub.com",   // case-insensitive
+		"github.com.",  // tolerated trailing FQDN dot
+		" github.com ", // surrounding whitespace trimmed
+	}
+	for _, h := range allowed {
+		assert.Truef(t, isAllowedGitHubHost(h), "host %q must be allowed", h)
+	}
+	rejected := []string{
+		"sub.github.com",      // subdomain — credential not scoped here
+		"www.github.com",      // www subdomain — credential not scoped here
+		"ssh.github.com",      // subdomain — credential not scoped here
+		"x.ghe.com",           // GitHub Enterprise — credential not scoped here
+		"my-co.ghe.com",       // GitHub Enterprise — credential not scoped here
+		"github.com.evil.com", // host-confusion suffix
+		"evilgithub.com",      // not the github.com host
+		"ghe.com",             // bare enterprise apex
+		"169.254.169.254",     // link-local IP literal (SSRF)
+		"127.0.0.1",           // loopback IP literal
+		"::1",                 // ipv6 loopback IP literal
+		"",                    // empty
+	}
+	for _, h := range rejected {
+		assert.Falsef(t, isAllowedGitHubHost(h), "host %q must be rejected", h)
+	}
+}
+
+// TestValidateRemoteURL_RejectsSubdomainAndGHEWithClearMessage proves the
+// now-rejected *.github.com subdomain and *.ghe.com enterprise forms fail with a
+// clear, host-specific ValidationError message (not a generic parse error), so an
+// operator who points a mirror at an unauthenticatable host gets an actionable
+// reason rather than a silent unauthenticated failure later.
+func TestValidateRemoteURL_RejectsSubdomainAndGHEWithClearMessage(t *testing.T) {
+	cases := map[string]string{
+		"https://sub.github.com/owner/repo":    "host is not an allowed GitHub host",
+		"https://my-co.ghe.com/owner/repo.git": "host is not an allowed GitHub host",
+		"git@x.ghe.com:owner/repo":             "ssh remote must be git@github.com:owner/repo",
+	}
+	for raw, wantMsg := range cases {
+		err := validateRemoteURL(raw)
+		require.Truef(t, errors.Is(err, ErrValidation),
+			"remote URL %q must be rejected with ErrValidation, got %v", raw, err)
+		var ve *ValidationError
+		require.Truef(t, errors.As(err, &ve), "error for %q must be a *ValidationError", raw)
+		assert.Equalf(t, wantMsg, ve.Reason,
+			"remote URL %q must report a clear reason", raw)
 	}
 }
 

@@ -167,6 +167,26 @@ func (m *fakeMembers) grant(s site.Site, userID uuid.UUID, role gen.SiteRole) {
 	}
 }
 
+// revoke removes a user's membership on a site (and its list_sites row), modeling
+// a member being REMOVED from a project mid-session. After this, GetRole returns
+// pgx.ErrNoRows exactly as the real query would for a deleted site_members row.
+func (m *fakeMembers) revoke(s site.Site, userID uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.roles, memberKey(s.ID, userID))
+	// Drop the list row too, but only if no OTHER user still references this site.
+	stillReferenced := false
+	for key := range m.roles {
+		if strings.HasPrefix(key, s.ID.String()+"|") {
+			stillReferenced = true
+			break
+		}
+	}
+	if !stillReferenced {
+		delete(m.siteRows, s.ID)
+	}
+}
+
 // addUser registers a user's account flags (for the create_site gate).
 func (m *fakeMembers) addUser(u gen.User) {
 	m.mu.Lock()

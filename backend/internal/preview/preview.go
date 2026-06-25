@@ -11,22 +11,34 @@
 // secret derivation, keeping a single source of truth for both halves.
 package preview
 
-import "crypto/sha256"
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+
+	"github.com/necorox-com/kotoji/backend/internal/secretbox"
+)
 
 // secretSeedPrefix domain-separates the preview-grant key from any other HMAC
 // derivation that might reuse the same config inputs.
 const secretSeedPrefix = "kotoji-preview-grant|"
 
-// Secret derives the HMAC-SHA256 key for preview grants from stable config. It
-// binds to long-lived secrets (admin password / OIDC client secret) plus the
-// control + base domains, so a process restart with the same config keeps
-// in-flight preview cookies valid (mirroring the auth login-state key
-// derivation). Grants are short-lived, so even a per-deploy key roll is harmless.
+// Secret derives the HMAC-SHA256 key for preview grants. It is derived from
+// secretbox.ResolveKey — the SINGLE source of truth for key material — so an
+// explicit KOTOJI_SECRET_KEY (REQUIRED in production by the H2 policy) makes this
+// grant key as strong as the at-rest key. Without an explicit key, ResolveKey
+// falls back to a sha256 over the stable server seed (admin password / OIDC
+// client secret plus the control + base domains), so a process restart with the
+// same config keeps in-flight preview cookies valid (mirroring the auth
+// login-state key derivation). Grants are short-lived, so even a per-deploy key
+// roll is harmless. The base key is domain-separated here via HMAC with the
+// secretSeedPrefix label so the preview-grant key never collides with the at-rest
+// or login-state derivations that share those inputs.
 //
 // All inputs are plumbed explicitly (not a config.Config) so this package stays
-// dependency-free and importable from both planes without a config import cycle.
-func Secret(adminPassword, oidcClientSecret, controlBaseURL, baseDomain string) []byte {
-	seed := secretSeedPrefix + adminPassword + "|" + oidcClientSecret + "|" + controlBaseURL + "|" + baseDomain
-	sum := sha256.Sum256([]byte(seed))
-	return sum[:]
+// importable from both planes without a config import cycle.
+func Secret(secretKeyEnv, adminPassword, oidcClientSecret, controlBaseURL, baseDomain string) []byte {
+	base := secretbox.ResolveKey(secretKeyEnv, adminPassword, oidcClientSecret, controlBaseURL, baseDomain)
+	mac := hmac.New(sha256.New, base)
+	mac.Write([]byte(secretSeedPrefix + adminPassword + "|" + oidcClientSecret + "|" + controlBaseURL + "|" + baseDomain))
+	return mac.Sum(nil)
 }
