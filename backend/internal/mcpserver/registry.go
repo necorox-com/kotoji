@@ -259,6 +259,9 @@ func (r *registry) mapError(err error, action string) (*mcp.CallToolResult, erro
 	case errors.Is(err, site.ErrZipTooLarge), errors.Is(err, site.ErrZipTooManyFiles):
 		return toolErr(codeTooLarge, "upload too large", nil), nil
 
+	case errors.Is(err, site.ErrQuotaExceeded):
+		return toolErr(codeQuotaExceeded, "per-site disk quota exceeded", nil), nil
+
 	default:
 		// ErrGit / disk / unknown: protocol error, generic message, logged with
 		// the action for triage. The detail never reaches the model.

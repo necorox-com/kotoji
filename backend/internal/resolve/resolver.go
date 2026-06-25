@@ -1,14 +1,19 @@
 // Package resolve maps an incoming HTTP request to a routing Target on the
 // kotoji data plane. It is the single, swappable abstraction the spec requires:
-// Host-based and path-based resolution both live behind the Resolver interface so
-// the reverse proxy / URL scheme can change without touching the static handler.
+// host-based resolution lives behind the Resolver interface so the reverse proxy /
+// URL scheme can change without touching the static handler.
+//
+// Serving is SUBDOMAIN-ONLY (owner decision, v1): a project is reached EXCLUSIVELY
+// via its {handle}[--{branch}].<base> host. The legacy /host/{handle}/... path
+// fallback was REMOVED (M1) so untrusted project content can never be served
+// same-origin with the control plane's dashboard/API on the control host.
 //
 // This package is intentionally DB-free and pure: it performs only STRUCTURAL
 // validation (grammar + reserved words + the "--" separator rule). Existence
 // (does this handle map to a real site?) is checked later by the serve layer
 // against site.Service, so the resolver stays unit-testable without a DB.
 //
-// routing-and-serving.md §1-§4 is the law for this file; it honors CANONICAL §5
+// routing-and-serving.md §1-§3 is the law for this file; it honors CANONICAL §5
 // (handle/branch regex, the "--" separator, {handle}--published -> 400, the
 // reserved-word list, and the host-label length budget).
 package resolve
@@ -27,8 +32,8 @@ type Target struct {
 	Branch     string // git branch to serve. "published" for the bare handle.
 	IsPreview  bool   // true if a branch was explicitly requested (-- suffix / path branch)
 	IsControl  bool   // true if this is the control-plane host (not a project)
-	Source     Source // how the target was derived (host vs path); for logging/metrics
-	PathPrefix string // path-mode only: the URL prefix to strip ("/host/{handle}[--{branch}]")
+	Source     Source // how the target was derived; always SourceHost now (subdomain-only)
+	PathPrefix string // RETAINED for the serve layer's API; always "" (path mode removed, M1)
 }
 
 // Source records how a Target was derived, for logging/metrics.
@@ -38,8 +43,12 @@ const (
 	// SourceUnknown is the zero value (never returned for a successful resolve).
 	SourceUnknown Source = iota
 	// SourceHost means the target was resolved from the Host header (subdomain).
+	// This is the ONLY source the resolver produces now (subdomain-only serving).
 	SourceHost
-	// SourcePath means the target was resolved from /host/{handle}[--{branch}]/...
+	// SourcePath formerly meant the target was resolved from the /host/{handle}/...
+	// path fallback. Path-mode serving was REMOVED (M1: subdomain-only) so the
+	// resolver no longer produces it; the constant is retained for the serve layer's
+	// path-prefix rendering API, which is now unreachable from this resolver.
 	SourcePath
 )
 
@@ -76,13 +85,12 @@ func (e *ResolveError) Error() string { return e.Code + ": " + e.Msg }
 
 // Stable machine codes for ResolveError.Code.
 const (
-	CodeBadHandle       = "bad_handle"
-	CodeBadBranch       = "bad_branch"
-	CodeNotProjectHost  = "not_project_host"
-	CodeMisdirected     = "misdirected_request"
-	CodeLabelTooLong    = "label_too_long"
-	CodePathFallbackOff = "path_fallback_disabled"
-	CodeEmptyHost       = "empty_host"
+	CodeBadHandle      = "bad_handle"
+	CodeBadBranch      = "bad_branch"
+	CodeNotProjectHost = "not_project_host"
+	CodeMisdirected    = "misdirected_request"
+	CodeLabelTooLong   = "label_too_long"
+	CodeEmptyHost      = "empty_host"
 )
 
 // ---- Structural validation surfaces (no DB) ----
@@ -110,8 +118,11 @@ type Config struct {
 	// ControlLabel is the label that means "control plane" when present as a
 	// subdomain of BaseDomain. Default "" => bare BaseDomain is control.
 	ControlLabel string
-	// EnablePathFallback accepts /host/{handle}/... in addition to Host. Default
-	// true (set explicitly via NewResolver options or the field).
+	// EnablePathFallback is DEPRECATED and now a NO-OP. Serving is subdomain-only
+	// (owner decision, v1): the /host/{handle}/... path fallback was REMOVED so
+	// untrusted project content can never be served same-origin with the control
+	// plane (M1). The field is retained so existing construction sites compile;
+	// its value is ignored.
 	EnablePathFallback bool
 	// TrustForwardedHost reads X-Forwarded-Host instead of Host. MUST be false if
 	// the data plane is ever exposed directly to the internet (X-Forwarded-Host is
@@ -208,9 +219,9 @@ type DefaultResolver struct {
 var _ Resolver = (*DefaultResolver)(nil)
 
 // NewResolver constructs a DefaultResolver with the built-in CANONICAL-grammar
-// validators. BaseDomain is lowercased. EnablePathFallback / TrustForwardedHost
-// are taken from cfg verbatim (callers should set them explicitly; the
-// composition root applies the documented defaults).
+// validators. BaseDomain is lowercased. TrustForwardedHost is taken from cfg
+// verbatim (the composition root applies the documented default). EnablePathFallback
+// is a deprecated no-op (serving is subdomain-only; path mode removed, M1).
 func NewResolver(cfg Config) *DefaultResolver {
 	return NewResolverWith(cfg, builtinValidator{}, builtinValidator{})
 }
@@ -235,11 +246,14 @@ func NewResolverWith(cfg Config, handles HandleValidator, branches BranchValidat
 	}
 }
 
-// Resolve implements Resolver. It tries Host-mode classification first; if the
-// path is under /host/ AND path fallback is enabled, path mode wins (the editor
-// live-preview iframe relies on path mode under the control origin). The
-// precedence is: a /host/ path on the control host resolves as a project via
-// path mode; any other path on the control host is IsControl.
+// Resolve implements Resolver. Serving is SUBDOMAIN-ONLY (owner decision, v1):
+// a project is reached EXCLUSIVELY via its {handle}[--{branch}].<base> host. The
+// control host serves ONLY the control plane; every other host is classified as a
+// project or foreign. Path-mode (/host/{handle}/...) serving is REMOVED so that
+// untrusted project content can NEVER be served same-origin with the dashboard/API
+// on the control origin (it previously could via the path fallback). Because this
+// resolver is the SINGLE source of truth for the data plane, the CombinedRouter,
+// AND the on-demand TLS DecisionFunc, the change applies consistently to all three.
 func (d *DefaultResolver) Resolve(r *http.Request) (Target, error) {
 	host := lowerStripPort(d.effectiveHost(r))
 	if host == "" {
@@ -257,44 +271,24 @@ func (d *DefaultResolver) Resolve(r *http.Request) (Target, error) {
 		return Target{}, herr
 	}
 
-	// Use the ESCAPED path so a percent-encoded branch (e.g. feature%2Fx, the
-	// non-host-safe escape hatch) survives intact for path-mode parsing; the
-	// label is decoded by resolvePath after the first "/" boundary is found.
-	escPath := requestEscapedPath(r)
-
 	switch class {
 	case hostControl:
-		// On the control host, a /host/{label}/... path is a project served via
-		// path mode (path fallback). Everything else is the control plane.
-		if d.cfg.EnablePathFallback && isHostPath(escPath) {
-			return d.resolvePath(escPath)
-		}
+		// The control host serves ONLY the control plane. A /host/{label}/... path
+		// here is NOT a project (subdomain-only serving): it falls through to the
+		// control plane, which 404s the unknown route. This is the M1 fix — the old
+		// path fallback served anonymous project content same-origin with the API.
 		return Target{IsControl: true, Source: SourceHost}, nil
 	case hostProject:
 		return d.resolveProjectLabel(label, SourceHost, "")
 	default:
-		// Foreign host. Path fallback is still allowed (proxy-independent reach):
-		// if the request is a /host/ path, honor it; otherwise it is misdirected.
-		if d.cfg.EnablePathFallback && isHostPath(escPath) {
-			return d.resolvePath(escPath)
-		}
+		// Foreign host: not under the base domain. With subdomain-only serving there
+		// is no path fallback to honor, so the request is misdirected.
 		return Target{}, &ResolveError{
 			Status: http.StatusMisdirectedRequest,
 			Code:   CodeMisdirected,
 			Msg:    "host not under base domain",
 		}
 	}
-}
-
-// requestEscapedPath returns the URL-escaped request path, preferring URL.RawPath
-// (set only when the escaped form differs from the decoded form, e.g. it contains
-// %2F). When RawPath is empty the escaped form equals URL.Path, so we use it
-// directly. url.URL.EscapedPath() implements exactly this preference.
-func requestEscapedPath(r *http.Request) string {
-	if r.URL == nil {
-		return ""
-	}
-	return r.URL.EscapedPath()
 }
 
 type hostClass uint8
@@ -356,7 +350,9 @@ func (d *DefaultResolver) classifyHost(host, base, suffix string) (hostClass, st
 }
 
 // resolveProjectLabel splits {handle}[--{branch}] from a label and validates it.
-// pathPrefix is "" for Host mode and "/host/{label}" for path mode.
+// pathPrefix is always "" now (subdomain-only serving; path mode removed, M1). The
+// parameter is retained so the signature stays stable for the single Host-mode call
+// site and any future re-introduction behind a non-control context.
 func (d *DefaultResolver) resolveProjectLabel(label string, src Source, pathPrefix string) (Target, error) {
 	handle, branch, isPreview := splitLabel(label)
 
@@ -399,35 +395,6 @@ func (d *DefaultResolver) resolveProjectLabel(label string, src Source, pathPref
 	}, nil
 }
 
-// resolvePath handles the /host/{label}/{filepath...} fallback grammar
-// (routing-and-serving.md §4).
-func (d *DefaultResolver) resolvePath(urlPath string) (Target, error) {
-	if !d.cfg.EnablePathFallback {
-		return Target{}, &ResolveError{Status: http.StatusNotFound, Code: CodePathFallbackOff, Msg: "path fallback disabled"}
-	}
-	// Strip the leading "/host/" and take the first segment as the label.
-	rest := strings.TrimPrefix(urlPath, "/host/")
-	// urlPath == "/host" or "/host/" => no label.
-	if rest == "" || rest == urlPath {
-		return Target{}, &ResolveError{Status: http.StatusNotFound, Code: CodeNotProjectHost, Msg: "no project label in path"}
-	}
-	rawLabel := rest
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		rawLabel = rest[:i]
-	}
-	if rawLabel == "" {
-		return Target{}, &ResolveError{Status: http.StatusNotFound, Code: CodeNotProjectHost, Msg: "empty project label in path"}
-	}
-	// Percent-decode the label (non-host-safe branches arrive percent-encoded,
-	// e.g. feature%2Fx). Decoding errors fall through to grammar rejection.
-	decoded := percentDecodeLabel(rawLabel)
-	// Lowercase the label for parity with Host mode (CANONICAL §2.4). The file
-	// path remainder stays case-sensitive and is handled by the static handler.
-	label := strings.ToLower(decoded)
-	pathPrefix := "/host/" + rawLabel
-	return d.resolveProjectLabel(label, SourcePath, pathPrefix)
-}
-
 // effectiveHost picks the authoritative host string (routing-and-serving.md §3.1):
 // X-Forwarded-Host (first token) when trusted, else Host, else URL.Host.
 func (d *DefaultResolver) effectiveHost(r *http.Request) string {
@@ -453,11 +420,6 @@ func splitLabel(label string) (handle, branch string, isPreview bool) {
 		return label[:i], label[i+len("--"):], true
 	}
 	return label, "published", false
-}
-
-// isHostPath reports whether a URL path is under the /host/ fallback prefix.
-func isHostPath(p string) bool {
-	return p == "/host" || strings.HasPrefix(p, "/host/")
 }
 
 // lowerStripPort lowercases a host and strips a trailing :port. IPv6 literals
@@ -488,47 +450,6 @@ func firstHostToken(v string) string {
 		v = v[:i]
 	}
 	return strings.TrimSpace(v)
-}
-
-// percentDecodeLabel does a minimal percent-decode for the path-mode label. We
-// avoid net/url.PathUnescape's strictness (it errors on a stray %), instead
-// best-effort decoding well-formed %XX and leaving anything else verbatim so the
-// grammar validator makes the final call. Backslashes are normalized to slashes
-// nowhere — branches forbid both — so any decoded "/" makes the branch fail
-// validation (fail-closed), which is the desired behavior for non-host-safe refs
-// reaching a host-only grammar.
-func percentDecodeLabel(s string) string {
-	if !strings.ContainsRune(s, '%') {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] == '%' && i+2 < len(s) {
-			hi, ok1 := fromHex(s[i+1])
-			lo, ok2 := fromHex(s[i+2])
-			if ok1 && ok2 {
-				b.WriteByte(hi<<4 | lo)
-				i += 2
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
-}
-
-func fromHex(c byte) (byte, bool) {
-	switch {
-	case c >= '0' && c <= '9':
-		return c - '0', true
-	case c >= 'a' && c <= 'f':
-		return c - 'a' + 10, true
-	case c >= 'A' && c <= 'F':
-		return c - 'A' + 10, true
-	default:
-		return 0, false
-	}
 }
 
 // asResolveError ensures the returned error is a *ResolveError; if a validator

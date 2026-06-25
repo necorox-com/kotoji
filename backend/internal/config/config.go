@@ -105,6 +105,7 @@ const (
 	defaultZipMaxTotalBytes = 209715200        // 200MB
 	defaultZipMaxFiles      = 2000
 	defaultZipMaxRatio      = 100
+	defaultZipMaxEntryBytes = 52428800 // 50MiB per-entry uncompressed cap (site.DefaultMaxEntryUncompressed)
 	defaultZipAllowedExt    = ".html,.htm,.css,.js,.mjs,.json,.svg,.png,.jpg,.jpeg,.gif,.webp,.ico,.woff,.woff2,.ttf,.txt,.md,.map,.xml,.csv,.wasm"
 	defaultSiteQuotaBytes   = 524288000 // 500MB
 	defaultUserSiteQuota    = 50
@@ -172,7 +173,12 @@ type ZipLimits struct {
 	MaxTotalBytes  int64
 	MaxFiles       int
 	MaxRatio       int
-	AllowedExt     []string
+	// MaxEntryBytes is the per-entry UNCOMPRESSED cap (a single file inside the zip).
+	// Previously a silent ~50MiB default in the site layer; now operator-configurable
+	// via KOTOJI_ZIP_MAX_ENTRY_BYTES so a large single asset can be allowed/tightened
+	// without a code change. Maps to site.ZipConfig.MaxEntryUncompressed (M7).
+	MaxEntryBytes int64
+	AllowedExt    []string
 }
 
 // Config is the fully-parsed, validated backend configuration.
@@ -556,7 +562,10 @@ func load(get getenv) (Config, error) {
 		MaxTotalBytes:  getInt64(get, "KOTOJI_ZIP_MAX_TOTAL_BYTES", defaultZipMaxTotalBytes),
 		MaxFiles:       getInt(get, "KOTOJI_ZIP_MAX_FILES", defaultZipMaxFiles),
 		MaxRatio:       getInt(get, "KOTOJI_ZIP_MAX_RATIO", defaultZipMaxRatio),
-		AllowedExt:     splitCSV(getString(get, "KOTOJI_ZIP_ALLOWED_EXT", defaultZipAllowedExt)),
+		// Per-entry uncompressed cap, now operator-configurable (M7). Default keeps the
+		// previous silent site-layer value (50MiB).
+		MaxEntryBytes: getInt64(get, "KOTOJI_ZIP_MAX_ENTRY_BYTES", defaultZipMaxEntryBytes),
+		AllowedExt:    splitCSV(getString(get, "KOTOJI_ZIP_ALLOWED_EXT", defaultZipAllowedExt)),
 	}
 	c.SiteQuotaBytes = getInt64(get, "KOTOJI_SITE_QUOTA_BYTES", defaultSiteQuotaBytes)
 	c.UserSiteQuota = getInt(get, "KOTOJI_USER_SITE_QUOTA", defaultUserSiteQuota)
@@ -655,6 +664,13 @@ func (c Config) validate(prod bool) error {
 		// exclusive so this also rejects any "none,oidc" style combination.
 		if c.ServesControl() && c.NoAuthEnabled() {
 			errs = append(errs, errors.New("KOTOJI_AUTH_MODE=none is not allowed in production"))
+		}
+		// FAIL-CLOSED: the __Host- cookies' Secure attribute is the SOLE cross-subdomain
+		// isolation control (§8.1). If an operator sets KOTOJI_COOKIE_SECURE=false in
+		// production, those cookies are silently downgraded and can leak across origins,
+		// so we refuse to boot rather than serve session/CSRF cookies without Secure.
+		if !c.CookieSecure {
+			errs = append(errs, errors.New("KOTOJI_COOKIE_SECURE=false is not allowed in production"))
 		}
 	}
 

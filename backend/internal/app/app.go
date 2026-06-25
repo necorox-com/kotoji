@@ -253,9 +253,16 @@ func siteConfig(cfg config.Config, store *db.Store) site.Config {
 			MaxUploadBytes:       cfg.Zip.MaxUploadBytes,
 			MaxUncompressedBytes: cfg.Zip.MaxTotalBytes,
 			MaxEntries:           cfg.Zip.MaxFiles,
+			// Per-entry uncompressed cap, now operator-configurable (M7,
+			// KOTOJI_ZIP_MAX_ENTRY_BYTES). The site layer fills its 50MiB default when
+			// this is zero, so an env-only/test path stays on the historical cap.
+			MaxEntryUncompressed: cfg.Zip.MaxEntryBytes,
 			MaxCompressionRatio:  cfg.Zip.MaxRatio,
 			AllowedExt:           cfg.Zip.AllowedExt,
 		},
+		// Per-site disk quota: cumulative repo size is gated before each write so a
+		// tenant cannot grow unbounded via repeated near-limit imports.
+		SiteQuotaBytes: cfg.SiteQuotaBytes,
 	}
 	if store != nil {
 		// MirrorToken: DB token (decrypted) when set, else the env token. Resolved per
@@ -403,9 +410,13 @@ func (a *App) controlLimiter() func(http.Handler) http.Handler {
 // never disagree with what the data plane will actually serve.
 func (a *App) newDataResolver() resolve.Resolver {
 	return resolve.NewResolver(resolve.Config{
-		BaseDomain:         a.cfg.BaseDomain,
-		ControlLabel:       "", // bare BaseDomain is the control host
-		EnablePathFallback: true,
+		BaseDomain:   a.cfg.BaseDomain,
+		ControlLabel: "", // bare BaseDomain is the control host
+		// EnablePathFallback is a DEPRECATED no-op: serving is subdomain-only (M1).
+		// The /host/{handle}/... path fallback was removed so untrusted project
+		// content can never be served same-origin with the control plane. The field
+		// is left set for documentation; the resolver ignores it.
+		EnablePathFallback: false,
 		// X-Forwarded-Host is trusted only behind the documented reverse proxy.
 		TrustForwardedHost: a.cfg.TrustProxyHeaders,
 		// Dynamic base domain: ONLY when KOTOJI_BASE_DOMAIN is unset. When set, leave

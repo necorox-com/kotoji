@@ -87,6 +87,7 @@ func TestStatusFor(t *testing.T) {
 		{ErrNothingToCommit, http.StatusConflict},
 		{ErrZipTooLarge, http.StatusRequestEntityTooLarge},
 		{ErrZipTooManyFiles, http.StatusRequestEntityTooLarge},
+		{ErrQuotaExceeded, http.StatusRequestEntityTooLarge},
 		{ErrZipBadType, http.StatusUnsupportedMediaType},
 		{ErrZipSlip, http.StatusBadRequest},
 		{ErrValidation, http.StatusUnprocessableEntity},

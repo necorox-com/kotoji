@@ -74,6 +74,14 @@ func (g *gitService) ImportZip(ctx context.Context, id uuid.UUID, branch BranchN
 				return e
 			}
 		}
+		// M5 quota gate (BEFORE any write): the current on-disk repo size plus the
+		// incoming content delta must stay within SiteQuotaBytes. The delta is the
+		// sum of the validated, decompressed entry sizes — a conservative upper bound
+		// on what the new commit adds (the tree-replace also reclaims old blobs via
+		// gcRepo below, so this never under-counts the post-commit footprint).
+		if e := g.enforceQuota(id, zipEntriesBytes(extracted)); e != nil {
+			return e
+		}
 		// Tree-replace policy (v1): wipe the worktree (except .git) then write the
 		// validated entries. git add -A stages adds AND deletions.
 		if e := g.replaceWorktree(id, extracted); e != nil {
@@ -99,6 +107,10 @@ func (g *gitService) ImportZip(ctx context.Context, id uuid.UUID, branch BranchN
 			return e
 		}
 		ci = newCI
+		// Tree-replace orphans the prior content's blobs; reclaim them now (under the
+		// lock) so the quota gate on the NEXT import reflects live history, not churn.
+		// Best-effort: a gc failure never fails this import (objects reclaim later).
+		g.gcRepo(ctx, id)
 		return nil
 	})
 	if err != nil {
@@ -107,6 +119,16 @@ func (g *gitService) ImportZip(ctx context.Context, id uuid.UUID, branch BranchN
 	g.refreshServed(ctx, id, branch)
 	g.bestEffortMirror(ctx, id, branch)
 	return ci, nil
+}
+
+// zipEntriesBytes sums the decompressed content sizes of a validated entry set —
+// the quota delta for an import (the bytes the new commit introduces).
+func zipEntriesBytes(entries []zipEntry) int64 {
+	var n int64
+	for _, e := range entries {
+		n += int64(len(e.content))
+	}
+	return n
 }
 
 // zipEntry is a validated, decompressed file ready to be written to the worktree.
@@ -154,16 +176,28 @@ func (g *gitService) validateAndReadZip(zr *zip.Reader) ([]zipEntry, error) {
 		if !allowOK(clean) {
 			return nil, ErrZipBadType
 		}
-		// Per-entry decompressed cap (declared) — cheap pre-read bomb guard.
-		if int64(f.UncompressedSize64) > g.cfg.Zip.MaxEntryUncompressed {
+		// Per-entry decompressed cap (declared) — cheap pre-read bomb guard. M8:
+		// compare in uint64 so a declared size above 2^63 cannot wrap negative and
+		// slip past the cap (the int64 cast did exactly that). MaxEntryUncompressed
+		// is a positive config value, so the cast to uint64 is exact.
+		if f.UncompressedSize64 > uint64(g.cfg.Zip.MaxEntryUncompressed) {
 			return nil, ErrZipTooLarge
 		}
-		// Compression-ratio guard (declared sizes) catches nested bombs early.
+		// Compression-ratio guard (declared sizes) catches nested bombs early. M8:
+		// a CompressedSize64 of 0 is RATIO-UNKNOWN (a lying/streamed header), not a
+		// free pass — we must NOT skip the bomb accounting. When the entry declares
+		// any uncompressed bytes against a zero compressed size, treat the ratio as
+		// effectively infinite and reject; the declared cap above plus the real-byte
+		// LimitReader backstop below still bound a non-declaring header.
 		if f.CompressedSize64 > 0 {
 			ratio := f.UncompressedSize64 / f.CompressedSize64
 			if ratio > uint64(g.cfg.Zip.MaxCompressionRatio) {
 				return nil, ErrZipTooLarge
 			}
+		} else if f.UncompressedSize64 > uint64(g.cfg.Zip.MaxCompressionRatio) {
+			// compressed==0 but declares more uncompressed bytes than a single
+			// compressed byte could legitimately expand to (ratio cap) => bomb-shaped.
+			return nil, ErrZipTooLarge
 		}
 
 		// Read with a hard byte limit so a LYING declared size cannot bomb us: cap

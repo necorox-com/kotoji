@@ -104,77 +104,78 @@ func TestResolve_LabelTooLong(t *testing.T) {
 	}
 }
 
-func TestResolve_PathMode_Table(t *testing.T) {
-	type want struct {
-		handle     string
-		branch     string
-		isPreview  bool
-		source     Source
-		pathPrefix string
-		errStatus  int
-		errCode    string
-	}
-	cfg := prodCfg()
-	cases := []struct {
-		name string
-		cfg  Config
-		host string
-		path string
-		want want
-	}{
-		{"path_published_on_control", cfg, "hosting.example.com", "/host/expense-calc/style.css",
-			want{handle: "expense-calc", branch: "published", source: SourcePath, pathPrefix: "/host/expense-calc"}},
-		{"path_preview_on_control", cfg, "hosting.example.com", "/host/expense-calc--draft/",
-			want{handle: "expense-calc", branch: "draft", isPreview: true, source: SourcePath, pathPrefix: "/host/expense-calc--draft"}},
-		{"path_preview_asset", cfg, "hosting.example.com", "/host/expense-calc--draft/style.css",
-			want{handle: "expense-calc", branch: "draft", isPreview: true, source: SourcePath, pathPrefix: "/host/expense-calc--draft"}},
-		{"path_no_label_404", cfg, "hosting.example.com", "/host/",
-			want{errStatus: http.StatusNotFound, errCode: CodeNotProjectHost}},
-		{"path_host_bare_404", cfg, "hosting.example.com", "/host",
-			want{errStatus: http.StatusNotFound, errCode: CodeNotProjectHost}},
-		{"path_label_lowercased", cfg, "hosting.example.com", "/host/Expense-Calc/Style.CSS",
-			want{handle: "expense-calc", branch: "published", source: SourcePath, pathPrefix: "/host/Expense-Calc"}},
-		{"path_percent_encoded_slash_branch_rejected", cfg, "hosting.example.com", "/host/site--feature%2Fx/",
-			want{errStatus: http.StatusBadRequest, errCode: CodeBadBranch}},
-		{"path_published_via_dashdash_rejected", cfg, "hosting.example.com", "/host/site--published/",
-			want{errStatus: http.StatusBadRequest, errCode: CodeBadBranch}},
-		// path mode works from a foreign host too (proxy-independent reach).
-		{"path_on_foreign_host", cfg, "somecdn.example.org", "/host/expense-calc/",
-			want{handle: "expense-calc", branch: "published", source: SourcePath, pathPrefix: "/host/expense-calc"}},
-	}
+// TestResolve_SubdomainOnly_NoPathServing is the M1 regression guard: serving is
+// subdomain-ONLY. A /host/{handle}/... request to the CONTROL host must NEVER
+// resolve to project content (it would otherwise serve untrusted content
+// same-origin with the dashboard/API). It must route to the control plane
+// instead. The same path on a foreign host is misdirected (421), not a project.
+// Subdomain serving is asserted to still work so the fix is surgical.
+func TestResolve_SubdomainOnly_NoPathServing(t *testing.T) {
+	cfg := prodCfg() // EnablePathFallback is a deprecated no-op; set true here on purpose.
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			d := NewResolver(tc.cfg)
-			got, err := d.Resolve(newReq(tc.host, tc.path))
-			assertResolve(t, got, err, tc.want.handle, tc.want.branch, tc.want.isPreview, false, tc.want.source, tc.want.errStatus, tc.want.errCode)
-			if err == nil && got.PathPrefix != tc.want.pathPrefix {
-				t.Fatalf("PathPrefix: want %q got %q", tc.want.pathPrefix, got.PathPrefix)
+	t.Run("host_path_on_control_routes_to_control_not_project", func(t *testing.T) {
+		d := NewResolver(cfg)
+		// These are exactly the attack shapes the audit flagged: /host/<handle>/evil.html
+		// on the control origin. Each MUST be IsControl (control plane 404s the route),
+		// never a project Target carrying a Handle.
+		for _, p := range []string{
+			"/host/expense-calc/evil.html",
+			"/host/expense-calc/",
+			"/host/expense-calc--draft/style.css",
+			"/host/",
+			"/host",
+			"/host/Expense-Calc/Style.CSS",
+			"/host/site--feature%2Fx/",
+		} {
+			got, err := d.Resolve(newReq("hosting.example.com", p))
+			if err != nil {
+				t.Fatalf("control host %q: unexpected error %v (must route to control)", p, err)
 			}
-		})
-	}
-}
+			if !got.IsControl {
+				t.Fatalf("control host %q: want IsControl (no project serving on control origin), got %+v", p, got)
+			}
+			if got.Handle != "" || got.PathPrefix != "" || got.Source == SourcePath {
+				t.Fatalf("control host %q: leaked project content on control origin: %+v", p, got)
+			}
+		}
+	})
 
-func TestResolve_PathFallbackDisabled(t *testing.T) {
-	cfg := prodCfg()
-	cfg.EnablePathFallback = false
-	d := NewResolver(cfg)
+	t.Run("host_path_on_foreign_host_is_misdirected", func(t *testing.T) {
+		d := NewResolver(cfg)
+		// With path serving removed, a /host/ path on a foreign host has no fallback
+		// to honor and is misdirected (not anonymous project content).
+		_, err := d.Resolve(newReq("somecdn.example.org", "/host/expense-calc/"))
+		re, ok := err.(*ResolveError)
+		if !ok || re.Status != http.StatusMisdirectedRequest || re.Code != CodeMisdirected {
+			t.Fatalf("foreign host /host/ path: want 421 misdirected, got %v", err)
+		}
+	})
 
-	// On the control host, /host/... is no longer a project => control plane.
-	got, err := d.Resolve(newReq("hosting.example.com", "/host/expense-calc/"))
-	if err != nil {
-		t.Fatalf("control host with fallback off should resolve to control, got err %v", err)
-	}
-	if !got.IsControl {
-		t.Fatalf("want IsControl, got %+v", got)
-	}
-
-	// On a foreign host, /host/... with fallback off => 421 misdirected (not a project).
-	_, err = d.Resolve(newReq("evil.com", "/host/expense-calc/"))
-	re, ok := err.(*ResolveError)
-	if !ok || re.Status != http.StatusMisdirectedRequest {
-		t.Fatalf("want 421 misdirected, got %v", err)
-	}
+	t.Run("subdomain_serving_still_works", func(t *testing.T) {
+		d := NewResolver(cfg)
+		// Published via bare handle host.
+		got, err := d.Resolve(newReq("expense-calc.hosting.example.com", "/host/anything/here"))
+		if err != nil {
+			t.Fatalf("subdomain published: unexpected error %v", err)
+		}
+		if got.IsControl || got.Handle != "expense-calc" || got.Branch != "published" || got.Source != SourceHost {
+			t.Fatalf("subdomain published broken: %+v", got)
+		}
+		// A /host/-shaped PATH under a project subdomain is just a normal in-site path;
+		// the resolver still classifies the host as the project (path is the serve
+		// layer's concern), and PathPrefix stays empty (no path-mode stripping).
+		if got.PathPrefix != "" || got.Source == SourcePath {
+			t.Fatalf("subdomain host must not enter path mode: %+v", got)
+		}
+		// Preview via {handle}--{branch} host.
+		pv, err := d.Resolve(newReq("expense-calc--draft.hosting.example.com", "/"))
+		if err != nil {
+			t.Fatalf("subdomain preview: unexpected error %v", err)
+		}
+		if !pv.IsPreview || pv.Branch != "draft" || pv.Source != SourceHost {
+			t.Fatalf("subdomain preview broken: %+v", pv)
+		}
+	})
 }
 
 func TestResolve_EffectiveHost(t *testing.T) {

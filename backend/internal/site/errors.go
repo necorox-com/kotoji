@@ -24,6 +24,10 @@ var (
 	ErrZipTooLarge     = errors.New("site: zip too large")            // 413
 	ErrZipTooManyFiles = errors.New("site: zip too many files")       // 413
 	ErrZipBadType      = errors.New("site: zip disallowed file type") // 415
+	// Quota: the cumulative on-disk size of a site repo would exceed the per-site
+	// disk quota (KOTOJI_SITE_QUOTA_BYTES). Distinct from the per-import zip caps:
+	// each import may pass its own bounds yet still grow the repo past the quota.
+	ErrQuotaExceeded = errors.New("site: per-site disk quota exceeded") // 413 (quota_exceeded)
 	// git wrapper:
 	ErrGit = errors.New("site: git operation failed") // 500
 )
@@ -96,7 +100,8 @@ func statusFor(err error) int {
 		errors.Is(err, ErrNothingToCommit):
 		return 409
 	case errors.Is(err, ErrZipTooLarge),
-		errors.Is(err, ErrZipTooManyFiles):
+		errors.Is(err, ErrZipTooManyFiles),
+		errors.Is(err, ErrQuotaExceeded):
 		return 413
 	case errors.Is(err, ErrZipBadType):
 		return 415

@@ -352,6 +352,49 @@ func TestLogout(t *testing.T) {
 	require.True(t, cleared.MaxAge < 0)
 }
 
+// TestAuthPostSameOrigin is the M6 defense-in-depth gate: the state-changing
+// /auth POSTs are mounted OUTSIDE the /api CSRF group, so a present Origin/Referer
+// host that does NOT match the control host is rejected 403; when both headers are
+// absent the request is allowed (SameSite=Lax remains the primary control).
+func TestAuthPostSameOrigin(t *testing.T) {
+	cases := []struct {
+		name    string
+		origin  string
+		referer string
+		want    int
+	}{
+		// Control host is "hosting.localhost" (from testConfig.ControlBaseURL).
+		{name: "no headers (lenient)", want: http.StatusNoContent},
+		{name: "same-origin Origin", origin: "http://hosting.localhost:8080", want: http.StatusNoContent},
+		{name: "cross-origin Origin", origin: "https://evil.com", want: http.StatusForbidden},
+		{name: "cross-origin Referer (no Origin)", referer: "https://evil.com/x", want: http.StatusForbidden},
+		{name: "same-origin Referer (no Origin)", referer: "http://hosting.localhost:8080/login", want: http.StatusNoContent},
+		// A "null" (opaque/sandboxed) origin never matches a host -> rejected.
+		{name: "null Origin", origin: "null", want: http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, store, _ := newTestAuth(t, &fakeProvider{key: "dev"})
+			u := activeUser(t, false)
+			store.addUser(u)
+			sid, err := a.sessions.Create(context.Background(), u.ID, "ua", "")
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+			req.AddCookie(&http.Cookie{Name: a.sessions.CookieName(), Value: sid})
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.referer != "" {
+				req.Header.Set("Referer", tc.referer)
+			}
+			rec := httptest.NewRecorder()
+			router(a).ServeHTTP(rec, req)
+			require.Equal(t, tc.want, rec.Code)
+		})
+	}
+}
+
 func TestSafeNext(t *testing.T) {
 	tests := []struct {
 		in, want string
@@ -362,6 +405,17 @@ func TestSafeNext(t *testing.T) {
 		{"http://evil.com", "/dashboard"},
 		{"https://evil.com", "/dashboard"},
 		{"relative", "/dashboard"},
+		// M4: a single leading slash followed by a backslash escapes a naive guard
+		// because the browser folds "\" to "/" (so "/\evil.com" -> "//evil.com").
+		{`/\evil.com`, "/dashboard"},
+		// The %5C-decoded form of the same backslash bypass.
+		{"/\\evil.com", "/dashboard"},
+		// Control/whitespace smuggling (tab/newline/CR inside the path).
+		{"/foo\tbar", "/dashboard"},
+		{"/foo\nbar", "/dashboard"},
+		{"/foo\rbar", "/dashboard"},
+		// "https:/evil.com" parses with a scheme but no authority; still off-site.
+		{"https:/evil.com", "/dashboard"},
 	}
 	for _, tc := range tests {
 		require.Equal(t, tc.want, safeNext(tc.in), "next=%q", tc.in)

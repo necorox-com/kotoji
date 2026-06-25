@@ -116,6 +116,46 @@ func TestLoad_ProductionRejectsNoAuth(t *testing.T) {
 	assert.Contains(t, err.Error(), "AUTH_MODE=none is not allowed in production")
 }
 
+// TestLoad_ProductionRejectsInsecureCookies is the M2 fail-closed guard: in
+// production, KOTOJI_COOKIE_SECURE=false is refused at Load because the __Host-
+// cookies' Secure attribute is the sole cross-subdomain isolation control.
+func TestLoad_ProductionRejectsInsecureCookies(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "password"
+	env["KOTOJI_COOKIE_SECURE"] = "false"
+	_, err := LoadFromMap(env)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "KOTOJI_COOKIE_SECURE=false is not allowed in production")
+}
+
+// TestLoad_ProductionAllowsSecureCookies: the same prod env with secure cookies
+// (the production default) loads cleanly — the guard only trips on an explicit
+// downgrade.
+func TestLoad_ProductionAllowsSecureCookies(t *testing.T) {
+	env := productionEnv()
+	env["KOTOJI_AUTH_MODE"] = "password"
+	// KOTOJI_COOKIE_SECURE unset => defaults true in production.
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.True(t, cfg.CookieSecure)
+
+	// Explicit true is also accepted.
+	env["KOTOJI_COOKIE_SECURE"] = "true"
+	cfg, err = LoadFromMap(env)
+	require.NoError(t, err)
+	assert.True(t, cfg.CookieSecure)
+}
+
+// TestLoad_DevelopmentAllowsInsecureCookies: development over plain http may keep
+// KOTOJI_COOKIE_SECURE=false; the invariant is production-only.
+func TestLoad_DevelopmentAllowsInsecureCookies(t *testing.T) {
+	env := devBase()
+	env["KOTOJI_COOKIE_SECURE"] = "false"
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.False(t, cfg.CookieSecure)
+}
+
 func TestLoad_ProductionOIDCRequiresCreds(t *testing.T) {
 	env := productionEnv()
 	env["KOTOJI_AUTH_MODE"] = "oidc"
@@ -171,6 +211,33 @@ func TestLoad_CustomDurationAndAddrs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 48*time.Hour, cfg.SessionTTL)
 	assert.Equal(t, ":9090", cfg.ControlAddr)
+}
+
+// TestLoad_ZipMaxEntryBytes is the M7 guard: the per-entry uncompressed cap is now
+// operator-configurable via KOTOJI_ZIP_MAX_ENTRY_BYTES, defaulting to the previous
+// silent 50MiB value when unset.
+func TestLoad_ZipMaxEntryBytes(t *testing.T) {
+	t.Run("default is 50MiB when unset", func(t *testing.T) {
+		cfg, err := LoadFromMap(devBase())
+		require.NoError(t, err)
+		assert.Equal(t, int64(52428800), cfg.Zip.MaxEntryBytes, "default per-entry cap is 50MiB")
+	})
+
+	t.Run("env override is parsed", func(t *testing.T) {
+		env := devBase()
+		env["KOTOJI_ZIP_MAX_ENTRY_BYTES"] = "104857600" // 100MiB
+		cfg, err := LoadFromMap(env)
+		require.NoError(t, err)
+		assert.Equal(t, int64(104857600), cfg.Zip.MaxEntryBytes)
+	})
+
+	t.Run("invalid value falls back to default", func(t *testing.T) {
+		env := devBase()
+		env["KOTOJI_ZIP_MAX_ENTRY_BYTES"] = "not-a-number"
+		cfg, err := LoadFromMap(env)
+		require.NoError(t, err)
+		assert.Equal(t, int64(52428800), cfg.Zip.MaxEntryBytes)
+	})
 }
 
 // productionEnv returns a production env with the non-auth essentials filled in,

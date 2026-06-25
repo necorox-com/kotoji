@@ -349,6 +349,46 @@ func TestPublish_Success(t *testing.T) {
 	assert.True(t, got.HasPublished)
 }
 
+// TestPublish_RequestMode_NonOwnerForbidden is the MCP-path mirror of the REST
+// publish_mode gate (internal/api/publish.go, M3): on a site in 'request' mode an
+// editor (non-owner) may NOT publish directly — only the owner can. It mirrors the
+// REST 403.
+func TestPublish_RequestMode_NonOwnerForbidden(t *testing.T) {
+	fake := site.NewFakeService()
+	owner := uuid.New()
+	editor := uuid.New()
+	r := newTestRegistry(fake)
+
+	// Seed a 'request'-mode site directly (the default seed is 'direct'), then list
+	// its draft tip so the publish carries a fresh base_sha (isolating the gate).
+	s, err := fake.CreateSite(callCtx(), site.CreateSiteInput{
+		Handle:      site.Handle("reqmode"),
+		OwnerID:     owner,
+		PublishMode: "request",
+		Actor:       site.Actor{UserID: owner, Via: site.SourceEditor},
+	})
+	require.NoError(t, err)
+	_, ref, err := fake.ListFiles(callCtx(), site.ListFilesInput{SiteID: s.ID, Branch: site.BranchDraft})
+	require.NoError(t, err)
+
+	m := fakeMembersOf(r)
+	m.grant(s, owner, gen.SiteRoleOwner)
+	m.grant(s, editor, gen.SiteRoleEditor)
+
+	// Editor (non-owner) with the publish scope is FORBIDDEN to publish directly.
+	res, _, err := r.publish(callCtx(), claims(editor, scopePublish, false), PublishArgs{Site: string(s.Handle), BaseSHA: ref.SHA})
+	require.NoError(t, err)
+	require.True(t, res.IsError)
+	body := decodeErrBody(t, res.StructuredContent)
+	assert.Equal(t, codeForbidden, body.Code)
+	assert.Contains(t, body.Message, "publish requests")
+
+	// The OWNER may always publish directly, even in 'request' mode (REST parity).
+	_, out, err := r.publish(callCtx(), claims(owner, scopePublish, false), PublishArgs{Site: string(s.Handle), BaseSHA: ref.SHA})
+	require.NoError(t, err)
+	assert.NotEmpty(t, out.PublishedCommit)
+}
+
 func TestRollback_UnreachableToSHA_NotFound(t *testing.T) {
 	fake := site.NewFakeService()
 	owner := uuid.New()

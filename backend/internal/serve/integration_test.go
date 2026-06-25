@@ -183,18 +183,21 @@ func TestIntegration_EndToEnd(t *testing.T) {
 		}
 	})
 
-	t.Run("path_mode_preview_base_href_injected", func(t *testing.T) {
+	t.Run("control_host_path_does_not_serve_project_content", func(t *testing.T) {
+		// M1 regression guard: serving is subdomain-ONLY. A /host/{handle}/... request
+		// to the CONTROL host must NOT serve project content same-origin with the
+		// dashboard/API. With no same-binary control handler wired (pure data plane),
+		// the resolver classifies it as IsControl and the handler 404s it — and it must
+		// NEVER 200 with the draft body or inject a path-mode <base href>.
 		grant := authz.SignGrant(siteID, "draft", commitTime.Add(time.Hour))
-		cookieVal := grant
-		// Use a host-only cookie directly (skip the 302 hop) on the control host.
 		resp := serveOnce(h, mkReq("hosting.example.com", "/host/expense-calc--draft/", map[string]string{
-			"Cookie": PreviewCookieName + "=" + cookieVal,
+			"Cookie": PreviewCookieName + "=" + grant,
 		}))
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("path-mode preview want 200, got %d", resp.StatusCode)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("control-host /host/ path must NOT serve a project (want 404), got %d", resp.StatusCode)
 		}
-		if !contains(resp, `<base href="/host/expense-calc--draft/">`) {
-			t.Fatalf("path-mode HTML should have base-href injected")
+		if contains(resp, "DRAFT") || contains(resp, `<base href="/host/`) {
+			t.Fatalf("control-host /host/ path leaked project content same-origin with control plane")
 		}
 	})
 

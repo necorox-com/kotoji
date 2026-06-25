@@ -136,6 +136,11 @@ func statusAndCode(err error) (int, string) {
 		return http.StatusConflict, codeConflict
 	case errors.Is(err, site.ErrZipTooLarge), errors.Is(err, site.ErrZipTooManyFiles):
 		return http.StatusRequestEntityTooLarge, codeTooLarge
+	case errors.Is(err, site.ErrQuotaExceeded):
+		// quota_exceeded → 413 (CANONICAL §3); distinct wire code from too_large so
+		// the client can tell "this single upload is too big" from "you are out of
+		// per-site disk space".
+		return http.StatusRequestEntityTooLarge, codeQuotaExceeded
 	case errors.Is(err, site.ErrZipBadType):
 		return http.StatusUnsupportedMediaType, codeUnsupportedMediaType
 	case errors.Is(err, site.ErrZipSlip):

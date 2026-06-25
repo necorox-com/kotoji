@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -388,6 +389,11 @@ func (a *Auth) selectStartProvider(r *http.Request, requested string) (AuthProvi
 // is read from the form/JSON body and verified by that provider. It coexists with
 // the OIDC GET flow: enabling OIDC never disables this path.
 func (a *Auth) LoginPassword(w http.ResponseWriter, r *http.Request) {
+	// M6 defense-in-depth: this POST is outside the /api CSRF group, so add a
+	// same-origin Origin/Referer allowlist check (SameSite=Lax is the primary guard).
+	if a.rejectCrossOrigin(w, r) {
+		return
+	}
 	prov := a.password
 	if prov == nil {
 		// No non-interactive provider is enabled (oidc-only instance). The caller
@@ -456,7 +462,10 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.completeLogin(w, r, prov, code, ls.Verifier, ls.Nonce, ls.Next)
+	// Re-sanitize the stored next: the value rode through the signed login-state
+	// cookie since Start, so we never trust it blindly here — run it back through
+	// safeNext before the final redirect (open-redirect defense, M4).
+	a.completeLogin(w, r, prov, code, ls.Verifier, ls.Nonce, safeNext(ls.Next))
 }
 
 // completeLogin is the shared tail of every login path: prov.Exchange ->
@@ -546,6 +555,11 @@ func (a *Auth) establishSession(w http.ResponseWriter, r *http.Request, userID u
 // LoginPassword uses), establishes a session, and returns 200 so the caller is
 // immediately authenticated. The password is NEVER logged.
 func (a *Auth) Setup(w http.ResponseWriter, r *http.Request) {
+	// M6 defense-in-depth: this POST is outside the /api CSRF group, so add a
+	// same-origin Origin/Referer allowlist check (SameSite=Lax is the primary guard).
+	if a.rejectCrossOrigin(w, r) {
+		return
+	}
 	// GUARD: the endpoint is live ONLY during first-run. Re-checking here (not just
 	// in /api/config) closes the window where two requests race the same first run:
 	// the second sees the hash written by the first and gets 409.
@@ -637,6 +651,11 @@ func (a *Auth) adminEmail() string {
 // Logout destroys the server session and clears the cookies. Idempotent: a
 // request with no session still returns 204.
 func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
+	// M6 defense-in-depth: this POST is outside the /api CSRF group, so add a
+	// same-origin Origin/Referer allowlist check (SameSite=Lax is the primary guard).
+	if a.rejectCrossOrigin(w, r) {
+		return
+	}
 	if id := a.sessions.readCookie(r); id != "" {
 		_ = a.sessions.Delete(r.Context(), id)
 	}
@@ -864,12 +883,104 @@ func safeNext(next string) string {
 	if next == "" {
 		return "/dashboard"
 	}
+	// Browsers normalize a backslash to a forward-slash in http(s) URLs, so a value
+	// like "/\evil.com" (one slash, NOT "//") would slip past a naive prefix check
+	// and net/http.Redirect would emit it, navigating the browser off-site. Fold
+	// every backslash to a forward-slash FIRST so the checks below see the same
+	// shape the browser will.
+	next = strings.ReplaceAll(next, "\\", "/")
+
 	// Reject protocol-relative ("//host") and absolute URLs ("http://..."); only
 	// a leading single slash path is allowed.
 	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
 		return "/dashboard"
 	}
-	return next
+	// Reject any control/whitespace char (tab/newline/CR/space etc.): these can be
+	// stripped or used to smuggle a different target by the browser/header layer.
+	if strings.ContainsFunc(next, func(r rune) bool {
+		return r <= ' ' || r == 0x7f
+	}) {
+		return "/dashboard"
+	}
+	// Parse as a URL and reject anything that is absolute or carries a Host — e.g.
+	// "https:/evil.com" parses with scheme "https" (no authority) yet must not be
+	// honored; only a pure same-site path survives.
+	u, err := url.Parse(next)
+	if err != nil || u.IsAbs() || u.Host != "" {
+		return "/dashboard"
+	}
+	// Return the cleaned path-only value (drops any scheme/host/query games).
+	return u.EscapedPath()
+}
+
+// sameOriginOK is the M6 defense-in-depth gate for the state-changing /auth POSTs
+// (logout, login-password, setup), which are mounted OUTSIDE the /api CSRF group.
+// SameSite=Lax cookies already block the classic cross-site form/fetch case; this
+// adds a same-origin allowlist on the Origin (preferred) or Referer host:
+//
+//   - if an Origin header is present, its host must equal the control host;
+//   - else if a Referer is present, its host must equal the control host;
+//   - if BOTH are absent we are LENIENT (some legitimate clients omit them, and the
+//     SameSite cookie is the primary control here).
+//
+// It returns true when the request is allowed and false when it must be rejected.
+func (a *Auth) sameOriginOK(r *http.Request) bool {
+	want := a.controlHost(r)
+	// Without a known control host we cannot make a meaningful comparison; stay
+	// lenient (SameSite=Lax remains the primary defense).
+	if want == "" {
+		return true
+	}
+	// Origin is the most trustworthy signal (sent on cross-origin + same-origin
+	// state-changing requests and not spoofable by page script).
+	if origin := r.Header.Get("Origin"); origin != "" {
+		// A literal "null" origin (sandboxed/opaque context) never matches a host.
+		return originHost(origin) == want
+	}
+	// Fall back to Referer when Origin is absent.
+	if ref := r.Header.Get("Referer"); ref != "" {
+		return originHost(ref) == want
+	}
+	// Neither header present: be lenient (defense-in-depth, not the sole control).
+	return true
+}
+
+// controlHost resolves the EFFECTIVE control host (host only, no scheme/port) the
+// /auth POSTs must originate from. It prefers the runtime resolver (env > DB >
+// derived) when wired, falling back to the static cfg.ControlHost / ControlBaseURL.
+func (a *Auth) controlHost(r *http.Request) string {
+	if a.domain != nil {
+		if h := originHost(a.domain.ControlBaseURLFor(r)); h != "" {
+			return h
+		}
+	}
+	if a.cfg.ControlHost != "" {
+		return a.cfg.ControlHost
+	}
+	return originHost(a.cfg.ControlBaseURL)
+}
+
+// originHost extracts the lowercased host (no port) from a URL-or-origin string.
+// It returns "" for an unparseable value or a bare "null" origin.
+func originHost(raw string) string {
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// rejectCrossOrigin enforces sameOriginOK on a state-changing /auth POST, writing
+// a 403 and returning false when the request must be blocked (M6).
+func (a *Auth) rejectCrossOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if !a.sameOriginOK(r) {
+		writeError(w, r, http.StatusForbidden, codeForbidden, "cross-origin request rejected")
+		return true
+	}
+	return false
 }
 
 // clientIP returns the best-effort client IP for the audit/session row. When the

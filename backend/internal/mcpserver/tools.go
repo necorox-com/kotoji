@@ -519,6 +519,13 @@ func (r *registry) publish(ctx context.Context, c TokenInfo, in PublishArgs) (*m
 	if authRes != nil || gerr != nil {
 		return authRes, PublishResult{}, gerr
 	}
+	// publish_mode gating (PARITY with the REST gate in internal/api/publish.go,
+	// M3): an editor (non-owner) may only publish directly when the site is in
+	// 'direct' mode; 'request' mode routes their publish through a GitHub PR, so a
+	// direct publish is forbidden for them. The owner may always publish directly.
+	if ac.role != gen.SiteRoleOwner && ac.site.PublishMode != "direct" {
+		return toolErr(codeForbidden, "this site requires publish requests; only the owner can publish directly", nil), PublishResult{}, nil
+	}
 	if in.BaseSHA == "" {
 		return toolErr(codeValidation, "base_sha: required (tip of the source branch)", nil), PublishResult{}, nil
 	}

@@ -631,3 +631,78 @@ func parseHostOrPath(hostOrPath string) (Handle, BranchName, error) {
 	handle, branch := splitLabel(label)
 	return handle, branch, nil
 }
+
+// ---- per-site disk quota (M5) ----
+
+// repoDiskSize measures the CURRENT on-disk byte footprint of a site repo
+// (CANONICAL §8.4 / KOTOJI_SITE_QUOTA_BYTES). It walks /data/sites/{uuid} summing
+// regular-file sizes but EXCLUDES the materialized `served` trees: those are a
+// derived read cache rebuilt from the committed history, not tenant-controlled
+// data, so counting them would double-charge a tenant for content they cannot
+// directly shrink. The .git object store IS counted (that is the unbounded-growth
+// surface the quota guards). A walk error on an individual entry is skipped
+// (best-effort, fail-open per-file) but a root-stat failure is returned so the
+// caller can decide whether to proceed.
+func (g *gitService) repoDiskSize(id uuid.UUID) (int64, error) {
+	root := g.repoDir(id)
+	servedRoot := filepath.Join(root, "served")
+	var total int64
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			// Skip an entry we cannot stat (e.g. a transient temp dir mid-rename)
+			// rather than aborting the whole measurement.
+			if path == root {
+				return err
+			}
+			return nil //nolint:nilerr // intentional fail-open on a single entry
+		}
+		// Exclude the derived served-tree cache from the tenant's charged footprint.
+		if d.IsDir() && path == servedRoot {
+			return filepath.SkipDir
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil // best-effort: a vanished file contributes 0
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("%w: measure repo size: %v", ErrGit, err)
+	}
+	return total, nil
+}
+
+// enforceQuota rejects a write when the site's CURRENT on-disk size plus the
+// incoming delta would exceed SiteQuotaBytes. A quota <= 0 disables the check. It
+// is called UNDER the write lock, BEFORE the worktree is replaced/committed, so a
+// would-be over-quota import never lands on disk. Returns ErrQuotaExceeded on a
+// breach (mapped to 413/quota_exceeded by the wire layer).
+func (g *gitService) enforceQuota(id uuid.UUID, deltaBytes int64) error {
+	quota := g.cfg.SiteQuotaBytes
+	if quota <= 0 {
+		return nil // quota disabled
+	}
+	current, err := g.repoDiskSize(id)
+	if err != nil {
+		return err
+	}
+	if current+deltaBytes > quota {
+		return ErrQuotaExceeded
+	}
+	return nil
+}
+
+// gcRepo reclaims loose/orphaned objects (e.g. blobs left by a tree-replace whose
+// old content is no longer referenced) so the disk footprint that the quota gates
+// reflects live history rather than churn. It is best-effort: a gc failure must
+// never fail the originating write (the objects are simply reclaimed on the next
+// pass). `--prune=now` drops unreachable objects immediately; `--quiet` keeps the
+// command output clean. Unlike the worktree `prune` at git_helpers.go (which only
+// drops stale worktree admin entries), this reclaims the OBJECT store.
+func (g *gitService) gcRepo(ctx context.Context, id uuid.UUID) {
+	_, _ = g.run(ctx, id, "gc", "--auto", "--quiet", "--prune=now")
+}

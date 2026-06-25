@@ -47,6 +47,11 @@ type Config struct {
 	// only deployments / tests). bestEffortMirror consults it before pushing.
 	MirrorEnabled func(ctx context.Context) bool
 	Zip           ZipConfig
+	// SiteQuotaBytes is the per-site on-disk hard cap (repo + objects + worktree)
+	// enforced by ImportZip/WriteFile BEFORE a write is committed (CANONICAL §8.4 /
+	// KOTOJI_SITE_QUOTA_BYTES). A value <= 0 disables the check (unbounded). Unlike
+	// the per-import zip caps, this bounds CUMULATIVE growth across many imports.
+	SiteQuotaBytes int64
 }
 
 // ZipConfig holds the ImportZip security limits (CANONICAL / site-service.md §7).
@@ -680,6 +685,13 @@ func (g *gitService) WriteFile(ctx context.Context, in WriteFileInput) (CommitIn
 		// Write the blob to the worktree and stage it. Operating on the live
 		// worktree is safe because the branch is checked out lazily below.
 		if e := g.checkoutBranch(ctx, in.SiteID, in.Branch); e != nil {
+			return e
+		}
+		// M5 quota gate (BEFORE the write): the current on-disk repo size plus the
+		// incoming blob must stay within SiteQuotaBytes. Charging the full content
+		// length is a conservative upper bound (an overwrite of an existing path may
+		// add less, but never more).
+		if e := g.enforceQuota(in.SiteID, int64(len(in.Content))); e != nil {
 			return e
 		}
 		full := filepath.Join(g.repoDir(in.SiteID), filepath.FromSlash(in.Path))
