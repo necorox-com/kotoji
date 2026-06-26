@@ -88,7 +88,7 @@
     "breakGlassHint": "Emergency break-glass admin login. Normally, sign in with Google.",
     "accessRestricted": "Access to this instance is restricted. Your account isn't permitted to sign in. Please contact the administrator.",
     "devMode": "Enter dev mode",
-    "internalUse": "Internal use",
+    "internalUse": "Admin sign-in",
     "signingIn": "Signing in…",
     "signOut": "Sign out",
     "notAuthenticated": "Sign in required",

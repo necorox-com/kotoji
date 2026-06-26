@@ -650,7 +650,7 @@ src/app/
             │  └────────────────────┘  │
             │  ─── または ───          │
             │  [ 管理者パスワード… ]    │   ← only if admin-password mode enabled
-            │  small print: 社内利用    │
+            │  small print: 管理者サインイン │
             └──────────────────────────┘
 ```
 - Reads enabled auth modes from backend (`/api/auth/config` or `/api/me` 401 payload). Shows only available providers. Dev/no-auth mode: a clearly-labeled "開発モードで入る" button.

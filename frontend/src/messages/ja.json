@@ -88,7 +88,7 @@
     "breakGlassHint": "緊急時の管理者ログイン（ブレークグラス）です。通常は Google でサインインしてください。",
     "accessRestricted": "このインスタンスへのアクセスは制限されています。サインインを許可されたアカウントではありませんでした。管理者にお問い合わせください。",
     "devMode": "開発モードで入る",
-    "internalUse": "社内利用",
+    "internalUse": "管理者サインイン",
     "signingIn": "サインイン中…",
     "signOut": "サインアウト",
     "notAuthenticated": "サインインが必要です",

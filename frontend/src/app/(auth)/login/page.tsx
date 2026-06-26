@@ -223,7 +223,7 @@ export default function LoginPage() {
             {t("loginTitle")}
           </Button>
           {/* When OIDC is also enabled, frame the password as the emergency path
-              so humans default to Google; otherwise keep the internal-use note. */}
+              so humans default to Google; otherwise keep the admin sign-in note. */}
           <p className="text-center text-xs text-muted-foreground">
             {oidcEnabled ? t("breakGlassHint") : t("internalUse")}
           </p>
