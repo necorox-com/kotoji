@@ -33,6 +33,15 @@ export interface UploadZipArgs {
   message?: string;
   /** Progress callback 0..1 for the UploadDropzone Progress bar. */
   onProgress?: (fraction: number) => void;
+  /**
+   * Per-call handle override. The hook normally binds the handle at call time,
+   * but the create-site flow only learns the new handle AFTER create() resolves
+   * — and React state set in the same tick is not yet visible to the hook's
+   * closure. Passing the handle here makes the import target the right site in
+   * that same tick (otherwise the URL is built with an empty handle → 404 and
+   * the seed silently never lands). Falls back to the hook-bound handle.
+   */
+  handle?: string;
 }
 
 /**
@@ -116,9 +125,10 @@ function uploadZipRequest(
 export function useUploadZip(handle: string, branch: string) {
   const qc = useQueryClient();
   return useMutation<CommitInfo, Error, UploadZipArgs>({
-    mutationFn: (args) => uploadZipRequest(handle, branch, args),
-    onSuccess: () => {
-      const site = queryKeys.site(handle);
+    // Prefer the per-call handle override (create-site flow) over the bound one.
+    mutationFn: (args) => uploadZipRequest(args.handle || handle, branch, args),
+    onSuccess: (_data, args) => {
+      const site = queryKeys.site(args.handle || handle);
       qc.invalidateQueries({ queryKey: site.files(branch) });
       qc.invalidateQueries({ queryKey: site.log(branch) });
       qc.invalidateQueries({ queryKey: site.detail() });

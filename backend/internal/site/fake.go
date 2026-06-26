@@ -737,10 +737,16 @@ func (f *FakeService) GetDiff(ctx context.Context, in DiffOptions) (DiffResult, 
 	} else {
 		toCommit, ok := f.resolveAnyRef(s, in.To)
 		if !ok {
-			return DiffResult{}, ErrNotFound
+			// Mirror the real service: a missing target ref (e.g. `published` on a
+			// never-published site) diffs against an EMPTY tree, surfacing all of
+			// `from` as additions instead of 404ing. Empty toTree + the well-known
+			// empty-tree SHA keeps the wire shape identical to the git backend.
+			toTree = map[string][]byte{}
+			toSHA = emptyTreeSHA
+		} else {
+			toTree = toCommit.tree
+			toSHA = toCommit.sha
 		}
-		toTree = toCommit.tree
-		toSHA = toCommit.sha
 	}
 	files := diffTrees(fromCommit.tree, toTree, in.Path)
 	return DiffResult{FromSHA: fromCommit.sha, ToSHA: toSHA, Files: files}, nil

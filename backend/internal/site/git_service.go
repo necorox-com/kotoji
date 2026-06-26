@@ -85,6 +85,11 @@ const (
 	// hung network fetch/push cannot block a worker forever. 120s is generous for a
 	// large clone/fetch yet finite. Operators can raise/lower it via Config.
 	defaultGitOpTimeout = 120 * time.Second
+	// emptyTreeSHA is git's well-known empty tree object hash (stable across every
+	// repo). Used as a diff endpoint when the target ref does not exist yet (e.g.
+	// the `published` branch before the first publish), so the diff renders all of
+	// the source branch's content as additions rather than failing as not-found.
+	emptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 )
 
 // withDefaults fills unset Config fields so a zero/partial Config is valid.
@@ -964,7 +969,14 @@ func (g *gitService) GetDiff(ctx context.Context, in DiffOptions) (DiffResult, e
 		} else {
 			toSHA, e := g.revParse(ctx, in.SiteID, in.To)
 			if e != nil {
-				return ErrNotFound
+				// The `To` ref does not exist yet (e.g. diffing draft↔published on a
+				// never-published site: the `published` branch is created only by the
+				// first publish). That is NOT "site not found" — it means everything
+				// in `from` is new relative to an empty target. Fall back to git's
+				// well-known empty tree so the diff renders all of `from`'s content as
+				// changes (exactly "what the first publish will introduce"), instead
+				// of 404ing and hiding the publish CTA in the dashboard.
+				toSHA = emptyTreeSHA
 			}
 			res.ToSHA = toSHA
 			rangeArgs = []string{fromSHA, toSHA}

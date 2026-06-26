@@ -576,6 +576,43 @@ func testContract(t *testing.T, factory serviceFactory) {
 		assert.Equal(t, "modified", dr.Files[0].Status)
 	})
 
+	// Regression: diffing draft against a not-yet-created `published` branch (a
+	// never-published site, as the dashboard publish panel does on load) must NOT
+	// 404 — it diffs against the empty tree so all of draft surfaces as additions.
+	// Before the fix this returned ErrNotFound, hiding the publish CTA in the UI.
+	t.Run("GetDiff_missingTargetRef_diffsAgainstEmptyTree", func(t *testing.T) {
+		svc := factory(t)
+		s := newSite(t, svc, "diff-first-publish")
+		base := draftTip(t, svc, s.ID)
+		c1, err := svc.WriteFile(ctx, WriteFileInput{
+			SiteID: s.ID, Branch: BranchDraft, Path: "index.html",
+			Content: []byte("<h1>hi</h1>\n"), BaseSHA: base, Commit: true, Actor: testActor(),
+		})
+		require.NoError(t, err)
+
+		// `published` does not exist yet on a never-published site.
+		dr, err := svc.GetDiff(ctx, DiffOptions{
+			SiteID: s.ID, From: string(BranchDraft), To: string(BranchPublished),
+		})
+		require.NoError(t, err, "diff against a missing published branch must not 404")
+		assert.Equal(t, c1.SHA, dr.FromSHA)
+		assert.Equal(t, emptyTreeSHA, dr.ToSHA)
+		// The diff direction is from→to (draft→published); against the empty
+		// published target the seeded file shows as "deleted" (present in draft,
+		// absent in the empty tree). The load-bearing property is that the diff
+		// SUCCEEDS and is non-empty, so the panel detects changes and shows the
+		// publish CTA rather than the resource-not-found error state.
+		require.NotEmpty(t, dr.Files)
+		var found bool
+		for _, f := range dr.Files {
+			if f.Path == "index.html" {
+				found = true
+				assert.Equal(t, "deleted", f.Status)
+			}
+		}
+		assert.True(t, found, "index.html should appear in the first-publish diff")
+	})
+
 	t.Run("Branches_createDeleteAndReservedRefused", func(t *testing.T) {
 		svc := factory(t)
 		s := newSite(t, svc, "br-site")

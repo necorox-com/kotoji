@@ -13,7 +13,6 @@
  *    arrives at a populated site.
  */
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { ArrowLeft } from "lucide-react";
@@ -23,6 +22,7 @@ import { CreateSiteForm } from "@/components/organisms";
 import { SectionHeading } from "@/components/atoms";
 import { Button } from "@/components/ui/button";
 import { useUploadZip } from "@/lib/api/hooks";
+import { apiClient, call } from "@/lib/api/client";
 import { errorMessage } from "@/lib/api/error";
 
 /** The logical draft branch a new site is seeded onto (CANONICAL §5.2). */
@@ -34,10 +34,12 @@ export default function CreateSitePage() {
   const tNav = useTranslations("nav");
   const router = useRouter();
 
-  // The uploader is bound to a (handle, branch); since the handle is only known
-  // AFTER create, we keep it in state and (re)create the hook with the handle.
-  const [seedHandle, setSeedHandle] = useState<string>("");
-  const upload = useUploadZip(seedHandle, DRAFT_BRANCH);
+  // The uploader's handle is only known AFTER create() resolves. We pass it per
+  // call (args.handle) instead of via React state: a state set in the same tick
+  // is NOT visible to this hook's closure yet, so binding the handle through
+  // state produced an empty-handle URL → 404 and a silently-unseeded site. The
+  // bound handle is left empty and overridden at mutate time.
+  const upload = useUploadZip("", DRAFT_BRANCH);
 
   const breadcrumbs = [
     { label: tNav("dashboard"), href: "/dashboard" },
@@ -50,11 +52,26 @@ export default function CreateSitePage() {
       router.push(`/sites/${handle}`);
       return;
     }
-    // Seed the new site's draft branch with the chosen zip (initial seed: no
-    // baseSha), then navigate once it lands so the site is populated on arrival.
-    setSeedHandle(handle);
+    // Seed the new site's draft branch with the chosen zip, then navigate once it
+    // lands so the site is populated on arrival. Pass the just-created handle
+    // explicitly (see useUploadZip): the hook's bound handle is empty, so this
+    // override is what targets the new site.
+    //
+    // A freshly created site's draft branch is NOT empty — it carries an initial
+    // scaffold commit — so ImportZip's optimistic lock REQUIRES the current draft
+    // tip as baseSha (an empty baseSha is accepted only for a branch with no
+    // commits, otherwise the server returns 422). Read the draft head first and
+    // pass it, so the seed replaces the scaffold instead of being rejected.
     try {
-      await upload.mutateAsync({ file: seedZip });
+      const branches = await call(() =>
+        apiClient.GET("/api/sites/{handle}/branches", {
+          params: { path: { handle } },
+        })
+      );
+      const draftBase = branches.branches.find(
+        (b) => b.name === DRAFT_BRANCH
+      )?.headSha;
+      await upload.mutateAsync({ file: seedZip, handle, baseSha: draftBase });
       toast.success(tUpload("success"));
     } catch (err) {
       // The site exists even if the seed failed; surface the error and still go

@@ -27,6 +27,14 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
+# Bind the Next.js standalone server to ALL interfaces. Docker auto-sets HOSTNAME
+# to the container ID, and `next start`/standalone honours $HOSTNAME (server.js:
+# `process.env.HOSTNAME || "0.0.0.0"`), which resolves to ONLY the first/default
+# network IP. Behind the edge overlay the frontend is also attached to the `edge`
+# network and Traefik routes to its edge-network IP — on which the server would
+# NOT be listening, yielding 502s. Pinning 0.0.0.0 makes it accept on every
+# attached network (no effect on the proxy-less base, where it is single-homed).
+ENV HOSTNAME=0.0.0.0
 
 # Run as the built-in non-root `node` user.
 RUN mkdir -p /app && chown -R node:node /app
