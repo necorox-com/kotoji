@@ -88,6 +88,14 @@ func (c *CSRF) clearCookie(w http.ResponseWriter) {
 }
 
 // readCookie returns the CSRF cookie value, "" if absent.
+//
+// SINGLE-DOMAIN ISOLATION (mirrors SessionManager.readCookie): the double-submit
+// verify reads ONLY c.CookieName() — the `__Host-`-prefixed name in production.
+// A hosted subdomain on the shared parent domain can toss a bare-name
+// `kotoji_csrf` cookie, but the control plane never reads it, so it cannot be
+// used to fixate the CSRF token to an attacker-known value. There is no bare-name
+// fallback in prod; the bare name is read only in dev where `__Host-` is
+// impossible over http.
 func (c *CSRF) readCookie(r *http.Request) string {
 	ck, err := r.Cookie(c.CookieName())
 	if err != nil {

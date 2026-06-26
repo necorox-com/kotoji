@@ -72,6 +72,50 @@ internet:
 - restrict who can publish, and rotate the GitHub PAT / MCP tokens periodically,
 - keep the images current (the GHCR release images are rebuilt per tag).
 
+## Single-domain isolation model
+
+kotoji serves hosted sites on subdomains of the **same registrable domain** as
+the control plane (one DNS wildcard, e.g. `*.hosting.example.com` with the
+control plane at `hosting.example.com`). This is a deliberate operational choice:
+one certificate, one wildcard record, one origin to reason about. The trade-off
+is that hosted content and the control plane share a parent domain, so the
+isolation guarantees below are what make that model safe.
+
+**The `__Host-` guarantee (what is closed).** In production
+(`KOTOJI_COOKIE_SECURE=true`, enforced — the server refuses to boot otherwise),
+the control session and CSRF cookies carry the `__Host-` prefix. By browser rule
+a `__Host-` cookie is **host-only**: it cannot carry a `Domain` attribute and is
+keyed to the exact host, so a sibling subdomain (a hosted site) **cannot** set or
+overwrite it on the shared parent. Just as important, the control plane **only
+reads** the `__Host-`-prefixed cookie names in production — there is no fallback
+to the bare names (`kotoji_session`, `kotoji_csrf`). Therefore a hosted site that
+"tosses" a bare-name cookie onto the shared parent domain is **invisible** to the
+control plane: a tossed cookie cannot shadow a real session, fixate a session id,
+or fixate the CSRF double-submit token. None of kotoji's auth/CSRF logic depends
+on a parent-domain (`Domain=.example.com`) cookie; every control cookie is
+host-only. (In local dev over plain http the bare names are used, because
+browsers reject `__Host-` without `Secure` — that path is not internet-exposed.)
+These properties are pinned by regression tests in
+`backend/internal/auth/cookie_tossing_test.go`.
+
+**Documented residual (what remains).** Cross-*tenant* cookie injection on the
+shared parent is inherent to any single-registrable-domain design: a hosted site
+can still set bare-name cookies that other hosted sites (or the user's browser)
+observe on the shared parent. This does **not** affect the control session/CSRF
+(see above); its impact is confined to *hosted-content* behavior and is low —
+hosted apps are static and are expected to be **cookie-independent**. Fully
+closing cross-tenant cookie injection would require serving hosted content from a
+**separate registrable domain** (a distinct "usercontent" domain, so the browser
+treats it as a different site for cookie scoping). That split is **deliberately
+deferred**: the single-domain model is kept as an operational advantage, and the
+`__Host-` guarantee already removes the control-plane attack surface.
+
+**Recommendation for hosted content.** Keep hosted apps cookie-independent: do
+not rely on cookies for cross-site state when running under the shared parent
+domain, and treat any cookie readable on the parent as untrusted. If you host
+mutually-distrusting tenants that must use cookies, run kotoji behind a separate
+usercontent domain in front of the data plane.
+
 ## Dependency reporting
 
 Routine, non-exploitable dependency-bump notices (e.g. a Dependabot alert with no

@@ -178,6 +178,17 @@ func controlSecurityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Content-Security-Policy", controlPlaneCSP)
+		// Cross-origin isolation (CH1, single-domain hardening): the control plane shares
+		// the registrable domain with hosted sites, so explicitly cut every cross-origin
+		// handle a hosted-site window could grab.
+		//   COOP same-origin: a hosted-site window that opens / is opened by a control
+		//   window gets NO usable window.opener handle to the control plane.
+		//   CORP same-origin: control JSON/assets cannot be no-cors-read cross-origin by
+		//   a hosted site (it would otherwise be readable as an opaque subresource).
+		// The dashboard SPA is SAME-ORIGIN to the control API, so neither value affects
+		// it; both only block genuine cross-origin (hosted-site) access.
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Cross-Origin-Resource-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
 }

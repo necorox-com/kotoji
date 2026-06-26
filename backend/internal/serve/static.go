@@ -116,7 +116,13 @@ func NewHandler(d Deps) *Handler {
 		authz = DenyPreviewAuthz{}
 	}
 	sec := cfg.Security
-	if sec.CSP == "" && sec.ConnectSrc == "" && sec.ReferrerPolicy == "" && sec.PermissionsPolicy == "" {
+	// A fully zero-value Security config => use the locked default. If ANY field is
+	// set (including the single-domain isolation knobs FrameAncestors* /
+	// CrossOriginResourcePolicy, which an operator threads in to allow the dashboard
+	// preview iframe), go through normalize() so that operator value is honored rather
+	// than discarded.
+	if sec.CSP == "" && sec.ConnectSrc == "" && sec.ReferrerPolicy == "" && sec.PermissionsPolicy == "" &&
+		sec.FrameAncestors == "" && sec.FrameAncestorsControlOrigin == "" && sec.CrossOriginResourcePolicy == "" {
 		sec = DefaultSecurityHeaderConfig()
 	} else {
 		sec = sec.normalize()

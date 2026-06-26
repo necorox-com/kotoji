@@ -260,10 +260,17 @@ func TestServe_SecurityHeaders(t *testing.T) {
 		t.Helper()
 		hd := w.Header()
 		csp := hd.Get("Content-Security-Policy")
-		for _, want := range []string{"frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'", "connect-src *"} {
+		// frame-ancestors defaults to 'self' (NOT 'none'): served content must be
+		// framable by itself (and, when a control origin is configured, by the
+		// dashboard preview iframe). A 'none' here would break the preview.
+		for _, want := range []string{"frame-ancestors 'self'", "object-src 'none'", "base-uri 'self'", "connect-src *"} {
 			if !strings.Contains(csp, want) {
 				t.Fatalf("CSP missing %q: %q", want, csp)
 			}
+		}
+		// And it must NOT be the framing-killer value.
+		if strings.Contains(csp, "frame-ancestors 'none'") {
+			t.Fatalf("served CSP must not deny all framing (breaks preview iframe): %q", csp)
 		}
 		if hd.Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("missing nosniff")
@@ -274,14 +281,18 @@ func TestServe_SecurityHeaders(t *testing.T) {
 		if !strings.Contains(hd.Get("Permissions-Policy"), "geolocation=()") {
 			t.Fatalf("missing permissions policy")
 		}
-		if hd.Get("X-Frame-Options") != "DENY" {
-			t.Fatalf("missing XFO")
+		// Served content must NOT carry X-Frame-Options: a DENY/SAMEORIGIN here would
+		// break the dashboard preview iframe (control origin embedding a subdomain).
+		if xfo := hd.Get("X-Frame-Options"); xfo != "" {
+			t.Fatalf("served content must not set X-Frame-Options (breaks preview), got %q", xfo)
 		}
 		if hd.Get("Cross-Origin-Opener-Policy") != "same-origin" {
 			t.Fatalf("missing COOP")
 		}
-		if hd.Get("Cross-Origin-Resource-Policy") != "same-origin" {
-			t.Fatalf("missing CORP")
+		// CORP is same-site (NOT same-origin) so the same-site dashboard preview iframe
+		// can read the served bytes while cross-site embedders cannot.
+		if hd.Get("Cross-Origin-Resource-Policy") != "same-site" {
+			t.Fatalf("CORP want same-site (preview-safe), got %q", hd.Get("Cross-Origin-Resource-Policy"))
 		}
 		if hd.Get("Server") != "kotoji" {
 			t.Fatalf("Server banner want kotoji got %q", hd.Get("Server"))

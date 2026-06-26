@@ -14,6 +14,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path/filepath"
 
 	"github.com/go-chi/chi/v5"
@@ -414,7 +415,15 @@ func (a *App) controlLimiter() func(http.Handler) http.Handler {
 		return nil
 	}
 	lim := ratelimit.New(ratelimit.Config{RPS: float64(a.cfg.RateLimitAPIRPS)})
+	// Mirror auth.SessionManager.CookieName: the session cookie carries the
+	// __Host- prefix in production, so the limiter must key off that SAME
+	// effective name. Reading the bare name in prod (where it is never sent)
+	// silently degrades to IP-keying AND lets a hosted subdomain toss a bare
+	// kotoji_session cookie to pick its own rate-limit bucket.
 	cookieName := a.cfg.SessionCookieName
+	if a.cfg.CookieSecure {
+		cookieName = "__Host-" + cookieName
+	}
 	trust := a.cfg.TrustProxyHeaders
 	keyer := func(r *http.Request) string {
 		if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
@@ -482,10 +491,41 @@ func (a *App) dataHandler(res resolve.Resolver, control http.Handler) *serve.Han
 		Authz:    az,
 		Control:  control, // nil => pure data-plane; non-nil => same-binary combined
 		Config: serve.HandlerConfig{
-			Security: serve.DefaultSecurityHeaderConfig(),
+			// Single-domain isolation: served content allows framing by the control
+			// origin (the dashboard PREVIEW iframe embeds a sibling subdomain) via the
+			// CSP frame-ancestors directive, and uses CORP same-site so that same-site
+			// preview iframe can read the bytes. Thread the control base URL in as the
+			// allowed framing origin; the rest stays at the locked defaults.
+			Security: servedSecurityConfig(a.cfg.ControlBaseURL),
 			Cache:    serve.CacheConfig{}, // zero value: ETag ON + base-href injection ON
 		},
 	})
+}
+
+// servedSecurityConfig builds the data-plane security header config for the single-
+// registrable-domain model. It starts from the locked defaults and allows the control
+// origin to frame served content (the dashboard PREVIEW iframe) via CSP frame-ancestors,
+// while CORP stays at the single-domain-safe "same-site" so that same-site preview can
+// read the bytes. controlBaseURL is the external URL of the control host; its ORIGIN
+// (scheme://host[:port]) is the frame-ancestors source. If it cannot be parsed the
+// default ('self' only) is used — the published site still serves fine, only the preview
+// iframe would be blocked, so this fails safe.
+func servedSecurityConfig(controlBaseURL string) serve.SecurityHeaderConfig {
+	return serve.DefaultSecurityHeaderConfigForControl(originOf(controlBaseURL))
+}
+
+// originOf extracts the ORIGIN (scheme://host[:port]) from a full URL, the form a CSP
+// frame-ancestors source list expects. Returns "" on a missing/unparseable/relative
+// URL so callers fall back to the 'self'-only default (fail-safe).
+func originOf(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // wrapDataRouter wraps a serve.Handler with the common middleware chain, per-IP

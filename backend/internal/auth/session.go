@@ -207,6 +207,18 @@ func (m *SessionManager) ClearCookie(w http.ResponseWriter) {
 }
 
 // readCookie extracts the session id from the request cookie, "" if absent.
+//
+// SINGLE-DOMAIN ISOLATION (architecture.md §8.1, SECURITY.md "Single-domain
+// isolation model"): hosted sites share the control plane's registrable domain,
+// so a hosted subdomain can set a bare-name cookie (e.g. `kotoji_session`) on the
+// shared parent ("cookie tossing"). The control plane MUST NOT accept it. We read
+// ONLY m.CookieName() — which is the `__Host-`-prefixed name in production
+// (secure=true). A `__Host-` cookie is, by browser rule, un-tossable: it cannot
+// carry a Domain attribute and is keyed host-only, so a sibling subdomain can
+// never write it. There is DELIBERATELY no fallback to the bare name in prod; a
+// tossed bare cookie is invisible here and cannot shadow or fixate the session.
+// Only in dev (secure=false, http) does CookieName() return the bare name,
+// because browsers reject `__Host-` without Secure.
 func (m *SessionManager) readCookie(r *http.Request) string {
 	c, err := r.Cookie(m.CookieName())
 	if err != nil {
