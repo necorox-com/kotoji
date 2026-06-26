@@ -227,3 +227,114 @@ jobs:
             frontend/src/lib/api/schema.d.ts \
             backend/internal/db/gen \
             backend/internal/openapi/types.gen.go
+
+  # ---------------------------------------------------------------------------
+  # e2e: the CORE USER JOURNEY in a real browser against a REAL composed stack.
+  #
+  # The base compose is proxy-less (separate :8080/:8081/:3000 ports, no single
+  # origin), so the browser dashboard can't reach /api there. We bring the stack
+  # up WITH the Traefik edge overlay in HTTP mode (KOTOJI_BASE_DOMAIN=
+  # hosting.localhost) so the dashboard, /api, /auth and every served subdomain
+  # share ONE origin reachable at http://hosting.localhost — exactly what the
+  # Playwright suite expects (see e2e/README.md). Auth is password mode with NO
+  # env admin password, so the suite drives the real first-run setup.
+  #
+  # The whole stack runs in Docker on the runner; the test env is the committed,
+  # secret-free e2e/.env.e2e. Health-gating (curl /healthz via the edge) + a
+  # single Playwright retry keep it non-flaky. The stack is ALWAYS torn down and
+  # the HTML report is uploaded on failure for triage.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e (core journey, composed stack)
+    runs-on: ubuntu-latest
+    # ubuntu-latest ships Docker + Compose v2 and curl; nothing extra to install
+    # for the stack itself.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Map hosting.localhost to loopback
+        # Chromium already resolves *.localhost to loopback (RFC 6761), but pin the
+        # bare control host + the test handle host in /etc/hosts too so EVERY path
+        # (curl health gate, any non-browser fetch) is deterministic and never
+        # depends on the runner's wildcard-localhost behavior.
+        run: |
+          echo "127.0.0.1 hosting.localhost" | sudo tee -a /etc/hosts
+
+      - name: Build + start the single-origin stack (edge overlay, HTTP)
+        # Same invocation documented in e2e/README.md. --build ensures the images
+        # match the checked-out source; the committed e2e/.env.e2e pins the test
+        # env (development, HTTP edge, hosting.localhost, password mode, no env
+        # admin password, insecure cookies, a throwaway secret key).
+        run: |
+          docker compose \
+            -f deploy/docker-compose.yml \
+            -f deploy/docker-compose.edge.yml \
+            --env-file e2e/.env.e2e \
+            up -d --build
+
+      - name: Wait for the stack to be healthy
+        # Gate on the control plane's /healthz THROUGH the edge (Host header pins
+        # the bare control host, since the runner has no hosting.localhost DNS).
+        # Poll up to ~3 min; dump compose logs and fail loudly if it never comes
+        # up so a boot error is visible in the job log rather than a mute timeout.
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS -H 'Host: hosting.localhost' http://127.0.0.1/healthz >/dev/null 2>&1; then
+              echo "control plane healthy after ${i} attempt(s)"
+              # Also confirm the frontend (UI) renders on the bare host.
+              curl -fsS -H 'Host: hosting.localhost' http://127.0.0.1/ >/dev/null && \
+                echo "frontend reachable on the single origin"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::stack did not become healthy in time"
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.edge.yml logs --no-color
+          exit 1
+
+      - name: Install e2e deps
+        working-directory: e2e
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the core-journey e2e suite
+        working-directory: e2e
+        env:
+          # The single-origin host the suite drives. The runner's DNS resolves
+          # *.localhost (and bare localhost) to loopback, and Chromium resolves
+          # <handle>.hosting.localhost to loopback per RFC 6761 — so both the
+          # control host and served subdomains reach the edge on :80.
+          KOTOJI_E2E_BASE_URL: http://hosting.localhost
+          KOTOJI_E2E_BASE_DOMAIN: hosting.localhost
+          KOTOJI_E2E_ADMIN_PASSWORD: e2e-admin-pass-123
+        run: npm test
+
+      - name: Upload Playwright report (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Tear down the stack
+        # Always: free the runner and ensure no state leaks between jobs/reruns.
+        if: always()
+        run: |
+          docker compose \
+            -f deploy/docker-compose.yml \
+            -f deploy/docker-compose.edge.yml \
+            down -v

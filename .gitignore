@@ -16,10 +16,22 @@ backend/bin/
 /data/
 *.log
 
+# Backup artifacts produced by deploy/backup.sh (DB dumps + data tarballs may
+# contain real site data/secrets — never commit them to the public repo).
+deploy/backups/
+
 # Env / secrets
 .env
 .env.*
 !.env.example
+# The e2e test env is COMMITTED and secret-free (throwaway localhost test values).
+!e2e/.env.e2e
+
+# Playwright e2e artifacts
+e2e/test-results/
+e2e/playwright-report/
+e2e/blob-report/
+e2e/playwright/.cache/
 
 # necorox-specific deployment artifacts — keep OUT of the public OSS repo
 deploy/cf-dns-backup-*.json

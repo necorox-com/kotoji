@@ -1,0 +1,13 @@
+# Issue template chooser config.
+# blank_issues_enabled: keep true so maintainers/power users can still file a
+# freeform issue when neither template fits.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability (private)
+    # Do NOT report vulnerabilities in public issues — route reporters to the
+    # private advisory flow documented in SECURITY.md.
+    url: https://github.com/necorox-com/kotoji/security/advisories/new
+    about: Report a security vulnerability privately via GitHub Security Advisories. See SECURITY.md — do not open a public issue.
+  - name: Deployment & configuration guide
+    url: https://github.com/necorox-com/kotoji/blob/main/deploy/README.md
+    about: Setup, env vars, the three deployment modes, and the MCP connection guide.

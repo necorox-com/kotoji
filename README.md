@@ -67,13 +67,27 @@ kotoji fills that gap.
 
 ## Quick start (local)
 
+The base compose is deliberately **proxy-less** (separate `:8080` control,
+`:8081` serve and `:3000` UI ports — see [Production](#production)), so the
+*dashboard* lives behind a single-origin edge. For a one-URL local run, bring up
+the base stack **with the turnkey Traefik overlay** in plain-HTTP mode:
+
 ```bash
 git clone https://github.com/necorox-com/kotoji
-cd kotoji
-docker compose up
+cd kotoji/deploy
+cp .env.example .env   # the defaults already target hosting.localhost in HTTP mode
+docker compose -f docker-compose.yml -f docker-compose.edge.yml up -d --build
 ```
 
-Then open `http://kotoji.localhost:8080`. Any `*.localhost` subdomain resolves to `127.0.0.1` automatically — no DNS or TLS setup needed locally.
+Then open **`http://hosting.localhost`** — one origin serves the dashboard,
+`/api`, and every published site at `<handle>.hosting.localhost`. Any
+`*.localhost` host resolves to `127.0.0.1` automatically, so no DNS or TLS setup
+is needed locally. First run shows the admin-password setup screen.
+
+> Why the overlay? The base `docker-compose.yml` alone publishes the API and the
+> UI on *separate* ports with no proxy, so the browser dashboard can't reach
+> `/api` same-origin — the edge overlay (or your own proxy) is what assembles the
+> single origin. See [Production](#production) for the proxy-less mode.
 
 > Detailed setup, configuration and the MCP connection guide live in [`docs/`](./docs); the deployment guide is in [`deploy/README.md`](./deploy/README.md).
 
@@ -118,6 +132,20 @@ One-time infra; after this, new projects need no changes:
 Leave the ACME vars empty and the overlay serves plain **HTTP** — handy for
 `hosting.localhost` and first runs.
 
+### Run prebuilt images (GHCR)
+
+Don't want to build from source? Each `v*` release publishes multi-arch
+(`amd64` + `arm64`) images to GHCR. Add the `docker-compose.ghcr.yml` overlay to
+swap the `build:` blocks for the published
+`ghcr.io/necorox-com/kotoji-backend` / `-frontend` images:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml up -d
+```
+
+It composes with the edge/TLS overlays the same way; pin a tag with
+`KOTOJI_IMAGE_TAG` (defaults to `latest`).
+
 ## Status
 
 ✅ Implemented and deployed (MVP). The full stack ships and runs: upload/serve, Monaco
@@ -125,6 +153,13 @@ editing, per-branch previews, draft → publish, the MCP server with per-user
 membership-capped tokens, GUI GitHub-mirror config, first-run admin setup, boot-time
 migrations, and the opt-in Traefik turnkey overlay. Expect rough edges and breaking
 changes while the API surface settles.
+
+## Contributing & security
+
+Contributions are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the
+build/test/lint and codegen commands and the PR workflow. Found a vulnerability?
+Please report it privately via [`SECURITY.md`](./SECURITY.md), not a public
+issue.
 
 ## License
 

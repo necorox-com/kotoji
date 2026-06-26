@@ -30,6 +30,7 @@ Read top-to-bottom the first time; thereafter use as a lookup.
 - [`contracts/openapi.yaml`](./contracts/openapi.yaml) — the REST API source of truth (Go ↔ Next codegen). Includes the per-user `/api/tokens` endpoints.
 - [`contracts/consistency-report.md`](./contracts/consistency-report.md) — **read before implementing.** Cross-document consistency review: every naming/type/grammar/auth divergence between the docs above, with the **canonical resolution** for each, plus the consolidated, prioritized (P0/P1/P2) list of all open questions / 考慮漏れ and recommended resolutions.
 - [`IMPLEMENTATION-PLAN.md`](./IMPLEMENTATION-PLAN.md) — the concrete build plan: exact monorepo folder structure, Go module + npm dependency lists, and the phased task breakdown (scaffold → migrations → SiteService → auth → REST/upload → data plane → MCP → frontend) noting what parallelizes and which decisions to confirm before coding.
+- [`operations.md`](./operations.md) — **Day-2 ops.** Backup/restore (`deploy/backup.sh` + `deploy/restore.sh`), upgrade (forward-only advisory-locked migrations → safe rolling restart; preserve `KOTOJI_SECRET_KEY`), health (`/healthz` + `/readyz`) & structured slog logs, and disaster recovery (re-clone from the GitHub mirror when enabled). Pairs with [`deploy/README.md`](../deploy/README.md) (first-time deploy + the three TLS/edge modes).
 
 ## Status of referenced-but-not-yet-written artifacts
 

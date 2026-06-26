@@ -207,6 +207,8 @@ false` (no trusted proxy in front) and `KOTOJI_COOKIE_SECURE=true`.
 | `backend.Dockerfile` / `frontend.Dockerfile` | Multi-stage build images. |
 | `.env.example` | Annotated env template. Copy to `.env`. |
 | `npm/README.md` | Nginx Proxy Manager / Caddy configs for mode (a). |
+| `backup.sh` | Day-2 backup: `pg_dump` + tar of the data volume into `backups/<stamp>/`. See [`docs/operations.md`](../docs/operations.md). |
+| `restore.sh` | Inverse of `backup.sh` (restores DB + data volume; guarded by a `yes` confirmation). |
 
 ## Health checks
 

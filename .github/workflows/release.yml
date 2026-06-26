@@ -1,0 +1,109 @@
+# Release: build and publish multi-arch container images for both kotoji
+# services to GitHub Container Registry (GHCR).
+#
+# Triggers:
+#   - a pushed git tag matching v* (e.g. v0.1.0)   -> the real release path
+#   - workflow_dispatch                            -> manual re-run / dry build
+#
+# It builds linux/amd64 + linux/arm64 images for the backend and the frontend
+# from the SAME Dockerfiles + build contexts the Compose stack uses
+# (deploy/backend.Dockerfile with context backend/, deploy/frontend.Dockerfile
+# with context frontend/), then pushes them as:
+#   ghcr.io/<owner>/kotoji-backend:<tag>   + :latest
+#   ghcr.io/<owner>/kotoji-frontend:<tag>  + :latest
+# The image namespace tracks github.repository_owner so a fork publishes under
+# its OWN owner (necorox-agnostic — no hardcoded org).
+#
+# It does NOT run on pull_request, and never pushes from a PR: a fork PR cannot
+# obtain a package-write token, and we only set push=true here.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Serialize releases per ref so two tag pushes can't race the registry. We do
+# NOT cancel in-progress: a half-pushed manifest is worse than a queued one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least privilege: read the repo, write packages (push to GHCR). Nothing else.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    name: build & push images (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Build both images in parallel; one failing should not silently leave the
+      # other half-released, so don't fail-fast — surface both results.
+      fail-fast: false
+      matrix:
+        include:
+          - service: backend
+            context: backend
+            dockerfile: deploy/backend.Dockerfile
+          - service: frontend
+            context: frontend
+            dockerfile: deploy/frontend.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      # buildx is required for multi-platform (linux/amd64,linux/arm64) builds.
+      - name: Set up QEMU (cross-arch emulation for arm64)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          # The workflow's GITHUB_TOKEN, scoped by `permissions: packages: write`
+          # above. No PAT, no stored secret.
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derive tags + OCI labels. On a v* tag push this yields the semver tag and
+      # :latest; on workflow_dispatch from a branch it yields a branch tag (and
+      # :latest only on the default branch). github.repository_owner is lowercased
+      # to a valid image namespace (GHCR rejects uppercase).
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/kotoji-${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=branch
+          # `latest=auto`: docker/metadata-action adds :latest on any git-tag push
+          # (so a v0.1.0 tag publishes both :v0.1.0 and :latest — the tag the GHCR
+          # overlay defaults to) AND on the default branch for the dispatch case.
+          flavor: |
+            latest=auto
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          # Never push from a pull_request event (defensive; this workflow has no
+          # pull_request trigger, but keep the invariant explicit).
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Stamp the built binary version from the git ref (Dockerfiles accept a
+          # VERSION build-arg; harmless for the frontend which ignores it).
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          # Speed up repeat builds via the GitHub Actions cache backend.
+          cache-from: type=gha,scope=kotoji-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=kotoji-${{ matrix.service }}
+          provenance: false

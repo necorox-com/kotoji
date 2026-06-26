@@ -1,0 +1,6 @@
+# Playwright + Node artifacts for the e2e suite.
+node_modules/
+test-results/
+playwright-report/
+playwright/.cache/
+blob-report/

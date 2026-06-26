@@ -1,0 +1,22 @@
+{
+  // Self-contained tsconfig for the Playwright suite. It is deliberately separate
+  // from frontend/tsconfig.json so the e2e tests can be type-checked (and run)
+  // without pulling in the Next.js app's module graph or build tooling.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}

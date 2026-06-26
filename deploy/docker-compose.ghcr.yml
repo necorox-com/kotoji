@@ -1,0 +1,35 @@
+# kotoji GHCR overlay — run PREBUILT images instead of building from source.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml up -d
+#
+# The base file (docker-compose.yml) defines backend/frontend with `build:`
+# blocks that compile from the sibling backend/ and frontend/ source trees. This
+# overlay swaps each `build:` for a published `image:` from GitHub Container
+# Registry, so an operator with no Go/Node toolchain (and no source checkout
+# beyond deploy/) can boot the stack from the release images that release.yml
+# publishes. Everything else — env, volumes, ports, healthchecks, depends_on —
+# is inherited UNCHANGED from the base; only the image source changes.
+#
+# Images are published by .github/workflows/release.yml on each v* tag, tagged
+# with the semver version AND `latest`. Pin to a specific tag for reproducible
+# deploys (e.g. :v0.1.0); :latest tracks the newest release.
+#
+# Compose this with the edge/tls overlays exactly as you would the base, e.g.:
+#   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml \
+#                  -f docker-compose.edge.yml up -d
+#
+# Forks: the org is templated from KOTOJI_IMAGE_REPO so a fork can point at its
+# own GHCR namespace without editing this file. Defaults to the upstream owner.
+
+name: kotoji
+
+services:
+  backend:
+    # `!reset` clears the base `build:` mapping (Compose v2.24+) so Compose uses
+    # the image below instead of trying to build from ../backend.
+    build: !reset null
+    image: ${KOTOJI_IMAGE_REPO:-ghcr.io/necorox-com}/kotoji-backend:${KOTOJI_IMAGE_TAG:-latest}
+
+  frontend:
+    build: !reset null
+    image: ${KOTOJI_IMAGE_REPO:-ghcr.io/necorox-com}/kotoji-frontend:${KOTOJI_IMAGE_TAG:-latest}
