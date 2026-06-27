@@ -1,0 +1,10 @@
+# Keep this directory tracked in git even though it is empty.
+#
+# The Next.js standalone Docker build (deploy/frontend.Dockerfile) does
+# `COPY --from=build /app/public ./public`. git does not store empty
+# directories, so without this file a clean CI checkout has no public/ and the
+# COPY fails with "/app/public: not found" (the build only passed locally
+# because the empty dir physically existed in the working tree).
+#
+# App icons (favicon.ico, icon.svg) live in src/app/ per the App Router
+# convention, so public/ is legitimately empty — but it must still exist.
