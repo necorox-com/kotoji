@@ -5,6 +5,23 @@ A small, self-contained, multi-file **static site** that doubles as a
 publish it as their very first kotoji site and immediately have a working,
 on-box usage guide.
 
+## Language (JA-primary, EN toggle)
+
+The pages are **Japanese-primary** (`<html lang="ja">`) with **English as a
+secondary toggle**. Every translatable string is authored twice — a
+`.lang-ja` element (shown by default) and a `.lang-en` element (hidden by
+default). A **「日本語 / English」** button in the header flips the
+`body.lang-en` class, which swaps which set CSS shows, and updates
+`document.documentElement.lang`.
+
+- The choice is persisted in `localStorage` under `kotoji-guide-lang`
+  (`ja` | `en`, default `ja`) and re-applied on load.
+- The toggle is a **progressive enhancement**: with JavaScript disabled the
+  page degrades safely to **Japanese** (the default), because the show/hide is
+  pure CSS — `.lang-en { display: none }` plus
+  `body.lang-en .lang-ja { display: none }` /
+  `body.lang-en .lang-en { display: revert }`.
+
 ## What's in here
 
 ```
@@ -12,7 +29,7 @@ getting-started/
 ├── index.html      # the main usage guide (6 steps + optional extras)
 ├── features.html   # a second page (demonstrates page-to-page navigation)
 ├── css/style.css   # self-contained styling (system fonts, dark-friendly, cards)
-├── js/app.js       # progressive enhancement (copy buttons, year stamp, active nav)
+├── js/app.js       # progressive enhancement (language toggle, copy buttons, year stamp, active nav)
 └── README.md       # this file
 ```
 

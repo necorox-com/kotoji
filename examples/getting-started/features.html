@@ -1,16 +1,17 @@
 <!DOCTYPE html>
 <!--
-  kotoji · Getting Started — second page (features overview).
-  Shares css/style.css and js/app.js with index.html to demonstrate
-  multi-file, page-to-page navigation. Same CSP constraint: only
-  same-origin relative assets, no external CDNs.
+  kotoji · はじめかた / Getting Started — 2 ページ目（機能の概要）。
+  index.html と css/style.css・js/app.js を共有し、マルチファイル・
+  ページ間ナビゲーションを示します。同じ CSP 制約: 同一オリジンの
+  相対アセットのみ、外部 CDN なし。
+  言語は日本語が主・英語が従（.lang-ja / .lang-en + ヘッダーのトグル）。
 -->
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Features · kotoji</title>
-  <meta name="description" content="What kotoji gives you: self-hosting, MCP-native AI access, git-as-source-of-truth, in-browser editing, per-branch previews, and optional TLS." />
+  <title>機能一覧 · kotoji</title>
+  <meta name="description" content="kotoji が提供するもの: セルフホスト、MCP ネイティブな AI アクセス、唯一の真実としての git、ブラウザ内編集、ブランチ別プレビュー、任意の TLS。" />
   <link rel="stylesheet" href="css/style.css" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23c9821a' d='M16 2 7 9h18zM10 11h12l-2 4H12zM6 17h20l-3 5H9zM12 24h8v6h-8z'/%3E%3C/svg%3E" />
 </head>
@@ -23,69 +24,114 @@
         </svg>
         <span>kotoji</span>
       </a>
-      <nav class="nav" aria-label="Site pages">
-        <a href="index.html">Getting started</a>
-        <a href="features.html" class="active" aria-current="page">Features</a>
+      <nav class="nav" aria-label="サイト内ページ">
+        <a href="index.html"><span class="lang-ja">はじめかた</span><span class="lang-en">Getting started</span></a>
+        <a href="features.html" class="active" aria-current="page"><span class="lang-ja">機能一覧</span><span class="lang-en">Features</span></a>
         <a href="https://github.com/necorox-com/kotoji">GitHub</a>
       </nav>
+      <!-- 言語トグル: 既定は日本語、クリックで英語へ。 -->
+      <button type="button" class="lang-toggle" data-lang-toggle aria-pressed="false">
+        <span class="lang-ja">日本語 / English</span>
+        <span class="lang-en">English / 日本語</span>
+      </button>
     </div>
   </header>
 
   <main>
     <div class="hero">
       <div class="wrap">
-        <span class="pill">Overview</span>
-        <h1>What kotoji gives you.</h1>
+        <span class="pill"><span class="lang-ja">概要</span><span class="lang-en">Overview</span></span>
+        <h1>
+          <span class="lang-ja">kotoji が提供するもの。</span>
+          <span class="lang-en">What kotoji gives you.</span>
+        </h1>
         <p class="lede">
-          The one combination nothing else offers in a single place:
-          self-hosting + MCP-native AI access + git-as-source-of-truth +
-          a non-engineer-friendly editor.
+          <span class="lang-ja">
+            他のどこも一か所では提供しない、この組み合わせ —
+            セルフホスト + MCP ネイティブな AI アクセス + 唯一の真実としての git +
+            非エンジニアにやさしいエディタ。
+          </span>
+          <span class="lang-en">
+            The one combination nothing else offers in a single place:
+            self-hosting + MCP-native AI access + git-as-source-of-truth +
+            a non-engineer-friendly editor.
+          </span>
         </p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="index.html">← Back to the guide</a>
+          <a class="btn btn-primary" href="index.html">
+            <span class="lang-ja">← ガイドに戻る</span>
+            <span class="lang-en">← Back to the guide</span>
+          </a>
         </div>
       </div>
     </div>
 
     <section>
       <div class="wrap">
-        <h2>Core features</h2>
+        <h2><span class="lang-ja">主な機能</span><span class="lang-en">Core features</span></h2>
         <div class="grid">
           <div class="card">
-            <h3>Upload &amp; serve</h3>
-            <p>Drop a <code>.zip</code> of static files and get an instant URL — any asset-path style works.</p>
+            <h3><span class="lang-ja">アップロード &amp; 配信</span><span class="lang-en">Upload &amp; serve</span></h3>
+            <p>
+              <span class="lang-ja">静的ファイルの <code>.zip</code> をドロップすれば即座に URL が手に入ります。どんなアセットパスの書き方でも動きます。</span>
+              <span class="lang-en">Drop a <code>.zip</code> of static files and get an instant URL — any asset-path style works.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Per-project subdomains</h3>
-            <p>Each tool lives at <span class="url">your-tool.example.com</span>, isolated on its own origin.</p>
+            <h3><span class="lang-ja">プロジェクト別サブドメイン</span><span class="lang-en">Per-project subdomains</span></h3>
+            <p>
+              <span class="lang-ja">各ツールは <span class="url">your-tool.example.com</span> に住み、独自のオリジンで隔離されます。</span>
+              <span class="lang-en">Each tool lives at <span class="url">your-tool.example.com</span>, isolated on its own origin.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>In-browser editing</h3>
-            <p>A Monaco editor with diff view for quick fixes — no checkout, no local toolchain.</p>
+            <h3><span class="lang-ja">ブラウザ内編集</span><span class="lang-en">In-browser editing</span></h3>
+            <p>
+              <span class="lang-ja">差分ビュー付きの Monaco エディタでさっと修正 — チェックアウトもローカルのツールチェーンも不要です。</span>
+              <span class="lang-en">A Monaco editor with diff view for quick fixes — no checkout, no local toolchain.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>MCP-native</h3>
-            <p>Connect Claude (or any MCP client) to <code>list / read / write / publish</code> your sites directly.</p>
+            <h3><span class="lang-ja">MCP ネイティブ</span><span class="lang-en">MCP-native</span></h3>
+            <p>
+              <span class="lang-ja">Claude（または任意の MCP クライアント）を接続して、サイトを直接 <code>list / read / write / publish</code> できます。</span>
+              <span class="lang-en">Connect Claude (or any MCP client) to <code>list / read / write / publish</code> your sites directly.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Per-user tokens</h3>
-            <p>One token belongs to you and spans every project you're a member of; effective scope = token ∩ role.</p>
+            <h3><span class="lang-ja">ユーザー単位トークン</span><span class="lang-en">Per-user tokens</span></h3>
+            <p>
+              <span class="lang-ja">1 つのトークンはあなたに属し、メンバーである全プロジェクトにまたがります。実効スコープ = トークン ∩ ロール。</span>
+              <span class="lang-en">One token belongs to you and spans every project you're a member of; effective scope = token ∩ role.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>git is the truth</h3>
-            <p>Every save is a commit. History, diff and rollback come for free.</p>
+            <h3><span class="lang-ja">git が真実</span><span class="lang-en">git is the truth</span></h3>
+            <p>
+              <span class="lang-ja">すべての保存がコミットです。履歴・差分・ロールバックが無料で付いてきます。</span>
+              <span class="lang-en">Every save is a commit. History, diff and rollback come for free.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Draft → published</h3>
-            <p>Work safely on branches; promote to production in one action. Each branch gets a preview URL.</p>
+            <h3><span class="lang-ja">下書き → 公開</span><span class="lang-en">Draft → published</span></h3>
+            <p>
+              <span class="lang-ja">ブランチ上で安全に作業し、ワンアクションで本番へ昇格。各ブランチにプレビュー URL が付きます。</span>
+              <span class="lang-en">Work safely on branches; promote to production in one action. Each branch gets a preview URL.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Visibility tiers</h3>
-            <p>Public, Members or Private per site — Private by default.</p>
+            <h3><span class="lang-ja">公開範囲のティア</span><span class="lang-en">Visibility tiers</span></h3>
+            <p>
+              <span class="lang-ja">サイトごとに Public・Members・Private — 既定は Private。</span>
+              <span class="lang-en">Public, Members or Private per site — Private by default.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>GitHub mirror &amp; TLS</h3>
-            <p>Optional off-box backup on every publish, and an opt-in Traefik overlay for automatic wildcard HTTPS.</p>
+            <h3><span class="lang-ja">GitHub ミラー &amp; TLS</span><span class="lang-en">GitHub mirror &amp; TLS</span></h3>
+            <p>
+              <span class="lang-ja">公開のたびの任意の外部バックアップと、自動ワイルドカード HTTPS のためのオプトイン Traefik オーバーレイ。</span>
+              <span class="lang-en">Optional off-box backup on every publish, and an opt-in Traefik overlay for automatic wildcard HTTPS.</span>
+            </p>
           </div>
         </div>
       </div>
@@ -93,13 +139,25 @@
 
     <section>
       <div class="wrap">
-        <h2>Why self-host?</h2>
+        <h2><span class="lang-ja">なぜセルフホスト?</span><span class="lang-en">Why self-host?</span></h2>
         <ul class="clean">
-          <li>SaaS builders (Val Town, v0, Bolt, Lovable) are proprietary and can't be self-hosted.</li>
-          <li>Self-hosted PaaS (Coolify, Dokploy) assume a git-push CI flow — no in-browser editor, no AI integration.</li>
-          <li>kotoji combines all four pieces on <strong>your own server</strong>.</li>
+          <li>
+            <span class="lang-ja">SaaS のビルダー（Val Town、v0、Bolt、Lovable）はプロプライエタリで、セルフホストできません。</span>
+            <span class="lang-en">SaaS builders (Val Town, v0, Bolt, Lovable) are proprietary and can't be self-hosted.</span>
+          </li>
+          <li>
+            <span class="lang-ja">セルフホストの PaaS（Coolify、Dokploy）は git push の CI フローを前提とします — ブラウザ内エディタも AI 統合もありません。</span>
+            <span class="lang-en">Self-hosted PaaS (Coolify, Dokploy) assume a git-push CI flow — no in-browser editor, no AI integration.</span>
+          </li>
+          <li>
+            <span class="lang-ja">kotoji はこれら 4 つの要素を、<strong>あなた自身のサーバー上</strong>で組み合わせます。</span>
+            <span class="lang-en">kotoji combines all four pieces on <strong>your own server</strong>.</span>
+          </li>
         </ul>
-        <p class="muted"><a href="index.html">Read the step-by-step guide →</a></p>
+        <p class="muted">
+          <span class="lang-ja"><a href="index.html">ステップごとのガイドを読む →</a></span>
+          <span class="lang-en"><a href="index.html">Read the step-by-step guide →</a></span>
+        </p>
       </div>
     </section>
   </main>
@@ -107,7 +165,8 @@
   <footer class="site-footer">
     <div class="wrap">
       <span>
-        Published with <strong>kotoji</strong> 🎍 ·
+        <span class="lang-ja"><strong>kotoji</strong> 🎍 で公開 ·</span>
+        <span class="lang-en">Published with <strong>kotoji</strong> 🎍 ·</span>
         <a href="https://github.com/necorox-com/kotoji">GitHub repo</a> ·
         <a href="https://github.com/necorox-com/kotoji#readme">README</a>
       </span>

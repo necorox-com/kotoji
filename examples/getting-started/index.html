@@ -1,164 +1,270 @@
 <!DOCTYPE html>
 <!--
-  kotoji · Getting Started (bundled example site)
+  kotoji · はじめかた / Getting Started（同梱サンプルサイト）
   ------------------------------------------------------------------
-  A self-contained, multi-file static site that doubles as a usage
-  guide. It ships in the kotoji repo at examples/getting-started/ and
-  is meant to be published AS-IS as your first kotoji site.
+  これは「使い方ガイド」を兼ねた、単体で完結するマルチファイルの
+  静的サイトです。kotoji リポジトリの examples/getting-started/ に
+  同梱されており、最初の kotoji サイトとしてそのまま公開できます。
 
-  CSP NOTE: kotoji serves hosted content under a strict policy —
+  言語について:
+    日本語を主、英語を従としています。翻訳対象のテキストは
+    .lang-ja（既定で表示）と .lang-en（既定で非表示）の 2 つで
+    用意し、ヘッダーのトグルボタンで body.lang-en を切り替えます。
+    JS が無効でも日本語が表示されます（安全に劣化します）。
+
+  CSP NOTE: kotoji はホストするコンテンツを厳格なポリシーで配信します —
     default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval';
     style-src 'self' 'unsafe-inline'; img-src 'self' data:; ...
-  so this site references ONLY same-origin assets (relative css/js,
-  a system font stack, inline + data: images). No external CDNs.
-  Replace every `example.com` below with your own base domain.
+  そのため、このサイトは同一オリジンの相対アセット（相対 css/js、
+  システムフォント、インライン + data: 画像）のみを参照します。
+  外部 CDN は使いません。本文中の `example.com` は各自のベース
+  ドメインに置き換えてください。
 -->
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Getting started · kotoji</title>
-  <meta name="description" content="How to use kotoji — create a site, add content, draft vs. published, versions, visibility, and connecting your AI over MCP." />
-  <!-- Relative, same-origin stylesheet (CSP: style-src 'self'). -->
+  <title>はじめかた · kotoji</title>
+  <meta name="description" content="kotoji の使い方 — サイト作成、コンテンツ追加、下書きと公開、バージョン、公開範囲、MCP での AI 接続。" />
+  <!-- 相対・同一オリジンのスタイルシート（CSP: style-src 'self'）。 -->
   <link rel="stylesheet" href="css/style.css" />
-  <!-- Inline SVG favicon — the kotoji-tōrō lantern silhouette (data: allowed). -->
+  <!-- インライン SVG ファビコン — 琴柱灯籠のシルエット（data: は許可）。 -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23c9821a' d='M16 2 7 9h18zM10 11h12l-2 4H12zM6 17h20l-3 5H9zM12 24h8v6h-8z'/%3E%3C/svg%3E" />
 </head>
 <body>
   <header class="site-header">
     <div class="wrap">
       <a class="brand" href="index.html">
-        <!-- Inline brand mark: a tiny kotoji-tōrō lantern. -->
+        <!-- ブランドマーク: 小さな琴柱灯籠。 -->
         <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
           <path fill="currentColor" d="M16 2 7 9h18zM10 11h12l-2 4H12zM6 17h20l-3 5H9zM12 24h8v6h-8z"/>
         </svg>
         <span>kotoji</span>
       </a>
-      <nav class="nav" aria-label="Page sections">
-        <a href="#create">Create</a>
-        <a href="#content">Content</a>
-        <a href="#publish">Publish</a>
-        <a href="#versions">Versions</a>
-        <a href="#visibility">Visibility</a>
+      <nav class="nav" aria-label="ページ内セクション">
+        <a href="#create"><span class="lang-ja">作成</span><span class="lang-en">Create</span></a>
+        <a href="#content"><span class="lang-ja">コンテンツ</span><span class="lang-en">Content</span></a>
+        <a href="#publish"><span class="lang-ja">公開</span><span class="lang-en">Publish</span></a>
+        <a href="#versions"><span class="lang-ja">バージョン</span><span class="lang-en">Versions</span></a>
+        <a href="#visibility"><span class="lang-ja">公開範囲</span><span class="lang-en">Visibility</span></a>
         <a href="#mcp">MCP</a>
-        <a href="features.html">Features</a>
+        <a href="features.html"><span class="lang-ja">機能一覧</span><span class="lang-en">Features</span></a>
       </nav>
+      <!-- 言語トグル: 既定は日本語、クリックで英語へ。data-lang-toggle を JS が拾う。 -->
+      <button type="button" class="lang-toggle" data-lang-toggle aria-pressed="false">
+        <span class="lang-ja">日本語 / English</span>
+        <span class="lang-en">English / 日本語</span>
+      </button>
     </div>
   </header>
 
   <main>
-    <!-- ── Hero ─────────────────────────────────────────────────────── -->
+    <!-- ── ヒーロー ─────────────────────────────────────────────────── -->
     <div class="hero">
       <div class="wrap">
-        <span class="pill">Getting started</span>
-        <h1>Give your AI-built web tools a home.</h1>
+        <span class="pill"><span class="lang-ja">はじめかた</span><span class="lang-en">Getting started</span></span>
+        <h1>
+          <span class="lang-ja">AI と作ったウェブツールに、住む場所を。</span>
+          <span class="lang-en">Give your AI-built web tools a home.</span>
+        </h1>
         <p class="lede">
-          kotoji is an MCP-native, self-hosted home for the small web tools you
-          (and your AI) build. Drop a folder of HTML/CSS/JS, get a clean URL,
-          edit it in the browser, and let git quietly version every change.
+          <span class="lang-ja">
+            kotoji は、あなた（とあなたの AI）が作る小さなウェブツールのための、
+            MCP ネイティブなセルフホスト基盤です。HTML/CSS/JS のフォルダを置けば
+            きれいな URL が手に入り、ブラウザ上で編集でき、git がすべての変更を
+            静かにバージョン管理します。
+          </span>
+          <span class="lang-en">
+            kotoji is an MCP-native, self-hosted home for the small web tools you
+            (and your AI) build. Drop a folder of HTML/CSS/JS, get a clean URL,
+            edit it in the browser, and let git quietly version every change.
+          </span>
         </p>
         <p class="muted">
-          The name comes from the <em>kotoji-tōrō</em> lantern of Kenrokuen
-          garden. <em>Kotoji</em> (琴柱) is the bridge that supports the strings
-          of a koto — just as kotoji supports and gives voice to the tools you
-          place on it.
+          <span class="lang-ja">
+            名前は兼六園の<em>琴柱灯籠（ことじとうろう）</em>に由来します。
+            <em>琴柱</em>（琴柱）は琴の弦を支える柱です。kotoji もまた、
+            その上に置かれたツールを支え、声を与える存在です。
+          </span>
+          <span class="lang-en">
+            The name comes from the <em>kotoji-tōrō</em> lantern of Kenrokuen
+            garden. <em>Kotoji</em> (琴柱) is the bridge that supports the strings
+            of a koto — just as kotoji supports and gives voice to the tools you
+            place on it.
+          </span>
         </p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="#create">Start in 5 steps →</a>
-          <a class="btn btn-ghost" href="#mcp">Connect your AI</a>
+          <a class="btn btn-primary" href="#create">
+            <span class="lang-ja">5 ステップで始める →</span>
+            <span class="lang-en">Start in 5 steps →</span>
+          </a>
+          <a class="btn btn-ghost" href="#mcp">
+            <span class="lang-ja">AI を接続する</span>
+            <span class="lang-en">Connect your AI</span>
+          </a>
         </div>
       </div>
     </div>
 
-    <!-- ── 1. Create a site ─────────────────────────────────────────── -->
+    <!-- ── 1. サイトを作成 ───────────────────────────────────────────── -->
     <section id="create">
       <div class="wrap">
-        <h2><span class="step-no">1</span>Create a site</h2>
+        <h2><span class="step-no">1</span><span class="lang-ja">サイトを作成</span><span class="lang-en">Create a site</span></h2>
         <p class="section-lede">
-          From the dashboard, choose <strong>New</strong> and pick a
-          <strong>handle</strong> — the subdomain your tool will live on. Handles
-          are <strong>lowercase letters, numbers and hyphens</strong> (e.g.
-          <code>expense-calc</code>). A reserved-word list keeps names like
-          <code>mcp</code> and <code>api</code> off-limits.
+          <span class="lang-ja">
+            ダッシュボードで <strong>New</strong> を選び、<strong>handle</strong>
+            （ツールが住むサブドメイン）を決めます。handle は
+            <strong>小文字・数字・ハイフン</strong>が使えます（例:
+            <code>expense-calc</code>）。予約語リストにより
+            <code>mcp</code> や <code>api</code> などの名前は使えません。
+          </span>
+          <span class="lang-en">
+            From the dashboard, choose <strong>New</strong> and pick a
+            <strong>handle</strong> — the subdomain your tool will live on. Handles
+            are <strong>lowercase letters, numbers and hyphens</strong> (e.g.
+            <code>expense-calc</code>). A reserved-word list keeps names like
+            <code>mcp</code> and <code>api</code> off-limits.
+          </span>
         </p>
         <div class="grid">
           <div class="card">
-            <span class="tag">Empty</span>
-            <h3>Empty</h3>
-            <p>Start blank, then add files in the browser or over MCP. Best when your AI will build it for you.</p>
+            <span class="tag"><span class="lang-ja">空から</span><span class="lang-en">Empty</span></span>
+            <h3><span class="lang-ja">空から</span><span class="lang-en">Empty</span></h3>
+            <p>
+              <span class="lang-ja">まっさらな状態で開始し、ブラウザや MCP 経由でファイルを追加します。AI に作ってもらう場合に最適です。</span>
+              <span class="lang-en">Start blank, then add files in the browser or over MCP. Best when your AI will build it for you.</span>
+            </p>
           </div>
           <div class="card">
-            <span class="tag">From a zip</span>
-            <h3>From a zip</h3>
-            <p>Upload a <code>.zip</code> of static files and serve it instantly — exactly how this guide gets published.</p>
+            <span class="tag"><span class="lang-ja">zip から</span><span class="lang-en">From a zip</span></span>
+            <h3><span class="lang-ja">zip から</span><span class="lang-en">From a zip</span></h3>
+            <p>
+              <span class="lang-ja">静的ファイルの <code>.zip</code> をアップロードすると即座に配信されます。このガイド自体もまさにこの方法で公開されます。</span>
+              <span class="lang-en">Upload a <code>.zip</code> of static files and serve it instantly — exactly how this guide gets published.</span>
+            </p>
           </div>
           <div class="card">
-            <span class="tag">Template</span>
-            <h3>Template</h3>
-            <p>Scaffold from a starter template to get a working page without writing the boilerplate yourself.</p>
+            <span class="tag"><span class="lang-ja">テンプレート</span><span class="lang-en">Template</span></span>
+            <h3><span class="lang-ja">テンプレート</span><span class="lang-en">Template</span></h3>
+            <p>
+              <span class="lang-ja">スターターテンプレートから雛形を作成し、定型コードを書かずに動くページを手に入れます。</span>
+              <span class="lang-en">Scaffold from a starter template to get a working page without writing the boilerplate yourself.</span>
+            </p>
           </div>
         </div>
         <p class="muted">
-          Your tool will be reachable at
-          <span class="url">your-handle.example.com</span> once published
-          (swap <code>example.com</code> for your instance's base domain).
+          <span class="lang-ja">
+            公開すると、ツールは
+            <span class="url">your-handle.example.com</span> でアクセスできます
+            （<code>example.com</code> はあなたのインスタンスのベースドメインに置き換えてください）。
+          </span>
+          <span class="lang-en">
+            Your tool will be reachable at
+            <span class="url">your-handle.example.com</span> once published
+            (swap <code>example.com</code> for your instance's base domain).
+          </span>
         </p>
       </div>
     </section>
 
-    <!-- ── 2. Add content ───────────────────────────────────────────── -->
+    <!-- ── 2. コンテンツを追加 ───────────────────────────────────────── -->
     <section id="content">
       <div class="wrap">
-        <h2><span class="step-no">2</span>Add content</h2>
-        <p class="section-lede">There are three peer ways to put files into a site — and they all funnel through the same git boundary, so every change is a commit.</p>
+        <h2><span class="step-no">2</span><span class="lang-ja">コンテンツを追加</span><span class="lang-en">Add content</span></h2>
+        <p class="section-lede">
+          <span class="lang-ja">ファイルをサイトに入れる方法は対等に 3 通りあります。いずれも同じ git の境界を通るので、すべての変更がコミットになります。</span>
+          <span class="lang-en">There are three peer ways to put files into a site — and they all funnel through the same git boundary, so every change is a commit.</span>
+        </p>
         <div class="grid">
           <div class="card">
-            <h3>Drag a .zip</h3>
-            <p>Drop an archive of HTML/CSS/JS onto the dashboard. kotoji unpacks it into the working tree.</p>
+            <h3><span class="lang-ja">.zip をドラッグ</span><span class="lang-en">Drag a .zip</span></h3>
+            <p>
+              <span class="lang-ja">HTML/CSS/JS のアーカイブをダッシュボードにドロップします。kotoji がワーキングツリーへ展開します。</span>
+              <span class="lang-en">Drop an archive of HTML/CSS/JS onto the dashboard. kotoji unpacks it into the working tree.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Edit in the browser</h3>
-            <p>Open the <strong>Monaco</strong> editor, make a change, and hit <strong>Save</strong> — each Save is a commit with a diff.</p>
+            <h3><span class="lang-ja">ブラウザで編集</span><span class="lang-en">Edit in the browser</span></h3>
+            <p>
+              <span class="lang-ja"><strong>Monaco</strong> エディタを開いて変更し、<strong>Save</strong> を押します。各 Save が差分付きのコミットになります。</span>
+              <span class="lang-en">Open the <strong>Monaco</strong> editor, make a change, and hit <strong>Save</strong> — each Save is a commit with a diff.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Let your AI write</h3>
-            <p>Connect an MCP client (see step 6) and it reads &amp; writes files for you. Same git, same history.</p>
+            <h3><span class="lang-ja">AI に書かせる</span><span class="lang-en">Let your AI write</span></h3>
+            <p>
+              <span class="lang-ja">MCP クライアントを接続（ステップ 6 参照）すれば、AI が代わりにファイルを読み書きします。同じ git、同じ履歴です。</span>
+              <span class="lang-en">Connect an MCP client (see step 6) and it reads &amp; writes files for you. Same git, same history.</span>
+            </p>
           </div>
         </div>
         <p class="muted">
-          The Monaco editor is a desktop/tablet experience; on phones you get a
-          read-friendly viewer and an “open on a bigger screen / ask AI”
-          fallback — publish, history and versions stay fully usable on a phone.
+          <span class="lang-ja">
+            Monaco エディタはデスクトップ/タブレット向けです。スマホでは
+            読みやすいビューアと「大きい画面で開く / AI に頼む」という代替手段が
+            表示されます。公開・履歴・バージョンの操作はスマホでも完全に使えます。
+          </span>
+          <span class="lang-en">
+            The Monaco editor is a desktop/tablet experience; on phones you get a
+            read-friendly viewer and an “open on a bigger screen / ask AI”
+            fallback — publish, history and versions stay fully usable on a phone.
+          </span>
         </p>
       </div>
     </section>
 
-    <!-- ── 3. Draft vs. Published ───────────────────────────────────── -->
+    <!-- ── 3. 下書きと公開 ───────────────────────────────────────────── -->
     <section id="publish">
       <div class="wrap">
-        <h2><span class="step-no">3</span>Draft vs. Published</h2>
+        <h2><span class="step-no">3</span><span class="lang-ja">下書きと公開</span><span class="lang-en">Draft vs. Published</span></h2>
         <p class="section-lede">
-          You always work on the <strong>draft</strong> branch — your safe
-          workspace. Nothing you save there is live yet.
+          <span class="lang-ja">
+            作業は常に <strong>draft</strong>（下書き）ブランチで行います — 安全な
+            作業場所です。そこで保存したものは、まだ公開されません。
+          </span>
+          <span class="lang-en">
+            You always work on the <strong>draft</strong> branch — your safe
+            workspace. Nothing you save there is live yet.
+          </span>
         </p>
         <ul class="clean">
-          <li><strong>Draft</strong> — the default working branch. Edit, upload and experiment freely.</li>
-          <li><strong>Publish</strong> — promotes draft to <strong>published</strong>, which is what visitors see at <span class="url">your-handle.example.com</span>.</li>
-          <li><strong>History &amp; rollback</strong> — every save and publish is a commit, so you can review the diff and roll back to any earlier version at any time.</li>
+          <li>
+            <span class="lang-ja"><strong>下書き（draft）</strong> — 既定の作業ブランチ。自由に編集・アップロード・試行できます。</span>
+            <span class="lang-en"><strong>Draft</strong> — the default working branch. Edit, upload and experiment freely.</span>
+          </li>
+          <li>
+            <span class="lang-ja"><strong>公開（Publish）</strong> — draft を <strong>published</strong> へ昇格させます。これが <span class="url">your-handle.example.com</span> で訪問者に見えるものです。</span>
+            <span class="lang-en"><strong>Publish</strong> — promotes draft to <strong>published</strong>, which is what visitors see at <span class="url">your-handle.example.com</span>.</span>
+          </li>
+          <li>
+            <span class="lang-ja"><strong>履歴とロールバック</strong> — すべての保存と公開がコミットなので、差分を確認し、いつでも過去のバージョンへ巻き戻せます。</span>
+            <span class="lang-en"><strong>History &amp; rollback</strong> — every save and publish is a commit, so you can review the diff and roll back to any earlier version at any time.</span>
+          </li>
         </ul>
-        <p class="muted">git is the single source of truth here — versioning is a side effect of how kotoji saves, not a separate feature you have to manage.</p>
+        <p class="muted">
+          <span class="lang-ja">ここでは git が唯一の真実です。バージョン管理は kotoji の保存方法の副産物であり、別途管理すべき機能ではありません。</span>
+          <span class="lang-en">git is the single source of truth here — versioning is a side effect of how kotoji saves, not a separate feature you have to manage.</span>
+        </p>
       </div>
     </section>
 
-    <!-- ── 4. Versions (branches) + previews ────────────────────────── -->
+    <!-- ── 4. バージョン（ブランチ）とプレビュー ────────────────────── -->
     <section id="versions">
       <div class="wrap">
-        <h2><span class="step-no">4</span>Versions &amp; previews</h2>
+        <h2><span class="step-no">4</span><span class="lang-ja">バージョンとプレビュー</span><span class="lang-en">Versions &amp; previews</span></h2>
         <p class="section-lede">
-          Need to try a bigger change without touching draft? Create another
-          <strong>version</strong> (a branch). Each branch gets its own
-          <strong>per-branch preview URL</strong> so you can see it live before
-          promoting:
+          <span class="lang-ja">
+            draft を触らずに大きめの変更を試したいときは、別の
+            <strong>バージョン</strong>（ブランチ）を作ります。各ブランチには
+            専用の<strong>プレビュー URL</strong> が付くので、昇格前にライブで
+            確認できます。
+          </span>
+          <span class="lang-en">
+            Need to try a bigger change without touching draft? Create another
+            <strong>version</strong> (a branch). Each branch gets its own
+            <strong>per-branch preview URL</strong> so you can see it live before
+            promoting:
+          </span>
         </p>
         <div class="code">
 <pre><code>published   →  your-handle.example.com
@@ -166,49 +272,88 @@ draft       →  your-handle--draft.example.com
 feature-x   →  your-handle--feature-x.example.com</code></pre>
         </div>
         <p class="muted">
-          Preview hosts use the <span class="url">handle--branch</span> form.
-          Previews of non-public sites are gated by a short-lived preview grant,
-          so work-in-progress isn't exposed before you publish it.
+          <span class="lang-ja">
+            プレビューのホスト名は <span class="url">handle--branch</span> 形式です。
+            非公開サイトのプレビューは短命なプレビュー許可で保護されるので、
+            公開前の作業中の内容が露出することはありません。
+          </span>
+          <span class="lang-en">
+            Preview hosts use the <span class="url">handle--branch</span> form.
+            Previews of non-public sites are gated by a short-lived preview grant,
+            so work-in-progress isn't exposed before you publish it.
+          </span>
         </p>
       </div>
     </section>
 
-    <!-- ── 5. Visibility ────────────────────────────────────────────── -->
+    <!-- ── 5. 公開範囲 ──────────────────────────────────────────────── -->
     <section id="visibility">
       <div class="wrap">
-        <h2><span class="step-no">5</span>Visibility</h2>
+        <h2><span class="step-no">5</span><span class="lang-ja">公開範囲</span><span class="lang-en">Visibility</span></h2>
         <p class="section-lede">
-          Each site has a visibility tier that controls who can reach its
-          <em>served content</em>. New sites are <strong>Private</strong> by
-          default — you opt in to wider access.
+          <span class="lang-ja">
+            各サイトには、<em>配信コンテンツ</em>に誰がアクセスできるかを制御する
+            公開範囲のティアがあります。新しいサイトは既定で
+            <strong>Private（非公開）</strong>です — 広い公開はオプトインです。
+          </span>
+          <span class="lang-en">
+            Each site has a visibility tier that controls who can reach its
+            <em>served content</em>. New sites are <strong>Private</strong> by
+            default — you opt in to wider access.
+          </span>
         </p>
         <div class="chips">
-          <span class="chip"><b>Public</b> — anyone with the URL</span>
-          <span class="chip"><b>Members</b> — signed-in members of the site</span>
-          <span class="chip is-default"><b>Private</b> — owner / members only</span>
+          <span class="chip"><b>Public</b> — <span class="lang-ja">URL を知る誰でも</span><span class="lang-en">anyone with the URL</span></span>
+          <span class="chip"><b>Members</b> — <span class="lang-ja">サイトにサインインしたメンバー</span><span class="lang-en">signed-in members of the site</span></span>
+          <span class="chip is-default"><b>Private</b> — <span class="lang-ja">オーナー / メンバーのみ</span><span class="lang-en">owner / members only</span></span>
         </div>
         <p class="muted">
-          Visibility is per-site and governs the data plane (the served pages);
-          control-plane access is always membership-gated regardless of tier.
+          <span class="lang-ja">
+            公開範囲はサイトごとに設定され、データプレーン（配信されるページ）を
+            統制します。コントロールプレーンへのアクセスは、ティアに関係なく常に
+            メンバーシップで保護されます。
+          </span>
+          <span class="lang-en">
+            Visibility is per-site and governs the data plane (the served pages);
+            control-plane access is always membership-gated regardless of tier.
+          </span>
         </p>
       </div>
     </section>
 
-    <!-- ── 6. Connect your AI over MCP ──────────────────────────────── -->
+    <!-- ── 6. MCP で AI を接続 ──────────────────────────────────────── -->
     <section id="mcp">
       <div class="wrap">
-        <h2><span class="step-no">6</span>Connect your AI over MCP</h2>
+        <h2><span class="step-no">6</span><span class="lang-ja">MCP で AI を接続</span><span class="lang-en">Connect your AI over MCP</span></h2>
         <p class="section-lede">
-          kotoji is MCP-native: your AI can <strong>list, read, write and
-          publish</strong> your sites directly. Set it up once.
+          <span class="lang-ja">
+            kotoji は MCP ネイティブです。あなたの AI が、サイトを直接
+            <strong>一覧・読み取り・書き込み・公開</strong>できます。設定は一度きりです。
+          </span>
+          <span class="lang-en">
+            kotoji is MCP-native: your AI can <strong>list, read, write and
+            publish</strong> your sites directly. Set it up once.
+          </span>
         </p>
         <ol class="clean">
-          <li>Open <strong>Settings</strong> and issue a <strong>per-user MCP/API token</strong> (copy it once — it spans every project you're a member of).</li>
-          <li>Point your MCP client (e.g. Claude) at <span class="url">https://example.com/mcp</span> with that token as a <strong>Bearer</strong> credential.</li>
-          <li>Every tool takes a <strong>site handle</strong> selector, so one token works across all your sites.</li>
+          <li>
+            <span class="lang-ja"><strong>Settings</strong> を開き、<strong>ユーザー単位の MCP/API トークン</strong>を発行します（一度だけコピー — あなたがメンバーである全プロジェクトにまたがります）。</span>
+            <span class="lang-en">Open <strong>Settings</strong> and issue a <strong>per-user MCP/API token</strong> (copy it once — it spans every project you're a member of).</span>
+          </li>
+          <li>
+            <span class="lang-ja">MCP クライアント（例: Claude）を <span class="url">https://example.com/mcp</span> に向け、そのトークンを <strong>Bearer</strong> 認証情報として渡します。</span>
+            <span class="lang-en">Point your MCP client (e.g. Claude) at <span class="url">https://example.com/mcp</span> with that token as a <strong>Bearer</strong> credential.</span>
+          </li>
+          <li>
+            <span class="lang-ja">すべてのツールは <strong>サイトの handle</strong> セレクタを取るので、1 つのトークンで全サイトを操作できます。</span>
+            <span class="lang-en">Every tool takes a <strong>site handle</strong> selector, so one token works across all your sites.</span>
+          </li>
         </ol>
 
-        <p class="muted">Example client config — replace the origin and paste your real token:</p>
+        <p class="muted">
+          <span class="lang-ja">クライアント設定の例 — origin を置き換え、実際のトークンを貼り付けてください:</span>
+          <span class="lang-en">Example client config — replace the origin and paste your real token:</span>
+        </p>
         <div class="code">
 <pre><code>{
   "mcpServers": {
@@ -222,48 +367,68 @@ feature-x   →  your-handle--feature-x.example.com</code></pre>
 }</code></pre>
         </div>
 
-        <p class="muted">The tools your AI gets (each takes a <code>site</code> handle, except where noted):</p>
+        <p class="muted">
+          <span class="lang-ja">AI が使えるツール（注記がない限り、それぞれ <code>site</code> handle を取ります）:</span>
+          <span class="lang-en">The tools your AI gets (each takes a <code>site</code> handle, except where noted):</span>
+        </p>
         <div class="grid">
           <div class="card">
             <span class="tag">read</span>
-            <h3>Explore</h3>
-            <p><code>list_sites</code> (no handle), <code>list_files</code>, <code>read_file</code>, <code>get_diff</code>, <code>get_log</code>.</p>
+            <h3><span class="lang-ja">調べる</span><span class="lang-en">Explore</span></h3>
+            <p><code>list_sites</code> (<span class="lang-ja">handle 不要</span><span class="lang-en">no handle</span>)、<code>list_files</code>、<code>read_file</code>、<code>get_diff</code>、<code>get_log</code>。</p>
           </div>
           <div class="card">
             <span class="tag">write</span>
-            <h3>Build</h3>
-            <p><code>write_file</code>, <code>save</code>, <code>create_branch</code>, <code>rollback</code> — all on the draft branch.</p>
+            <h3><span class="lang-ja">作る</span><span class="lang-en">Build</span></h3>
+            <p><code>write_file</code>、<code>save</code>、<code>create_branch</code>、<code>rollback</code> — <span class="lang-ja">すべて draft ブランチ上で。</span><span class="lang-en">all on the draft branch.</span></p>
           </div>
           <div class="card">
             <span class="tag">publish</span>
-            <h3>Ship</h3>
-            <p><code>publish</code> promotes draft to live. <code>create_site</code> mints a new site (when your token may).</p>
+            <h3><span class="lang-ja">出荷する</span><span class="lang-en">Ship</span></h3>
+            <p>
+              <span class="lang-ja"><code>publish</code> は draft をライブへ昇格します。<code>create_site</code> は新しいサイトを発行します（トークンに権限がある場合）。</span>
+              <span class="lang-en"><code>publish</code> promotes draft to live. <code>create_site</code> mints a new site (when your token may).</span>
+            </p>
           </div>
         </div>
         <p class="muted">
-          The token's power on any site is <span class="url">token.scopes ∩ your-role-on-that-site</span>,
-          re-checked on every call — so removing a membership instantly limits the token.
+          <span class="lang-ja">
+            あるサイトにおけるトークンの権限は
+            <span class="url">token.scopes ∩ そのサイトでのあなたのロール</span> で、
+            呼び出しのたびに再チェックされます。メンバーシップを外せば、トークンの
+            権限は即座に制限されます。
+          </span>
+          <span class="lang-en">
+            The token's power on any site is <span class="url">token.scopes ∩ your-role-on-that-site</span>,
+            re-checked on every call — so removing a membership instantly limits the token.
+          </span>
         </p>
       </div>
     </section>
 
-    <!-- ── Optional extras ──────────────────────────────────────────── -->
+    <!-- ── 任意のオプション ─────────────────────────────────────────── -->
     <section id="extras">
       <div class="wrap">
-        <h2>Optional extras</h2>
+        <h2><span class="lang-ja">任意のオプション</span><span class="lang-en">Optional extras</span></h2>
         <div class="grid">
           <div class="card">
-            <h3>GitHub mirror</h3>
-            <p>An admin can enable a GitHub mirror in Settings; every publish mirror-pushes as an off-box backup. The PAT is stored encrypted at rest.</p>
+            <h3><span class="lang-ja">GitHub ミラー</span><span class="lang-en">GitHub mirror</span></h3>
+            <p>
+              <span class="lang-ja">管理者は Settings で GitHub ミラーを有効化できます。公開のたびに、外部バックアップとしてミラープッシュされます。PAT は暗号化して保存されます。</span>
+              <span class="lang-en">An admin can enable a GitHub mirror in Settings; every publish mirror-pushes as an off-box backup. The PAT is stored encrypted at rest.</span>
+            </p>
           </div>
           <div class="card">
-            <h3>Automatic HTTPS</h3>
-            <p>Add the opt-in Traefik overlay for a self-contained box that auto-issues a wildcard TLS cert for your base domain.</p>
+            <h3><span class="lang-ja">自動 HTTPS</span><span class="lang-en">Automatic HTTPS</span></h3>
+            <p>
+              <span class="lang-ja">オプトインの Traefik オーバーレイを追加すると、ベースドメイン向けのワイルドカード TLS 証明書を自動発行する、単体で完結する構成になります。</span>
+              <span class="lang-en">Add the opt-in Traefik overlay for a self-contained box that auto-issues a wildcard TLS cert for your base domain.</span>
+            </p>
           </div>
         </div>
         <p class="muted">
-          New to kotoji? See the
-          <a href="features.html">features overview →</a>
+          <span class="lang-ja">kotoji は初めてですか? <a href="features.html">機能の概要を見る →</a></span>
+          <span class="lang-en">New to kotoji? See the <a href="features.html">features overview →</a></span>
         </p>
       </div>
     </section>
@@ -272,7 +437,8 @@ feature-x   →  your-handle--feature-x.example.com</code></pre>
   <footer class="site-footer">
     <div class="wrap">
       <span>
-        Published with <strong>kotoji</strong> 🎍 ·
+        <span class="lang-ja"><strong>kotoji</strong> 🎍 で公開 ·</span>
+        <span class="lang-en">Published with <strong>kotoji</strong> 🎍 ·</span>
         <a href="https://github.com/necorox-com/kotoji">GitHub repo</a> ·
         <a href="https://github.com/necorox-com/kotoji#readme">README</a> ·
         <a href="https://github.com/necorox-com/kotoji/tree/main/docs">docs</a>
@@ -281,7 +447,7 @@ feature-x   →  your-handle--feature-x.example.com</code></pre>
     </div>
   </footer>
 
-  <!-- Relative, same-origin script (CSP: script-src 'self'). -->
+  <!-- 相対・同一オリジンのスクリプト（CSP: script-src 'self'）。 -->
   <script src="js/app.js"></script>
 </body>
 </html>

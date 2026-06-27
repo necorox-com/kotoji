@@ -8,6 +8,68 @@
 (function () {
   "use strict";
 
+  // localStorage key + values for the persisted language choice.
+  var LANG_KEY = "kotoji-guide-lang";
+  var LANG_JA = "ja";
+  var LANG_EN = "en";
+
+  // (0) Language toggle — Japanese is primary, English is a secondary toggle.
+  //     The page authors both languages inline (.lang-ja / .lang-en); flipping
+  //     `body.lang-en` swaps which set CSS shows. We persist the choice in
+  //     localStorage and re-apply it on every load, and we also keep
+  //     document.documentElement.lang in sync for assistive tech & search.
+  //     CSP: this only reads localStorage and toggles a class via
+  //     addEventListener — no eval, no remote fetch — so it runs cleanly under
+  //     `script-src 'self' 'unsafe-inline'`. With JS disabled the page stays in
+  //     Japanese (the default), so nothing is lost.
+  function readLang() {
+    try {
+      var v = window.localStorage.getItem(LANG_KEY);
+      return v === LANG_EN ? LANG_EN : LANG_JA; // default to Japanese
+    } catch (e) {
+      return LANG_JA; // private mode / storage blocked → default Japanese
+    }
+  }
+
+  function saveLang(lang) {
+    try {
+      window.localStorage.setItem(LANG_KEY, lang);
+    } catch (e) {
+      /* storage unavailable — toggle still works for this session */
+    }
+  }
+
+  function applyLang(lang) {
+    var isEn = lang === LANG_EN;
+    document.body.classList.toggle("lang-en", isEn);
+    document.documentElement.lang = isEn ? "en" : "ja";
+
+    // Reflect current state on every toggle button for screen readers.
+    var btns = document.querySelectorAll("[data-lang-toggle]");
+    btns.forEach(function (btn) {
+      btn.setAttribute("aria-pressed", isEn ? "true" : "false");
+      btn.setAttribute(
+        "aria-label",
+        isEn ? "Switch to Japanese" : "英語に切り替える"
+      );
+    });
+  }
+
+  function wireLangToggle() {
+    applyLang(readLang()); // honour the stored choice on load
+
+    var btns = document.querySelectorAll("[data-lang-toggle]");
+    btns.forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var next = document.body.classList.contains("lang-en")
+          ? LANG_JA
+          : LANG_EN;
+        saveLang(next);
+        applyLang(next);
+      });
+    });
+  }
+
   // (1) Footer year stamp — keeps the copyright current with no rebuild.
   function stampYear() {
     var el = document.querySelector("[data-year]");
@@ -25,16 +87,22 @@
       var btn = document.createElement("button");
       btn.type = "button";
       btn.className = "copy-btn";
-      btn.textContent = "Copy";
-      btn.setAttribute("aria-label", "Copy code to clipboard");
+      // Bilingual label: build JA + EN spans so the active language shows the
+      // right word via the same .lang-ja/.lang-en CSS the rest of the page uses.
+      setBtnLabel(btn, "コピー", "Copy");
+      btn.setAttribute("aria-label", "コードをクリップボードにコピー");
 
       btn.addEventListener("click", function () {
         var text = pre.innerText;
         copyText(text).then(function (ok) {
-          btn.textContent = ok ? "Copied!" : "Press Ctrl+C";
+          if (ok) {
+            setBtnLabel(btn, "コピーしました！", "Copied!");
+          } else {
+            setBtnLabel(btn, "Ctrl+C を押してください", "Press Ctrl+C");
+          }
           btn.classList.toggle("copied", ok);
           window.setTimeout(function () {
-            btn.textContent = "Copy";
+            setBtnLabel(btn, "コピー", "Copy");
             btn.classList.remove("copied");
           }, 1600);
         });
@@ -42,6 +110,20 @@
 
       block.appendChild(btn);
     });
+  }
+
+  // Sets a button's visible label as paired JA/EN spans (no innerHTML — we
+  // build nodes so this stays safe under any CSP and never injects markup).
+  function setBtnLabel(btn, ja, en) {
+    btn.textContent = "";
+    var jaEl = document.createElement("span");
+    jaEl.className = "lang-ja";
+    jaEl.textContent = ja;
+    var enEl = document.createElement("span");
+    enEl.className = "lang-en";
+    enEl.textContent = en;
+    btn.appendChild(jaEl);
+    btn.appendChild(enEl);
   }
 
   // Clipboard with a legacy fallback (older browsers / non-secure contexts).
@@ -107,6 +189,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
+    wireLangToggle();
     stampYear();
     wireCopyButtons();
     wireActiveNav();

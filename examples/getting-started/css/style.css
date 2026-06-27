@@ -103,6 +103,33 @@ a:hover { text-decoration: underline; }
 .nav a:hover { background: var(--accent-soft); color: var(--fg); text-decoration: none; }
 .nav a.active { color: var(--accent); background: var(--accent-soft); }
 
+/* ── Language toggle ────────────────────────────────────────────────────────
+   Japanese is the primary language. Each translatable string ships twice:
+   a .lang-ja element (shown by default) and a .lang-en element (hidden by
+   default). The header toggle button flips `body.lang-en`, which swaps which
+   set is visible. With NO JavaScript, the page degrades to Japanese — the
+   default state — so the toggle is a pure progressive enhancement.
+   ────────────────────────────────────────────────────────────────────────── */
+.lang-en { display: none; }
+body.lang-en .lang-ja { display: none; }
+body.lang-en .lang-en { display: revert; }
+
+.lang-toggle {
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--fg-muted);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lang-toggle:hover { color: var(--fg); border-color: var(--accent); background: var(--accent-soft); }
+/* The toggle's two labels live inside as .lang-ja / .lang-en spans, so the
+   button itself shows the *other* language as its call-to-action. */
+
 /* ── Hero ───────────────────────────────────────────────────────────────── */
 .hero { padding: 56px 0 24px; }
 .hero h1 {
