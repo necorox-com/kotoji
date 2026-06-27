@@ -246,7 +246,7 @@ type Site struct {
 	ID             uuid.UUID  `json:"id"`
 	Handle         Handle     `json:"handle"`
 	OwnerID        uuid.UUID  `json:"ownerId"`
-	Visibility     string     `json:"visibility"`     // "public" | "internal" | "private"
+	Visibility     string     `json:"visibility"`     // "public" | "members" | "private"
 	DefaultBranch  BranchName `json:"defaultBranch"`  // usually "draft"
 	GitHubRepo     string     `json:"githubRepo,omitempty"` // "owner/name" if mirrored, else ""
 	PublishMode    string     `json:"publishMode"`    // "direct" | "request"
@@ -348,7 +348,7 @@ type TreeHandle struct {
 type CreateSiteInput struct {
 	Handle      Handle      // validated + reserved-word checked inside CreateSite
 	OwnerID     uuid.UUID   // auth subject; stamped as initial owner + owner site_members row
-	Visibility  string      // "public"|"internal"|"private"; default "private"
+	Visibility  string      // "public"|"members"|"private"; default "private"
 	PublishMode string      // "direct"|"request"; default "direct"
 	Description string      // optional
 	Zip         *ZipSource  // optional initial content; nil => empty draft w/ placeholder index.html
@@ -597,9 +597,9 @@ CREATE TYPE site_role AS ENUM ('owner', 'editor', 'viewer');
 
 -- Served-content visibility (data plane). 3-valued (consistency-report #1.4).
 --   public   : anyone with the URL (subject to instance PUBLISHED_PUBLIC cap)
---   internal : any authenticated user of this kotoji instance
+--   members  : any authenticated user of this kotoji instance
 --   private  : only site members (owner/editor/viewer)
-CREATE TYPE site_visibility AS ENUM ('public', 'internal', 'private');
+CREATE TYPE site_visibility AS ENUM ('public', 'members', 'private');
 
 -- Which writer/origin produced an audited action (consistency-report #1.12).
 --   upload : zip upload path

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<!--
+  kotoji · Getting Started — second page (features overview).
+  Shares css/style.css and js/app.js with index.html to demonstrate
+  multi-file, page-to-page navigation. Same CSP constraint: only
+  same-origin relative assets, no external CDNs.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Features · kotoji</title>
+  <meta name="description" content="What kotoji gives you: self-hosting, MCP-native AI access, git-as-source-of-truth, in-browser editing, per-branch previews, and optional TLS." />
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%23c9821a' d='M16 2 7 9h18zM10 11h12l-2 4H12zM6 17h20l-3 5H9zM12 24h8v6h-8z'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="index.html">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+          <path fill="currentColor" d="M16 2 7 9h18zM10 11h12l-2 4H12zM6 17h20l-3 5H9zM12 24h8v6h-8z"/>
+        </svg>
+        <span>kotoji</span>
+      </a>
+      <nav class="nav" aria-label="Site pages">
+        <a href="index.html">Getting started</a>
+        <a href="features.html" class="active" aria-current="page">Features</a>
+        <a href="https://github.com/necorox-com/kotoji">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="wrap">
+        <span class="pill">Overview</span>
+        <h1>What kotoji gives you.</h1>
+        <p class="lede">
+          The one combination nothing else offers in a single place:
+          self-hosting + MCP-native AI access + git-as-source-of-truth +
+          a non-engineer-friendly editor.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="index.html">← Back to the guide</a>
+        </div>
+      </div>
+    </div>
+
+    <section>
+      <div class="wrap">
+        <h2>Core features</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Upload &amp; serve</h3>
+            <p>Drop a <code>.zip</code> of static files and get an instant URL — any asset-path style works.</p>
+          </div>
+          <div class="card">
+            <h3>Per-project subdomains</h3>
+            <p>Each tool lives at <span class="url">your-tool.example.com</span>, isolated on its own origin.</p>
+          </div>
+          <div class="card">
+            <h3>In-browser editing</h3>
+            <p>A Monaco editor with diff view for quick fixes — no checkout, no local toolchain.</p>
+          </div>
+          <div class="card">
+            <h3>MCP-native</h3>
+            <p>Connect Claude (or any MCP client) to <code>list / read / write / publish</code> your sites directly.</p>
+          </div>
+          <div class="card">
+            <h3>Per-user tokens</h3>
+            <p>One token belongs to you and spans every project you're a member of; effective scope = token ∩ role.</p>
+          </div>
+          <div class="card">
+            <h3>git is the truth</h3>
+            <p>Every save is a commit. History, diff and rollback come for free.</p>
+          </div>
+          <div class="card">
+            <h3>Draft → published</h3>
+            <p>Work safely on branches; promote to production in one action. Each branch gets a preview URL.</p>
+          </div>
+          <div class="card">
+            <h3>Visibility tiers</h3>
+            <p>Public, Members or Private per site — Private by default.</p>
+          </div>
+          <div class="card">
+            <h3>GitHub mirror &amp; TLS</h3>
+            <p>Optional off-box backup on every publish, and an opt-in Traefik overlay for automatic wildcard HTTPS.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>Why self-host?</h2>
+        <ul class="clean">
+          <li>SaaS builders (Val Town, v0, Bolt, Lovable) are proprietary and can't be self-hosted.</li>
+          <li>Self-hosted PaaS (Coolify, Dokploy) assume a git-push CI flow — no in-browser editor, no AI integration.</li>
+          <li>kotoji combines all four pieces on <strong>your own server</strong>.</li>
+        </ul>
+        <p class="muted"><a href="index.html">Read the step-by-step guide →</a></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>
+        Published with <strong>kotoji</strong> 🎍 ·
+        <a href="https://github.com/necorox-com/kotoji">GitHub repo</a> ·
+        <a href="https://github.com/necorox-com/kotoji#readme">README</a>
+      </span>
+      <span>© <span data-year>2026</span> · AGPL-3.0</span>
+    </div>
+  </footer>
+
+  <script src="js/app.js"></script>
+</body>
+</html>

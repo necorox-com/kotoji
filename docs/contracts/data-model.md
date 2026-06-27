@@ -101,9 +101,9 @@ CREATE TYPE site_role AS ENUM ('owner', 'editor', 'viewer');
 -- Visibility of a site's *served content* (data plane). Authz on the control plane is always
 -- enforced regardless; this governs anonymous access to the public URL.
 --   public   : anyone with the URL can view served content (subject to instance cap).
---   internal : served only to authenticated users of this kotoji instance.
+--   members  : served only to authenticated users of this kotoji instance.
 --   private  : served only to site members (owner/editor/viewer).
-CREATE TYPE site_visibility AS ENUM ('public', 'internal', 'private');
+CREATE TYPE site_visibility AS ENUM ('public', 'members', 'private');
 
 -- Which of the writers produced an audited action.
 CREATE TYPE audit_source AS ENUM ('upload', 'editor', 'mcp', 'system');
