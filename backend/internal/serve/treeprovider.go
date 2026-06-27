@@ -41,7 +41,13 @@ type TreeHandle struct {
 	CommitSHA  string    // 40-hex; "" only allowed in dev/empty-site
 	CommitTime time.Time // commit timestamp -> Last-Modified
 	SiteID     uuid.UUID // resolved site UUID (for preview authz scoping)
-	Exists     bool
+	// CacheVersion is the per-site cache generation (sites.cache_version). It is
+	// folded into the asset ETag so an operator "Clear cache" (which bumps it) makes
+	// every asset ETag for the site change at once, forcing all clients to refetch
+	// fresh on their next request. A re-publish keeps the same version (the CommitSHA
+	// already changes the ETag); a purge bumps it WITHOUT a new commit.
+	CacheVersion int64
+	Exists       bool
 }
 
 // TreeProvider gives the data plane an immutable file tree for a resolved Target.
@@ -140,11 +146,12 @@ func (p *ServiceTreeProvider) Tree(ctx context.Context, t resolve.Target) (TreeH
 	}
 
 	return TreeHandle{
-		FS:         p.open(th.Root),
-		CommitSHA:  th.CommitSHA,
-		CommitTime: th.CommitTime,
-		SiteID:     s.ID,
-		Exists:     true,
+		FS:           p.open(th.Root),
+		CommitSHA:    th.CommitSHA,
+		CommitTime:   th.CommitTime,
+		SiteID:       s.ID,
+		CacheVersion: s.CacheVersion, // folded into the asset ETag (operator cache-purge bumps it)
+		Exists:       true,
 	}, nil
 }
 

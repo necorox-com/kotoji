@@ -24,6 +24,8 @@ type fakeTreeProvider struct {
 	// redirects maps old handle -> new handle (for the 301 path).
 	redirects map[string]string
 	commitSHA string
+	// cacheVersion is the per-site cache generation folded into the asset ETag.
+	cacheVersion int64
 	// branchExists, when set, gates which (handle,branch) pairs resolve; nil = all.
 	branchExists map[string]bool
 }
@@ -51,11 +53,12 @@ func (p *fakeTreeProvider) Tree(_ context.Context, t resolve.Target) (TreeHandle
 		sha = "abcdef0123456789abcdef0123456789abcdef01"
 	}
 	return TreeHandle{
-		FS:         s.fsys,
-		CommitSHA:  sha,
-		CommitTime: fixedTime,
-		SiteID:     s.siteID,
-		Exists:     true,
+		FS:           s.fsys,
+		CommitSHA:    sha,
+		CommitTime:   fixedTime,
+		SiteID:       s.siteID,
+		CacheVersion: p.cacheVersion,
+		Exists:       true,
 	}, nil
 }
 

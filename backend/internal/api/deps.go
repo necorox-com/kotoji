@@ -41,6 +41,12 @@ type MetaStore interface {
 	// ---- site settings (owner-only patch) ----
 	UpdateSiteSettings(ctx context.Context, arg gen.UpdateSiteSettingsParams) error
 
+	// BumpCacheVersion increments the per-site cache generation and returns the NEW
+	// value. Backs the operator "Clear cache" action: the data plane folds
+	// cache_version into the asset ETag, so a bump forces all clients to refetch
+	// fresh on their next revalidation (no new commit required).
+	BumpCacheVersion(ctx context.Context, id uuid.UUID) (int32, error)
+
 	// ---- users (member-by-email + admin) ----
 	GetUserByEmail(ctx context.Context, email string) (gen.User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (gen.User, error)

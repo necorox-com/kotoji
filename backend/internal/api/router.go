@@ -151,6 +151,10 @@ func (s *server) mountAPI(r chi.Router) {
 
 			// publish
 			r.Post("/publish", s.publish)
+
+			// cache purge: operator "Clear cache" — bumps the per-site cache version
+			// (folded into every asset ETag) so clients refetch fresh. editor|owner.
+			r.Post("/cache/purge", s.purgeSiteCache)
 		})
 	})
 

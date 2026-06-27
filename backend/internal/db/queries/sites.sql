@@ -112,6 +112,18 @@ SET published_commit_sha = @published_commit_sha,
     updated_at           = now()
 WHERE id = @id;
 
+-- name: BumpCacheVersion :one
+-- Operator "Clear cache": increment the per-site cache generation and return the
+-- NEW value. The data plane folds cache_version into the asset ETag, so a bump
+-- changes every asset's ETag at once and forces clients to refetch fresh on their
+-- next revalidation (no new commit required). updated_at is intentionally LEFT
+-- UNCHANGED: a cache purge is not a content edit and must not reorder the dashboard
+-- "recent activity" list (ListSitesForUser orders by updated_at).
+UPDATE sites
+SET cache_version = cache_version + 1
+WHERE id = @id AND deleted_at IS NULL
+RETURNING cache_version;
+
 -- name: UpdateSiteSettings :exec
 -- Owner-only settings edit (visibility, publish_mode, web_root, description).
 UPDATE sites

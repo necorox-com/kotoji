@@ -36,6 +36,8 @@ type fakeMetaStore struct {
 	audit []gen.InsertAuditParams
 	// settingsUpdates captures UpdateSiteSettings calls.
 	settingsUpdates []gen.UpdateSiteSettingsParams
+	// cacheVersions tracks the per-site cache_version BumpCacheVersion increments.
+	cacheVersions map[uuid.UUID]int32
 
 	// github is the DB-stored GitHub mirror config the admin-github handler reads/
 	// writes. setGitHubInputs records every SetGitHubConfig call for assertions.
@@ -57,11 +59,12 @@ type fakeMetaStore struct {
 
 func newFakeMetaStore() *fakeMetaStore {
 	return &fakeMetaStore{
-		roles:   map[string]gen.SiteRole{},
-		members: map[uuid.UUID][]gen.ListMembersRow{},
-		tokens:  map[uuid.UUID][]gen.ListUserTokensRow{},
-		users:   map[uuid.UUID]gen.User{},
-		byEmail: map[string]gen.User{},
+		roles:         map[string]gen.SiteRole{},
+		members:       map[uuid.UUID][]gen.ListMembersRow{},
+		tokens:        map[uuid.UUID][]gen.ListUserTokensRow{},
+		users:         map[uuid.UUID]gen.User{},
+		byEmail:       map[string]gen.User{},
+		cacheVersions: map[uuid.UUID]int32{},
 	}
 }
 
@@ -222,6 +225,13 @@ func (f *fakeMetaStore) UpdateSiteSettings(_ context.Context, arg gen.UpdateSite
 	defer f.mu.Unlock()
 	f.settingsUpdates = append(f.settingsUpdates, arg)
 	return nil
+}
+
+func (f *fakeMetaStore) BumpCacheVersion(_ context.Context, id uuid.UUID) (int32, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cacheVersions[id]++
+	return f.cacheVersions[id], nil
 }
 
 func (f *fakeMetaStore) GetUserByEmail(_ context.Context, email string) (gen.User, error) {

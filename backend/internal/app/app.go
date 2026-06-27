@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -497,7 +498,11 @@ func (a *App) dataHandler(res resolve.Resolver, control http.Handler) *serve.Han
 			// preview iframe can read the bytes. Thread the control base URL in as the
 			// allowed framing origin; the rest stays at the locked defaults.
 			Security: servedSecurityConfig(a.cfg.ControlBaseURL),
-			Cache:    serve.CacheConfig{}, // zero value: ETag ON + base-href injection ON
+			// ETag ON + base-href injection ON (opt-out fields stay false). AssetMaxAge
+			// comes from KOTOJI_ASSET_MAX_AGE (seconds): <=0 => the data plane emits
+			// "no-cache" so a re-publish/cache-purge propagates IMMEDIATELY (ETag-driven
+			// 304s); >0 => "public, max-age=N" (opt-in staleness window).
+			Cache: serve.CacheConfig{AssetMaxAge: time.Duration(a.cfg.AssetMaxAge) * time.Second},
 		},
 	})
 }

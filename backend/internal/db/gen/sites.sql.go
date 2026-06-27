@@ -12,6 +12,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bumpCacheVersion = `-- name: BumpCacheVersion :one
+UPDATE sites
+SET cache_version = cache_version + 1
+WHERE id = $1 AND deleted_at IS NULL
+RETURNING cache_version
+`
+
+// Operator "Clear cache": increment the per-site cache generation and return the
+// NEW value. The data plane folds cache_version into the asset ETag, so a bump
+// changes every asset's ETag at once and forces clients to refetch fresh on their
+// next revalidation (no new commit required). updated_at is intentionally LEFT
+// UNCHANGED: a cache purge is not a content edit and must not reorder the dashboard
+// "recent activity" list (ListSitesForUser orders by updated_at).
+func (q *Queries) BumpCacheVersion(ctx context.Context, id uuid.UUID) (int32, error) {
+	row := q.db.QueryRow(ctx, bumpCacheVersion, id)
+	var cache_version int32
+	err := row.Scan(&cache_version)
+	return cache_version, err
+}
+
 const createSite = `-- name: CreateSite :one
 
 INSERT INTO sites (
@@ -28,7 +48,7 @@ VALUES (
     $7,
     $8
 )
-RETURNING id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at
+RETURNING id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at, cache_version
 `
 
 type CreateSiteParams struct {
@@ -74,6 +94,7 @@ func (q *Queries) CreateSite(ctx context.Context, arg CreateSiteParams) (Site, e
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CacheVersion,
 	)
 	return i, err
 }
@@ -95,7 +116,7 @@ func (q *Queries) DeleteRedirect(ctx context.Context, arg DeleteRedirectParams) 
 }
 
 const getSiteByGitHubRepo = `-- name: GetSiteByGitHubRepo :one
-SELECT id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at FROM sites
+SELECT id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at, cache_version FROM sites
 WHERE github_repo = $1 AND deleted_at IS NULL
 `
 
@@ -121,12 +142,13 @@ func (q *Queries) GetSiteByGitHubRepo(ctx context.Context, githubRepo *string) (
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CacheVersion,
 	)
 	return i, err
 }
 
 const getSiteByHandle = `-- name: GetSiteByHandle :one
-SELECT id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at FROM sites
+SELECT id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at, cache_version FROM sites
 WHERE handle = $1 AND deleted_at IS NULL
 `
 
@@ -151,12 +173,13 @@ func (q *Queries) GetSiteByHandle(ctx context.Context, handle string) (Site, err
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CacheVersion,
 	)
 	return i, err
 }
 
 const getSiteByID = `-- name: GetSiteByID :one
-SELECT id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at FROM sites WHERE id = $1
+SELECT id, handle, owner_id, visibility, default_branch, published_commit_sha, published_at, publish_mode, github_repo, web_root, description, deleted_at, created_at, updated_at, cache_version FROM sites WHERE id = $1
 `
 
 // Control-plane detail load by immutable UUID. Soft-deleted rows are still returned
@@ -179,12 +202,13 @@ func (q *Queries) GetSiteByID(ctx context.Context, id uuid.UUID) (Site, error) {
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CacheVersion,
 	)
 	return i, err
 }
 
 const getSiteByRedirect = `-- name: GetSiteByRedirect :one
-SELECT s.id, s.handle, s.owner_id, s.visibility, s.default_branch, s.published_commit_sha, s.published_at, s.publish_mode, s.github_repo, s.web_root, s.description, s.deleted_at, s.created_at, s.updated_at
+SELECT s.id, s.handle, s.owner_id, s.visibility, s.default_branch, s.published_commit_sha, s.published_at, s.publish_mode, s.github_repo, s.web_root, s.description, s.deleted_at, s.created_at, s.updated_at, s.cache_version
 FROM handle_redirects r
 JOIN sites s ON s.id = r.site_id
 WHERE r.old_handle = $1 AND s.deleted_at IS NULL
@@ -210,6 +234,7 @@ func (q *Queries) GetSiteByRedirect(ctx context.Context, oldHandle string) (Site
 		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.CacheVersion,
 	)
 	return i, err
 }

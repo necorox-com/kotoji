@@ -38,6 +38,17 @@ func TestLoad_DevelopmentDefaults(t *testing.T) {
 	// Zip allowlist parsed into a slice.
 	assert.Contains(t, cfg.Zip.AllowedExt, ".html")
 	assert.Contains(t, cfg.Zip.AllowedExt, ".wasm")
+	// AssetMaxAge defaults to 0 => the data plane emits "no-cache" (immediate
+	// re-publish/cache-purge propagation).
+	assert.Equal(t, 0, cfg.AssetMaxAge)
+}
+
+func TestLoad_AssetMaxAge(t *testing.T) {
+	env := devBase()
+	env["KOTOJI_ASSET_MAX_AGE"] = "3600"
+	cfg, err := LoadFromMap(env)
+	require.NoError(t, err)
+	assert.Equal(t, 3600, cfg.AssetMaxAge, "positive value opts into public,max-age=N")
 }
 
 func TestLoad_DevAllowsNoAuthAndNoDB(t *testing.T) {

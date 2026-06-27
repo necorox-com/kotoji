@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient, call } from "../client";
 import { queryKeys } from "../keys";
 import type {
+  CachePurgeResult,
   CreateSiteRequest,
   MirrorResult,
   Site,
@@ -116,6 +117,30 @@ export function useMirror(handle: string) {
       if (result.ok) {
         qc.invalidateQueries({ queryKey: queryKeys.site(handle).detail() });
       }
+    },
+  });
+}
+
+/**
+ * Purge the served cache for a site (editor or owner) by bumping its per-site
+ * cache version, which is folded into every served asset's ETag. Published
+ * changes already propagate immediately (assets are served `no-cache`); this
+ * action additionally forces every client to refetch fresh on their next
+ * revalidation — without requiring a new publish/commit. Returns the NEW
+ * cacheVersion. The site detail is refreshed so any version-derived view stays
+ * coherent (mirrors the other site action hooks).
+ */
+export function usePurgeCache(handle: string) {
+  const qc = useQueryClient();
+  return useMutation<CachePurgeResult, Error, void>({
+    mutationFn: () =>
+      call(() =>
+        apiClient.POST("/api/sites/{handle}/cache/purge", {
+          params: { path: { handle } },
+        })
+      ),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.site(handle).detail() });
     },
   });
 }

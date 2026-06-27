@@ -198,6 +198,7 @@ type Site struct {
 	DeletedAt          pgtype.Timestamptz `json:"deleted_at"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	CacheVersion       int32              `json:"cache_version"`
 }
 
 type SiteMember struct {

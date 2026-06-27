@@ -662,6 +662,28 @@ paths:
                   - $ref: "#/components/schemas/PublishConflictEnvelope"
         "422": { $ref: "#/components/responses/ValidationFailed" }
 
+  /api/sites/{handle}/cache/purge:
+    parameters:
+      - $ref: "#/components/parameters/Handle"
+    post:
+      tags: [sites]
+      operationId: purgeSiteCache
+      summary: Clear the served cache for a site by bumping its cache version (editor or owner)
+      description: >
+        Bumps the per-site cache version, which is folded into every served asset's
+        ETag. After a purge, all clients refetch fresh content on their next
+        revalidation — without requiring a new publish/commit. Requires the same role
+        that can publish (editor or owner); viewers are rejected. No request body.
+      responses:
+        "200":
+          description: Cache purged (cache version bumped)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CachePurgeResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/sites/{handle}/mirror:
     parameters:
       - $ref: "#/components/parameters/Handle"
@@ -1653,6 +1675,13 @@ components:
         warnings:
           type: array
           items: { type: string }
+    CachePurgeResult:
+      type: object
+      required: [cacheVersion]
+      properties:
+        cacheVersion:
+          type: integer
+          description: The NEW per-site cache version after the bump (folded into every asset ETag).
     MirrorResult:
       type: object
       required: [ok, pushed, branches, message]

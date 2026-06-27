@@ -65,9 +65,13 @@ type Site struct {
 	HasPublished  bool       `json:"hasPublished"`         // derived: published_commit_sha IS NOT NULL
 	PublishedSHA  string     `json:"publishedSha,omitempty"`
 	PublishedAt   *time.Time `json:"publishedAt,omitempty"`
-	Description   string     `json:"description"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	// CacheVersion is the per-site cache generation (sites.cache_version). The data
+	// plane folds it into the asset ETag; an operator cache-purge bumps it so all
+	// clients refetch fresh on their next revalidation (no new commit required).
+	CacheVersion int64     `json:"cacheVersion"`
+	Description  string    `json:"description"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
 // Branch is one git branch with its head and a precomputed preview host label

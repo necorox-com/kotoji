@@ -86,6 +86,7 @@ type SiteRecord struct {
 	GitHubRepo    *string
 	WebRoot       string
 	Description   string
+	CacheVersion  int64
 	DeletedAt     *time.Time
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -103,6 +104,7 @@ func (r SiteRecord) toSite() Site {
 		PublishMode:   r.PublishMode,
 		WebRoot:       r.WebRoot,
 		Description:   r.Description,
+		CacheVersion:  r.CacheVersion,
 		CreatedAt:     r.CreatedAt,
 		UpdatedAt:     r.UpdatedAt,
 	}

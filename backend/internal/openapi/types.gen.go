@@ -134,6 +134,12 @@ type Branch struct {
 // BranchString Host-safe branch name. "published"/"draft" reserved; previews are feature-<user>-<slug>.
 type BranchString = string
 
+// CachePurgeResult defines model for CachePurgeResult.
+type CachePurgeResult struct {
+	// CacheVersion The NEW per-site cache version after the bump (folded into every asset ETag).
+	CacheVersion int `json:"cacheVersion"`
+}
+
 // CommitInfo defines model for CommitInfo.
 type CommitInfo struct {
 	AuthorEmail string    `json:"authorEmail"`

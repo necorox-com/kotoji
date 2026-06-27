@@ -26,7 +26,7 @@ import { use, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useTranslations } from "next-intl";
 import { toast } from "sonner";
-import { Trash2 } from "lucide-react";
+import { Trash2, RefreshCw } from "lucide-react";
 
 import { GitHubSection } from "@/components/organisms";
 import { ConfirmDialog } from "@/components/molecules/confirm-dialog";
@@ -49,6 +49,7 @@ import {
   useConfig,
   useUpdateSite,
   useRenameSite,
+  usePurgeCache,
   useDeleteSite,
 } from "@/lib/api/hooks";
 import { errorMessage } from "@/lib/api/error";
@@ -81,11 +82,15 @@ export default function SettingsPage({ params }: SiteParams) {
 
   const updateSite = useUpdateSite(handle);
   const renameSite = useRenameSite(handle);
+  const purgeCache = usePurgeCache(handle);
   const deleteSite = useDeleteSite();
 
   const baseDomain = config?.baseDomain ?? DEFAULT_BASE_DOMAIN;
   const canManage = roleCan(role, "manageSettings");
   const canRename = roleCan(role, "rename");
+  // Cache purge follows the same role as publish (editor or owner); viewers are
+  // rejected server-side, so we only render the affordance when permitted.
+  const canPurgeCache = roleCan(role, "publish");
   const canDelete = roleCan(role, "deleteSite");
 
   // General settings local form state (seeded from the fetched site).
@@ -95,6 +100,7 @@ export default function SettingsPage({ params }: SiteParams) {
   // Rename + delete local state.
   const [newHandle, setNewHandle] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [clearCacheOpen, setClearCacheOpen] = useState(false);
 
   // Seed the form from the site DURING render (React-recommended over a
   // set-state-in-effect; mirrors MonacoEditorPanel's seededKey idiom). We re-seed
@@ -144,6 +150,16 @@ export default function SettingsPage({ params }: SiteParams) {
       router.replace(`/sites/${renamed.handle}/settings`);
     } catch (err) {
       toast.error(errorMessage(err, t("renameError")));
+    }
+  };
+
+  const confirmClearCache = async () => {
+    try {
+      await purgeCache.mutateAsync();
+      toast.success(t("cacheCleared"));
+      setClearCacheOpen(false);
+    } catch (err) {
+      toast.error(errorMessage(err, t("cacheClearError")));
     }
   };
 
@@ -324,6 +340,34 @@ export default function SettingsPage({ params }: SiteParams) {
           your account Settings (/settings), not per project — one token spans
           every project you're a member of. So no token panel here. */}
 
+      {/* Cache (editor/owner). Assets are served `no-cache`, so a publish
+          already propagates immediately; this is the explicit "force all
+          visitors to refetch" escape hatch — it bumps the per-site cache
+          version folded into every asset ETag. */}
+      {canPurgeCache ? (
+        <section className="space-y-3" aria-labelledby="settings-cache">
+          <h2
+            id="settings-cache"
+            className="text-lg font-semibold text-foreground"
+          >
+            {t("cacheTitle")}
+          </h2>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-muted-foreground">{t("cacheBody")}</p>
+            <Button
+              variant="outline"
+              onClick={() => setClearCacheOpen(true)}
+              disabled={purgeCache.isPending}
+              aria-busy={purgeCache.isPending}
+              className="shrink-0"
+            >
+              <RefreshCw aria-hidden="true" />
+              {t("clearCache")}
+            </Button>
+          </div>
+        </section>
+      ) : null}
+
       {/* Danger zone (owner only) */}
       {canDelete ? (
         <section
@@ -351,6 +395,18 @@ export default function SettingsPage({ params }: SiteParams) {
           </div>
         </section>
       ) : null}
+
+      {/* Clear-cache confirmation (no typed phrase — it's reversible/harmless,
+          just a "force refetch"). */}
+      <ConfirmDialog
+        open={clearCacheOpen}
+        onOpenChange={setClearCacheOpen}
+        title={t("clearCacheConfirmTitle")}
+        description={t("clearCacheConfirmBody")}
+        confirmLabel={t("clearCache")}
+        onConfirm={confirmClearCache}
+        loading={purgeCache.isPending}
+      />
 
       {/* Typed-handle delete confirmation. */}
       <ConfirmDialog

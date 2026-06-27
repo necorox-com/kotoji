@@ -19,6 +19,7 @@ export {
   useRenameSite,
   useUpdateSite,
   useMirror,
+  usePurgeCache,
   useDeleteSite,
 } from "./use-sites";
 export {

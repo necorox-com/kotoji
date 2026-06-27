@@ -22,7 +22,10 @@ import (
 // default-ON behavior (ETag on, base-href injection on) without a tri-state.
 type CacheConfig struct {
 	// AssetMaxAge is the max-age for non-HTML assets when NOT fingerprinted.
-	// Default 1h.
+	// <=0 => "no-cache" (store-but-revalidate-every-time): the commit-derived
+	// ETag makes a re-publish visible IMMEDIATELY via cheap 304s, so a returning
+	// visitor never sees stale CSS/JS. >0 => "public, max-age=N" (opt-in to a
+	// time-window cache when the operator accepts up-to-N-seconds staleness).
 	AssetMaxAge time.Duration
 	// DisableETag turns OFF the commit-derived strong ETag + If-None-Match
 	// handling. Default false => ETag ON (routing-and-serving.md §6.3 UseETag default true).
@@ -40,8 +43,8 @@ func (c CacheConfig) etagEnabled() bool     { return !c.DisableETag }
 func (c CacheConfig) baseHrefEnabled() bool { return !c.DisableBaseHref }
 
 const (
-	defaultAssetMaxAge      = time.Hour
 	immutableAssetMaxAge    = 365 * 24 * time.Hour
+	assetNoCacheControl     = "no-cache" // AssetMaxAge<=0 default: store but revalidate every time (ETag-driven 304s)
 	htmlCacheControl        = "no-cache, must-revalidate"
 	previewCacheControl     = "private, no-store"
 	allowMethods            = "GET, HEAD, OPTIONS"
@@ -51,11 +54,11 @@ const (
 	contentTypeTextHTMLUTF8 = "text/html; charset=utf-8"
 )
 
-// normalize fills CacheConfig defaults.
+// normalize fills CacheConfig defaults. AssetMaxAge is intentionally NOT defaulted
+// here: a non-positive value is the meaningful "no-cache" (revalidate-every-time)
+// default that applyCacheHeaders emits, so a re-publish propagates immediately. The
+// function is retained as the single construction-time normalization seam.
 func (c CacheConfig) normalize() CacheConfig {
-	if c.AssetMaxAge <= 0 {
-		c.AssetMaxAge = defaultAssetMaxAge
-	}
 	return c
 }
 
@@ -330,7 +333,7 @@ func (h *Handler) writeContent(w http.ResponseWriter, r *http.Request, target re
 	// path-mode HTML (the bytes are request-specific; §6.3/§6.4).
 	etag := ""
 	if h.cache.etagEnabled() && !target.IsPreview && !transformed {
-		etag = makeETag(tree.CommitSHA, int64(len(body)))
+		etag = makeETag(tree.CommitSHA, tree.CacheVersion, int64(len(body)))
 		w.Header().Set("ETag", etag)
 		if matchETag(r.Header.Get("If-None-Match"), etag) {
 			w.WriteHeader(http.StatusNotModified)
@@ -368,10 +371,22 @@ func (h *Handler) applyCacheHeaders(w http.ResponseWriter, target resolve.Target
 		// Revalidate every time so a publish is seen immediately (cheap 304 via ETag).
 		hdr.Set("Cache-Control", htmlCacheControl)
 	default:
-		maxAge := h.cache.AssetMaxAge
-		cc := fmt.Sprintf("public, max-age=%d", int(maxAge.Seconds()))
-		if h.cache.ImmutableHint {
+		// Non-HTML assets. The DEFAULT (AssetMaxAge<=0) is "no-cache": the client
+		// MAY store the asset but MUST revalidate on every use. Combined with the
+		// commit+cache_version-derived ETag, a re-publish (or a cache purge) is seen
+		// IMMEDIATELY — the revalidation is a cheap 304 until the content changes,
+		// instead of the old public,max-age=3600 that let returning visitors serve
+		// stale CSS/JS for up to an hour. An operator who accepts a staleness window
+		// sets AssetMaxAge>0 (KOTOJI_ASSET_MAX_AGE) to opt into "public, max-age=N",
+		// and ImmutableHint promotes content-hashed assets to a year of immutability.
+		var cc string
+		switch {
+		case h.cache.AssetMaxAge <= 0:
+			cc = assetNoCacheControl
+		case h.cache.ImmutableHint:
 			cc = fmt.Sprintf("public, max-age=%d, immutable", int(immutableAssetMaxAge.Seconds()))
+		default:
+			cc = fmt.Sprintf("public, max-age=%d", int(h.cache.AssetMaxAge.Seconds()))
 		}
 		hdr.Set("Cache-Control", cc)
 	}
@@ -528,8 +543,13 @@ func readFile(fsys fs.FS, name string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// makeETag builds the strong, commit-derived ETag: "<commitSHA12>-<sizeHex>".
-func makeETag(commitSHA string, size int64) string {
+// makeETag builds the strong, commit-derived ETag:
+// "<commitSHA12>-<cacheVersionHex>-<sizeHex>". The per-site cacheVersion is folded
+// in so an operator "Clear cache" (which bumps sites.cache_version) changes EVERY
+// asset ETag for that site, forcing clients to refetch fresh on revalidation —
+// without requiring a new commit. cacheVersion 0 (never purged) keeps the ETag
+// stable across restarts for a given commit+size.
+func makeETag(commitSHA string, cacheVersion, size int64) string {
 	sha := commitSHA
 	if len(sha) > 12 {
 		sha = sha[:12]
@@ -537,7 +557,7 @@ func makeETag(commitSHA string, size int64) string {
 	if sha == "" {
 		sha = "dev"
 	}
-	return fmt.Sprintf("%q", sha+"-"+strconv.FormatInt(size, 16))
+	return fmt.Sprintf("%q", sha+"-"+strconv.FormatInt(cacheVersion, 16)+"-"+strconv.FormatInt(size, 16))
 }
 
 // matchETag reports whether an If-None-Match header matches etag (supporting the

@@ -113,6 +113,7 @@ const (
 	defaultUserSiteQuota    = 50
 	defaultRateLimitAPIRPS  = 20
 	defaultRateLimitServeR  = 100
+	defaultAssetMaxAge      = 0 // seconds; 0 => data plane emits "no-cache" (revalidate; immediate re-publish/purge propagation)
 	defaultLogLevel         = "info"
 	defaultLogFormat        = "json"
 	defaultHandleMinLen     = 2
@@ -278,6 +279,14 @@ type Config struct {
 
 	RateLimitAPIRPS   int
 	RateLimitServeRPS int
+
+	// AssetMaxAge is the Cache-Control max-age (SECONDS) the data plane sets on
+	// NON-HTML assets that are not content-fingerprinted. <=0 (the DEFAULT) =>
+	// "no-cache" (the client stores but revalidates every time; the commit+cache-
+	// version ETag makes a re-publish/purge visible IMMEDIATELY via cheap 304s).
+	// >0 => "public, max-age=N" (opt-in to an up-to-N-seconds staleness window).
+	// From KOTOJI_ASSET_MAX_AGE.
+	AssetMaxAge int
 
 	// Operability / background jobs (architecture.md §8.4, decision #3).
 	SoftDeleteGrace time.Duration // retention before the reaper reclaims a soft-deleted site
@@ -575,6 +584,11 @@ func load(get getenv) (Config, error) {
 	// --- rate limits ---
 	c.RateLimitAPIRPS = getInt(get, "KOTOJI_RATE_LIMIT_API_RPS", defaultRateLimitAPIRPS)
 	c.RateLimitServeRPS = getInt(get, "KOTOJI_RATE_LIMIT_SERVE_RPS", defaultRateLimitServeR)
+
+	// Non-HTML asset cache window (seconds). Default 0 => the data plane emits
+	// "no-cache" so a re-publish/cache-purge propagates immediately (ETag-driven
+	// 304s). A positive value opts into "public, max-age=N".
+	c.AssetMaxAge = getInt(get, "KOTOJI_ASSET_MAX_AGE", defaultAssetMaxAge)
 
 	// --- operability / background jobs ---
 	grace, err := getDuration(get, "KOTOJI_SOFT_DELETE_GRACE", defaultSoftDeleteGrace)

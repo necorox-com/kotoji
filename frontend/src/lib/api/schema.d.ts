@@ -386,6 +386,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sites/{handle}/cache/purge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handle: components["parameters"]["Handle"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clear the served cache for a site by bumping its cache version (editor or owner)
+         * @description Bumps the per-site cache version, which is folded into every served asset's ETag. After a purge, all clients refetch fresh content on their next revalidation — without requiring a new publish/commit. Requires the same role that can publish (editor or owner); viewers are rejected. No request body.
+         */
+        post: operations["purgeSiteCache"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sites/{handle}/mirror": {
         parameters: {
             query?: never;
@@ -992,6 +1014,10 @@ export interface components {
             fromCommit: components["schemas"]["Sha"];
             pushed: boolean;
             warnings?: string[];
+        };
+        CachePurgeResult: {
+            /** @description The NEW per-site cache version after the bump (folded into every asset ETag). */
+            cacheVersion: number;
         };
         MirrorResult: {
             /** @description True when the mirror push succeeded; false on a best-effort failure (still 200). */
@@ -1960,6 +1986,31 @@ export interface operations {
                 };
             };
             422: components["responses"]["ValidationFailed"];
+        };
+    };
+    purgeSiteCache: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                handle: components["parameters"]["Handle"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cache purged (cache version bumped) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CachePurgeResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     mirrorSite: {

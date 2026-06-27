@@ -20,6 +20,13 @@ type Querier interface {
 	AddOwnerMembership(ctx context.Context, arg AddOwnerMembershipParams) error
 	// Admins may ADD entries at runtime (baseline entries are protected above the Store).
 	AddReserved(ctx context.Context, arg AddReservedParams) error
+	// Operator "Clear cache": increment the per-site cache generation and return the
+	// NEW value. The data plane folds cache_version into the asset ETag, so a bump
+	// changes every asset's ETag at once and forces clients to refetch fresh on their
+	// next revalidation (no new commit required). updated_at is intentionally LEFT
+	// UNCHANGED: a cache purge is not a content edit and must not reorder the dashboard
+	// "recent activity" list (ListSitesForUser orders by updated_at).
+	BumpCacheVersion(ctx context.Context, id uuid.UUID) (int32, error)
 	// Persist a new server-side session. The opaque id (cookie value) is app-generated.
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	// sites.sql — site lifecycle + handle resolution queries.

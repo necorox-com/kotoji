@@ -142,6 +142,7 @@ func siteRecordFromGen(r gen.Site) SiteRecord {
 		GitHubRepo:    r.GithubRepo,
 		WebRoot:       r.WebRoot,
 		Description:   r.Description,
+		CacheVersion:  int64(r.CacheVersion),
 		DeletedAt:     nullableTime(r.DeletedAt),
 		CreatedAt:     r.CreatedAt.Time,
 		UpdatedAt:     r.UpdatedAt.Time,

@@ -3,10 +3,13 @@ package serve
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/necorox-com/kotoji/backend/internal/resolve"
 )
@@ -16,6 +19,26 @@ func do(h *Handler, method, target string) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	return w
+}
+
+// newCacheHandler builds a Handler with an explicit CacheConfig so cache-header
+// tests can exercise the AssetMaxAge / ImmutableHint matrix (the default-path
+// newTestHandler always uses the zero-value CacheConfig).
+func newCacheHandler(t *testing.T, target resolve.Target, files fstest.MapFS, cache CacheConfig) *Handler {
+	t.Helper()
+	tp := &fakeTreeProvider{
+		byHandle:  map[string]fakeSite{target.Handle: {fsys: files, siteID: uuid.New()}},
+		commitSHA: "abcdef0123456789abcdef0123456789abcdef01",
+	}
+	return NewHandler(Deps{
+		Resolver: staticResolver{target: target},
+		Trees:    tp,
+		Authz:    OpenPreviewAuthz{},
+		Config: HandlerConfig{
+			Cache: cache,
+			Now:   func() time.Time { return fixedTime },
+		},
+	})
 }
 
 func TestServe_IndexResolution(t *testing.T) {
@@ -354,11 +377,36 @@ func TestServe_Caching(t *testing.T) {
 		}
 	})
 
-	t.Run("asset_max_age", func(t *testing.T) {
+	t.Run("asset_default_no_cache", func(t *testing.T) {
+		// DEFAULT (zero-value CacheConfig => AssetMaxAge<=0): assets are "no-cache"
+		// (store-but-revalidate-every-time) so a re-publish/cache-purge propagates
+		// immediately via the commit+cache-version ETag and cheap 304s.
 		h, _ := newTestHandler(t, publishedTarget("s"), files, nil)
 		w := do(h, http.MethodGet, "/style.css")
-		if cc := w.Header().Get("Cache-Control"); !strings.HasPrefix(cc, "public, max-age=") {
-			t.Fatalf("asset Cache-Control want public max-age, got %q", cc)
+		if cc := w.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("default asset Cache-Control want %q got %q", "no-cache", cc)
+		}
+		if w.Header().Get("ETag") == "" {
+			t.Fatalf("asset should still carry an ETag (revalidation token)")
+		}
+	})
+
+	t.Run("asset_max_age_opt_in", func(t *testing.T) {
+		// AssetMaxAge>0 opts into "public, max-age=N".
+		h := newCacheHandler(t, publishedTarget("s"), files, CacheConfig{AssetMaxAge: 120 * time.Second})
+		w := do(h, http.MethodGet, "/style.css")
+		if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=120" {
+			t.Fatalf("asset Cache-Control want %q got %q", "public, max-age=120", cc)
+		}
+	})
+
+	t.Run("asset_immutable_hint", func(t *testing.T) {
+		// ImmutableHint promotes content-hashed assets to a year of immutability.
+		h := newCacheHandler(t, publishedTarget("s"), files, CacheConfig{AssetMaxAge: 120 * time.Second, ImmutableHint: true})
+		w := do(h, http.MethodGet, "/style.css")
+		want := "public, max-age=" + strconv.Itoa(int(immutableAssetMaxAge.Seconds())) + ", immutable"
+		if cc := w.Header().Get("Cache-Control"); cc != want {
+			t.Fatalf("immutable asset Cache-Control want %q got %q", want, cc)
 		}
 	})
 
@@ -388,6 +436,56 @@ func TestServe_Caching(t *testing.T) {
 			t.Fatalf("preview must not set ETag")
 		}
 	})
+}
+
+// TestMakeETag_FoldsCacheVersion pins that the per-site cache_version is folded
+// into the asset ETag: two different versions yield DIFFERENT ETags for the same
+// commit+size, so an operator "Clear cache" (which bumps cache_version) changes
+// every asset ETag and forces clients to refetch fresh on their next revalidation.
+func TestMakeETag_FoldsCacheVersion(t *testing.T) {
+	const sha = "abcdef0123456789abcdef0123456789abcdef01"
+	const size int64 = 1234
+
+	e0 := makeETag(sha, 0, size)
+	e1 := makeETag(sha, 1, size)
+	if e0 == e1 {
+		t.Fatalf("ETag must change when cache_version changes: v0=%s v1=%s", e0, e1)
+	}
+	// Same commit + same version + same size must be STABLE (cheap 304s across restarts).
+	if again := makeETag(sha, 1, size); again != e1 {
+		t.Fatalf("ETag must be deterministic for the same inputs: %s != %s", again, e1)
+	}
+	// A new commit must also change the ETag (existing behavior preserved).
+	if e0 == makeETag("ffffffffffffffffffffffffffffffffffffffff", 0, size) {
+		t.Fatalf("ETag must change when the commit changes")
+	}
+}
+
+// TestServe_ETagReflectsCacheVersion drives the full handler path: bumping the
+// served TreeHandle.CacheVersion changes the asset ETag the client sees.
+func TestServe_ETagReflectsCacheVersion(t *testing.T) {
+	files := fstest.MapFS{"style.css": {Data: []byte("body{}")}}
+	target := publishedTarget("s")
+	const sha = "abcdef0123456789abcdef0123456789abcdef01"
+
+	etagAt := func(version int64) string {
+		tp := &fakeTreeProvider{
+			byHandle:     map[string]fakeSite{target.Handle: {fsys: files, siteID: uuid.New()}},
+			commitSHA:    sha,
+			cacheVersion: version,
+		}
+		h := NewHandler(Deps{
+			Resolver: staticResolver{target: target},
+			Trees:    tp,
+			Authz:    OpenPreviewAuthz{},
+			Config:   HandlerConfig{Now: func() time.Time { return fixedTime }},
+		})
+		return do(h, http.MethodGet, "/style.css").Header().Get("ETag")
+	}
+
+	if etagAt(0) == etagAt(1) {
+		t.Fatalf("served asset ETag must differ across cache versions")
+	}
 }
 
 func TestServe_NotFoundPages(t *testing.T) {

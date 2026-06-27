@@ -178,11 +178,12 @@ func (c *conformantEnv) checkConformance(t *testing.T, method, path string, reqB
 // exactly the documented number of paths.
 func TestSpecLoadsAndIsValid(t *testing.T) {
 	doc := loadSpec(t)
-	// 28 = 23 baseline + POST /api/sites/{handle}/mirror + POST /auth/setup
+	// 29 = 23 baseline + POST /api/sites/{handle}/mirror + POST /auth/setup
 	// (first-run admin-password setup) + /api/admin/github (GET+PUT, one path) +
-	// /api/admin/domain (GET+PUT, one path) + /api/admin/oidc (GET+PUT, one path).
-	if got := doc.Paths.Len(); got != 28 {
-		t.Fatalf("spec paths = %d, want 28", got)
+	// /api/admin/domain (GET+PUT, one path) + /api/admin/oidc (GET+PUT, one path) +
+	// POST /api/sites/{handle}/cache/purge (operator "Clear cache").
+	if got := doc.Paths.Len(); got != 29 {
+		t.Fatalf("spec paths = %d, want 29", got)
 	}
 }
 
@@ -234,6 +235,9 @@ func TestResponseConformance(t *testing.T) {
 			"publish", http.MethodPost, "/api/sites/conform-publish/publish",
 			openapi.PublishRequest{BaseSha: pubFC.Sha}, http.StatusOK,
 		},
+		// purgeSiteCache returns 200 + CachePurgeResult; validates the new response
+		// schema against the contract (owner can purge).
+		{"purgeSiteCache", http.MethodPost, "/api/sites/conform-site/cache/purge", nil, http.StatusOK},
 	}
 
 	for _, f := range fixtures {
