@@ -9,16 +9,9 @@ out under each release.
 
 ## [Unreleased]
 
-### Added
+_No unreleased changes yet._
 
-- Multi-arch (`linux/amd64`, `linux/arm64`) release images published to GHCR for
-  both services (`kotoji-backend`, `kotoji-frontend`) on each `v*` git tag.
-- `deploy/docker-compose.ghcr.yml` overlay to run the stack from the prebuilt
-  GHCR images instead of building from source.
-- OSS hygiene: `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue and
-  pull-request templates, and this changelog.
-
-## [0.1.0] - 2026-06-26
+## [0.1.0] - 2026-06-27
 
 First tagged release — the MVP of MCP-native, self-hosted hosting for AI-built
 web tools. The full stack ships and runs; expect rough edges and breaking
@@ -64,6 +57,13 @@ changes while the API surface settles.
 - **CI** — backend build/vet/gofmt/test (+ conformance), backend integration
   against Postgres, frontend tsc/lint/build, and a drift gate proving the
   generated artifacts (sqlc, oapi-codegen, openapi-typescript) are current.
+- **Prebuilt release images (GHCR)** — multi-arch (`linux/amd64`,
+  `linux/arm64`) images for both services (`kotoji-backend`,
+  `kotoji-frontend`) published to GHCR on each `v*` git tag, plus a
+  `deploy/docker-compose.ghcr.yml` overlay to run the stack from the prebuilt
+  images instead of building from source.
+- **OSS hygiene** — `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`,
+  issue and pull-request templates, and this changelog.
 
 ### Security
 

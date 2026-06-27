@@ -9,15 +9,14 @@ MCP/API tokens, and writes to git on your behalf. We take reports seriously.
 **Please do not open a public GitHub issue for security problems.** A public
 issue discloses the flaw before a fix exists.
 
-Report privately through one of:
+Report privately via **GitHub Security Advisories**: on the repository, open the
+**Security** tab → **Report a vulnerability** ("Privately report a security
+vulnerability"). This opens a private advisory thread with the maintainer and
+lets us collaborate on a fix (and a CVE if warranted) before anything becomes
+public.
 
-1. **GitHub Security Advisories (preferred).** On the repository, go to the
-   **Security** tab → **Report a vulnerability** ("Privately report a security
-   vulnerability"). This opens a private advisory thread with the maintainers
-   and lets us collaborate on a fix and a CVE if warranted.
-2. **Email.** If you cannot use Advisories, email **security@example.com** with
-   the details. Replace this with the maintainer contact for your fork or
-   instance.
+(Running a fork or your own instance? GitHub Security Advisories work on your own
+fork too, so reports reach *you*, not us.)
 
 Please include, as far as you can:
 

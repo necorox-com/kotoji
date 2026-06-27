@@ -671,7 +671,7 @@ Notes:
 | `KOTOJI_AUTO_MIGRATE` | `true` | – | run embedded goose migrations on boot (advisory-locked). Set `false` to manage schema out of band. |
 | `KOTOJI_DATA_DIR` | `/data` | – | root for repos, served worktrees, tmp, backups. |
 | `KOTOJI_GIT_BIN` | `git` | – | path to git binary (for os/exec). |
-| `KOTOJI_SECRET_KEY` | (empty) | – | **at-rest key** (hex/base64, ≥32 bytes) for AES-256-GCM encryption of the DB-stored GitHub PAT. Optional: when unset a stable key is *derived* from a server seed (so env-only deploys still decrypt across restarts). |
+| `KOTOJI_SECRET_KEY` | (empty) | ✓(prod) | **at-rest key** (hex/base64, ≥32 bytes) for AES-256-GCM encryption of DB-stored secrets (GitHub PAT, OIDC client secret). **Required in production** — Load fails fast (fail-closed) if unset. In *development only*, an unset key is *derived* from a server seed so env-only dev deploys still decrypt across restarts. Generate one with `openssl rand -hex 32`. |
 | `KOTOJI_AUTH_MODE` | `oidc` | – | `oidc` \| `password` \| `none` (`none` rejected in prod). |
 | `KOTOJI_AUTH_OIDC_ISSUER` | `https://accounts.google.com` | oidc | OIDC discovery issuer. |
 | `KOTOJI_AUTH_OIDC_CLIENT_ID` | – | oidc | OAuth client id. |
@@ -714,7 +714,7 @@ Notes:
 
 > **GitHub mirror config is DB-or-env (DB overrides).** The admin saves it via the GUI (instance Settings
 > page → `PUT /api/admin/github`) into `instance_settings`; the PAT is stored AES-256-GCM-encrypted
-> (`internal/secretbox`, key from `KOTOJI_SECRET_KEY` or derived) and never echoed back. The env
+> (`internal/secretbox`, key from `KOTOJI_SECRET_KEY` — required in production, derived in dev only) and never echoed back. The env
 > `KOTOJI_GITHUB_*` vars are only a bootstrap fallback.
 
 ### 6.2 Edge overlay (`deploy/docker-compose.edge.yml`, opt-in — §4.4)
