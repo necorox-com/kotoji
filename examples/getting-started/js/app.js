@@ -47,6 +47,10 @@
     // Reflect current state on every toggle button for screen readers.
     var btns = document.querySelectorAll("[data-lang-toggle]");
     btns.forEach(function (btn) {
+      // The button always shows the language it switches TO, set as plain text
+      // so the control can never collapse to zero width (it must not depend on
+      // the .lang-ja/.lang-en content-swap that the body sections use).
+      btn.textContent = isEn ? "日本語" : "English";
       btn.setAttribute("aria-pressed", isEn ? "true" : "false");
       btn.setAttribute(
         "aria-label",
