@@ -41,7 +41,7 @@
 
   function applyLang(lang) {
     var isEn = lang === LANG_EN;
-    document.body.classList.toggle("lang-en", isEn);
+    document.body.classList.toggle("show-en", isEn);
     document.documentElement.lang = isEn ? "en" : "ja";
 
     // Reflect current state on every toggle button for screen readers.
@@ -65,7 +65,7 @@
     var btns = document.querySelectorAll("[data-lang-toggle]");
     btns.forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var next = document.body.classList.contains("lang-en")
+        var next = document.body.classList.contains("show-en")
           ? LANG_JA
           : LANG_EN;
         saveLang(next);

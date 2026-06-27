@@ -111,9 +111,12 @@ a:hover { text-decoration: underline; }
    set is visible. With NO JavaScript, the page degrades to Japanese — the
    default state — so the toggle is a pure progressive enhancement.
    ────────────────────────────────────────────────────────────────────────── */
+/* The body's English-mode flag is `show-en` (NOT `lang-en`) on purpose: reusing
+   `lang-en` as the body class collided with the content class `.lang-en`, so
+   `.lang-en { display:none }` also matched the body and broke the layout. */
 .lang-en { display: none; }
-body.lang-en .lang-ja { display: none; }
-body.lang-en .lang-en { display: revert; }
+body.show-en .lang-ja { display: none; }
+body.show-en .lang-en { display: revert; }
 
 .lang-toggle {
   font: inherit;
@@ -126,18 +129,7 @@ body.lang-en .lang-en { display: revert; }
   padding: 6px 12px;
   cursor: pointer;
   white-space: nowrap;
-  /* The toggle is taken OUT of the flex header flow (it was being collapsed to
-     0x0 as the last flex item when the English nav widened). Fixed to the
-     top-right corner it always has its own explicit, clickable box. */
-  position: fixed;
-  top: 12px;
-  right: 16px;
-  z-index: 30;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 4.5em;
-  min-height: 2.2em;
+  flex-shrink: 0;
 }
 .lang-toggle:hover { color: var(--fg); border-color: var(--accent); background: var(--accent-soft); }
 /* The toggle's two labels live inside as .lang-ja / .lang-en spans, so the
