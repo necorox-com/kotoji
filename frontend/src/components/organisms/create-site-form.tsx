@@ -78,7 +78,7 @@ const FALLBACK_RESERVED = [
 const HANDLE_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 type StartMode = "empty" | "zip" | "template";
-const VISIBILITY_VALUES: SiteVisibility[] = ["private", "internal", "public"];
+const VISIBILITY_VALUES: SiteVisibility[] = ["private", "members", "public"];
 
 export interface CreateSiteFormProps {
   /**
@@ -130,7 +130,7 @@ export function CreateSiteForm({
           .refine((h) => !reserved.includes(h.toLowerCase()), {
             message: t("handleReserved"),
           }),
-        visibility: z.enum(["public", "internal", "private"]),
+        visibility: z.enum(["public", "members", "private"]),
         description: z.string().max(280).optional(),
       }),
     [minLen, maxLen, reserved, t],
@@ -307,8 +307,8 @@ export function CreateSiteForm({
                     tSettings(
                       v === "public"
                         ? "visibilityPublic"
-                        : v === "internal"
-                          ? "visibilityInternal"
+                        : v === "members"
+                          ? "visibilityMembers"
                           : "visibilityPrivate",
                     )
                   }
@@ -320,8 +320,8 @@ export function CreateSiteForm({
                     {tSettings(
                       v === "public"
                         ? "visibilityPublic"
-                        : v === "internal"
-                          ? "visibilityInternal"
+                        : v === "members"
+                          ? "visibilityMembers"
                           : "visibilityPrivate",
                     )}
                   </SelectItem>

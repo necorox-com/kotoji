@@ -1051,7 +1051,7 @@ components:
       enum: [owner, editor, viewer]
     SiteVisibility:
       type: string
-      enum: [public, internal, private]
+      enum: [public, members, private]
     PublishMode:
       type: string
       enum: [direct, request]

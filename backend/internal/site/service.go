@@ -57,7 +57,7 @@ type Site struct {
 	ID            uuid.UUID  `json:"id"`
 	Handle        Handle     `json:"handle"`
 	OwnerID       uuid.UUID  `json:"ownerId"`
-	Visibility    string     `json:"visibility"`           // "public" | "internal" | "private"
+	Visibility    string     `json:"visibility"`           // "public" | "members" | "private"
 	DefaultBranch BranchName `json:"defaultBranch"`        // usually "draft"
 	GitHubRepo    string     `json:"githubRepo,omitempty"` // "owner/name" if mirrored, else ""
 	PublishMode   string     `json:"publishMode"`          // "direct" | "request"
@@ -162,7 +162,7 @@ type TreeHandle struct {
 type CreateSiteInput struct {
 	Handle      Handle     // validated + reserved-word checked inside CreateSite
 	OwnerID     uuid.UUID  // auth subject; stamped as initial owner + owner site_members row
-	Visibility  string     // "public"|"internal"|"private"; default "private"
+	Visibility  string     // "public"|"members"|"private"; default "private"
 	PublishMode string     // "direct"|"request"; default "direct"
 	Description string     // optional
 	Zip         *ZipSource // optional initial content; nil => empty draft w/ placeholder index.html

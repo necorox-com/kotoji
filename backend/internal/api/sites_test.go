@@ -188,7 +188,7 @@ func TestUpdateSite(t *testing.T) {
 	owner := e.newUser()
 	e.createSite("settings-site", owner)
 
-	vis := openapi.Internal
+	vis := openapi.Members
 	rec := e.request(http.MethodPatch, "/api/sites/settings-site").as(owner).
 		json(openapi.UpdateSiteRequest{Visibility: &vis}).do()
 	if rec.Code != http.StatusOK {
@@ -197,8 +197,8 @@ func TestUpdateSite(t *testing.T) {
 	if len(e.store.settingsUpdates) != 1 {
 		t.Fatalf("settings updates = %d, want 1", len(e.store.settingsUpdates))
 	}
-	if got := e.store.settingsUpdates[0].Visibility; got != gen.SiteVisibilityInternal {
-		t.Fatalf("visibility = %q, want internal", got)
+	if got := e.store.settingsUpdates[0].Visibility; got != gen.SiteVisibilityMembers {
+		t.Fatalf("visibility = %q, want members", got)
 	}
 }
 

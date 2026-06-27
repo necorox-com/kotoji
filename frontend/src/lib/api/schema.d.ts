@@ -575,7 +575,7 @@ export interface components {
         /** @enum {string} */
         SiteRole: "owner" | "editor" | "viewer";
         /** @enum {string} */
-        SiteVisibility: "public" | "internal" | "private";
+        SiteVisibility: "public" | "members" | "private";
         /** @enum {string} */
         PublishMode: "direct" | "request";
         /** @enum {string} */

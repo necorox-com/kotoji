@@ -101,5 +101,61 @@ func TestMigrationsUpDownRoundTrip(t *testing.T) {
 	require.NoError(t, goose.DownTo(sqlDB, embeddedMigrationsDir, 0), "goose down")
 }
 
+// TestSiteVisibilityRenameMembers proves the 0005 migration renamed the
+// site_visibility enum VALUE 'internal' -> 'members': after a full goose up the
+// enum carries 'members' (and NOT 'internal'), and the Down rename reverses it.
+// A bare 'members'::site_visibility cast round-trips to confirm the label is a
+// real, usable enum member (the rename also carries any existing 'internal' rows
+// in place — see 0005_rename_visibility_members.sql).
+func TestSiteVisibilityRenameMembers(t *testing.T) {
+	sqlDB := openSQL(t)
+
+	require.NoError(t, goose.SetDialect("postgres"))
+	goose.SetBaseFS(migrations.FS)
+
+	require.NoError(t, goose.DownTo(sqlDB, embeddedMigrationsDir, 0), "reset to baseline")
+	require.NoError(t, goose.Up(sqlDB, embeddedMigrationsDir), "goose up")
+
+	// labels() reads the current ordered set of site_visibility enum labels.
+	labels := func() []string {
+		rows, err := sqlDB.Query(
+			`SELECT e.enumlabel FROM pg_enum e
+			   JOIN pg_type t ON t.oid = e.enumtypid
+			  WHERE t.typname = 'site_visibility'
+			  ORDER BY e.enumsortorder`)
+		require.NoError(t, err)
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var l string
+			require.NoError(t, rows.Scan(&l))
+			out = append(out, l)
+		}
+		require.NoError(t, rows.Err())
+		return out
+	}
+
+	// After 0005 the middle tier is 'members'; 'public'/'private' are unchanged.
+	require.Equal(t, []string{"public", "members", "private"}, labels(),
+		"site_visibility must read [public, members, private] after 0005")
+
+	// 'members' must be a usable enum value (round-trips through a cast).
+	var got string
+	require.NoError(t,
+		sqlDB.QueryRow(`SELECT 'members'::site_visibility`).Scan(&got))
+	require.Equal(t, "members", got)
+
+	// The pre-rename label must be gone.
+	require.NotContains(t, labels(), "internal",
+		"the old 'internal' visibility label must not survive 0005")
+
+	// Reversing only 0005 (Down) restores 'internal' — symmetric rename.
+	require.NoError(t, goose.Down(sqlDB, embeddedMigrationsDir), "goose down one (0005)")
+	require.Equal(t, []string{"public", "internal", "private"}, labels(),
+		"0005 Down must rename 'members' back to 'internal'")
+
+	require.NoError(t, goose.DownTo(sqlDB, embeddedMigrationsDir, 0), "goose down")
+}
+
 // ensure the pgx stdlib driver is linked (registers "pgx" for database/sql).
 var _ = stdlib.GetDefaultDriver

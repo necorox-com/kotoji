@@ -88,9 +88,9 @@ const (
 
 // Defines values for SiteVisibility.
 const (
-	Internal SiteVisibility = "internal"
-	Private  SiteVisibility = "private"
-	Public   SiteVisibility = "public"
+	Members SiteVisibility = "members"
+	Private SiteVisibility = "private"
+	Public  SiteVisibility = "public"
 )
 
 // Defines values for TokenScope.

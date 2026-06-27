@@ -65,7 +65,7 @@ type Store interface {
 type StoreCreateSite struct {
 	Handle      string
 	OwnerID     uuid.UUID
-	Visibility  string // "public"|"internal"|"private"
+	Visibility  string // "public"|"members"|"private"
 	PublishMode string // "direct"|"request"
 	GitHubRepo  *string
 	WebRoot     string

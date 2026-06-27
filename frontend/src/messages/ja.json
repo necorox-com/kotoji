@@ -325,7 +325,7 @@
     "title": "設定",
     "visibility": "公開範囲",
     "visibilityPublic": "公開",
-    "visibilityInternal": "メンバー",
+    "visibilityMembers": "メンバー",
     "visibilityPrivate": "非公開",
     "publishMode": "公開方法",
     "publishModeDirect": "直接公開",

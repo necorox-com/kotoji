@@ -59,7 +59,7 @@ import type {
   SiteVisibility,
 } from "@/lib/api/types";
 
-const VISIBILITY_VALUES: SiteVisibility[] = ["private", "internal", "public"];
+const VISIBILITY_VALUES: SiteVisibility[] = ["private", "members", "public"];
 const PUBLISH_MODES: PublishMode[] = ["direct", "request"];
 const DEFAULT_BASE_DOMAIN = "hosting.example.com";
 const HANDLE_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -201,8 +201,8 @@ export default function SettingsPage({ params }: SiteParams) {
                   t(
                     v === "public"
                       ? "visibilityPublic"
-                      : v === "internal"
-                        ? "visibilityInternal"
+                      : v === "members"
+                        ? "visibilityMembers"
                         : "visibilityPrivate"
                   )
                 }
@@ -214,8 +214,8 @@ export default function SettingsPage({ params }: SiteParams) {
                   {t(
                     v === "public"
                       ? "visibilityPublic"
-                      : v === "internal"
-                        ? "visibilityInternal"
+                      : v === "members"
+                        ? "visibilityMembers"
                         : "visibilityPrivate"
                   )}
                 </SelectItem>

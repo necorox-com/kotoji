@@ -103,9 +103,9 @@ func (ns NullSiteRole) Value() (driver.Value, error) {
 type SiteVisibility string
 
 const (
-	SiteVisibilityPublic   SiteVisibility = "public"
-	SiteVisibilityInternal SiteVisibility = "internal"
-	SiteVisibilityPrivate  SiteVisibility = "private"
+	SiteVisibilityPublic  SiteVisibility = "public"
+	SiteVisibilityMembers SiteVisibility = "members"
+	SiteVisibilityPrivate SiteVisibility = "private"
 )
 
 func (e *SiteVisibility) Scan(src interface{}) error {
