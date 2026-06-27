@@ -126,9 +126,15 @@ body.lang-en .lang-en { display: revert; }
   padding: 6px 12px;
   cursor: pointer;
   white-space: nowrap;
-  /* Never let the flex header squeeze the toggle to zero width (the wider
-     English nav would otherwise collapse this last flex item). */
+  /* Bulletproof box: an inline-flex control with explicit minimums can never be
+     squeezed to zero by the flex header (the wider English nav was collapsing
+     this last flex item to 0x0). */
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 4.5em;
+  min-height: 2.2em;
 }
 .lang-toggle:hover { color: var(--fg); border-color: var(--accent); background: var(--accent-soft); }
 /* The toggle's two labels live inside as .lang-ja / .lang-en spans, so the
