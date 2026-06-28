@@ -143,8 +143,9 @@ swap the `build:` blocks for the published
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml up -d
 ```
 
-It composes with the edge/TLS overlays the same way; pin a tag with
-`KOTOJI_IMAGE_TAG` (defaults to `latest`).
+It composes with the edge/TLS overlays the same way; pin a version with
+`KOTOJI_IMAGE_TAG` (e.g. `0.1.0` — note the git tag is `v0.1.0` but the image
+tag drops the `v`; defaults to `latest`).
 
 ## Status
 

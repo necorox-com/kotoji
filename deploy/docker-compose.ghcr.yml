@@ -10,9 +10,11 @@
 # publishes. Everything else — env, volumes, ports, healthchecks, depends_on —
 # is inherited UNCHANGED from the base; only the image source changes.
 #
-# Images are published by .github/workflows/release.yml on each v* tag, tagged
-# with the semver version AND `latest`. Pin to a specific tag for reproducible
-# deploys (e.g. :v0.1.0); :latest tracks the newest release.
+# Images are published by .github/workflows/release.yml on each v* git tag,
+# tagged with the SEMVER VERSION — the leading `v` is dropped, so git tag
+# `v0.1.0` publishes image tag `0.1.0` (NOT `v0.1.0`) — AND `latest`. Pin a
+# version for reproducible deploys (e.g. KOTOJI_IMAGE_TAG=0.1.0); :latest tracks
+# the newest release.
 #
 # Compose this with the edge/tls overlays exactly as you would the base, e.g.:
 #   docker compose -f docker-compose.yml -f docker-compose.ghcr.yml \

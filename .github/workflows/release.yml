@@ -83,7 +83,7 @@ jobs:
             type=semver,pattern={{version}}
             type=ref,event=branch
           # `latest=auto`: docker/metadata-action adds :latest on any git-tag push
-          # (so a v0.1.0 tag publishes both :v0.1.0 and :latest — the tag the GHCR
+          # (so a v0.1.0 git tag publishes both :0.1.0 — `v` dropped — and :latest, the tag the GHCR
           # overlay defaults to) AND on the default branch for the dispatch case.
           flavor: |
             latest=auto
